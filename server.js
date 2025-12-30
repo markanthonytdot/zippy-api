@@ -75,9 +75,11 @@ app.post("/admin/init", async (req, res) => {
       create index if not exists idx_saved_items_user_updated
         on saved_items(user_id, updated_at);
 
-      create unique index if not exists uq_saved_items_user_kind_ext
-        on saved_items(user_id, kind, external_id)
-        where deleted_at is null;
+      drop index if exists uq_saved_items_user_kind_ext;
+
+create unique index if not exists uq_saved_items_user_kind_ext
+  on saved_items(user_id, kind, external_id);
+
     `);
 
     return res.json({ ok: true });
