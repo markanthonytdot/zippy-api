@@ -38,7 +38,7 @@ app.get("/health/db", async (req, res) => {
 });
 
 // ---------------------------------------------
-// Root route (optional)
+// Root route
 // ---------------------------------------------
 app.get("/", (req, res) => {
   res.json({
@@ -49,7 +49,7 @@ app.get("/", (req, res) => {
 });
 
 // ---------------------------------------------
-// One-time DB init (you already ran this)
+// One-time DB init
 // ---------------------------------------------
 app.post("/admin/init", async (req, res) => {
   if (!dbPool) {
@@ -98,12 +98,21 @@ function requireUserId(req, res) {
   return userId;
 }
 
+function requireDb(req, res) {
+  if (!dbPool) {
+    res.status(500).json({ ok: false, error: "DATABASE_URL not set" });
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------
 // List saved items
 // ---------------------------------------------
 app.get("/me/saved", async (req, res) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
+  if (!requireDb(req, res)) return;
 
   const kind = String(req.query.kind || "").trim();
 
@@ -140,6 +149,7 @@ app.get("/me/saved", async (req, res) => {
 app.post("/me/saved", async (req, res) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
+  if (!requireDb(req, res)) return;
 
   const kind = String(req.body?.kind || "").trim();
   const externalId = String(req.body?.externalId || "").trim();
@@ -175,6 +185,7 @@ app.post("/me/saved", async (req, res) => {
 app.delete("/me/saved/:kind/:externalId", async (req, res) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
+  if (!requireDb(req, res)) return;
 
   const kind = String(req.params.kind || "").trim();
   const externalId = String(req.params.externalId || "").trim();
@@ -203,6 +214,7 @@ app.delete("/me/saved/:kind/:externalId", async (req, res) => {
 // Start server
 // ---------------------------------------------
 const port = process.env.PORT || 4001;
+
 app.listen(port, "0.0.0.0", () => {
   console.log("zippy-api listening on port", port);
 });
