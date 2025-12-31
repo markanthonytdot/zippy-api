@@ -9,8 +9,9 @@ app.use(express.json());
 // Basic health
 // ---------------------------------------------
 app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "zippy-api" });
+  res.json({ ok: true, service: "zippy-api", version: "authdebug-1" });
 });
+
 
 // ---------------------------------------------
 // Database pool
