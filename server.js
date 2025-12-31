@@ -1,6 +1,7 @@
 const express = require("express");
 const { Pool } = require("pg");
 const app = express();
+const jwt = require("jsonwebtoken");
 
 app.use(express.json());
 
@@ -107,6 +108,38 @@ function requireDb(req, res) {
   }
   return true;
 }
+// ---------------------------------------------
+// Auth (dev stub)
+// ---------------------------------------------
+app.post("/auth/apple", (req, res) => {
+  const mode = String(process.env.AUTH_MODE || "dev").toLowerCase();
+
+  try {
+    if (mode !== "dev") {
+      return res.status(501).json({ ok: false, error: "prod mode not implemented yet" });
+    }
+
+    const devSub = String(req.body?.devSub || "dev-user-001");
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
+    }
+
+    const token = jwt.sign(
+      { sub: devSub, uid: devSub },
+      process.env.JWT_SECRET,
+      {
+        issuer: process.env.JWT_ISSUER || "zippy-api",
+        audience: process.env.JWT_AUDIENCE || "zippy-ios",
+        expiresIn: "30d",
+      }
+    );
+
+    return res.json({ ok: true, token });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message || "auth failed" });
+  }
+});
 
 // ---------------------------------------------
 // List saved items
