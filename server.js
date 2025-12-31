@@ -54,8 +54,16 @@ async function signZippyToken(subject) {
 // Basic health
 // ---------------------------------------------
 app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "zippy-api" });
+  res.json({
+    ok: true,
+    service: "zippy-api",
+    authMode: String(process.env.AUTH_MODE || "dev"),
+    hasJwtSecret: !!process.env.JWT_SECRET,
+    jwtIssuer: String(process.env.JWT_ISSUER || ""),
+    jwtAudience: String(process.env.JWT_AUDIENCE || ""),
+  });
 });
+
 
 // ---------------------------------------------
 // Database pool
