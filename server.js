@@ -92,13 +92,40 @@ app.post("/admin/init", async (req, res) => {
 // Helpers
 // ---------------------------------------------
 function requireUserId(req, res) {
+  // 1) prefer JWT
+  const auth = String(req.headers.authorization || "");
+  if (auth.toLowerCase().startsWith("bearer ")) {
+    const token = auth.slice(7).trim();
+    try {
+      if (!process.env.JWT_SECRET) {
+        res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
+        return null;
+      }
+      const decoded = jwt.verify(token, process.env.JWT_SECRET, {
+        issuer: process.env.JWT_ISSUER || "zippy-api",
+        audience: process.env.JWT_AUDIENCE || "zippy-ios",
+      });
+
+      const sub = String(decoded?.sub || "").trim();
+      if (sub) return sub;
+
+      res.status(401).json({ ok: false, error: "JWT missing sub" });
+      return null;
+    } catch (e) {
+      // if JWT fails, fall back to x-user-id (dev safety)
+      console.log("[Auth] jwt verify failed:", e?.message || e);
+    }
+  }
+
+  // 2) fallback: device id
   const userId = String(req.headers["x-user-id"] || "").trim();
   if (!userId) {
-    res.status(401).json({ ok: false, error: "Missing x-user-id header" });
+    res.status(401).json({ ok: false, error: "Missing auth" });
     return null;
   }
   return userId;
 }
+
 
 function requireDb(req, res) {
   if (!dbPool) {
