@@ -78,9 +78,8 @@ app.post("/admin/init", async (req, res) => {
 
       drop index if exists uq_saved_items_user_kind_ext;
 
-create unique index if not exists uq_saved_items_user_kind_ext
-  on saved_items(user_id, kind, external_id);
-
+      create unique index if not exists uq_saved_items_user_kind_ext
+        on saved_items(user_id, kind, external_id);
     `);
 
     return res.json({ ok: true });
@@ -108,10 +107,23 @@ function requireDb(req, res) {
   }
   return true;
 }
+
+function getAuthUser(req) {
+  const auth = String(req.headers.authorization || "");
+  if (auth.toLowerCase().startsWith("bearer ")) {
+    return { mode: "jwt", value: auth.slice(7, 20) + "..." };
+  }
+  const uid = String(req.headers["x-user-id"] || "");
+  if (uid) return { mode: "x-user-id", value: uid };
+  return { mode: "none", value: "" };
+}
+
 // ---------------------------------------------
 // Auth (dev stub)
 // ---------------------------------------------
 app.post("/auth/apple", (req, res) => {
+  console.log("[AuthCheck] /auth/apple", getAuthUser(req));
+
   const mode = String(process.env.AUTH_MODE || "dev").toLowerCase();
 
   try {
@@ -145,6 +157,8 @@ app.post("/auth/apple", (req, res) => {
 // List saved items
 // ---------------------------------------------
 app.get("/me/saved", async (req, res) => {
+  console.log("[AuthCheck] /me/saved", getAuthUser(req));
+
   const userId = requireUserId(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
