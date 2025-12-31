@@ -92,15 +92,23 @@ app.post("/admin/init", async (req, res) => {
 // Helpers
 // ---------------------------------------------
 function requireUserId(req, res) {
-  // 1) prefer JWT
+  // express lowercases header keys
   const auth = String(req.headers.authorization || "");
-  if (auth.toLowerCase().startsWith("bearer ")) {
-    const token = auth.slice(7).trim();
+
+  // debug (temporary)
+  console.log("[AuthDebug] headerKeys=", Object.keys(req.headers));
+  console.log("[AuthDebug] authorization=", auth ? auth.slice(0, 24) + "..." : "(none)");
+
+  // 1) prefer JWT
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (m) {
+    const token = m[1].trim();
     try {
       if (!process.env.JWT_SECRET) {
         res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
         return null;
       }
+
       const decoded = jwt.verify(token, process.env.JWT_SECRET, {
         issuer: process.env.JWT_ISSUER || "zippy-api",
         audience: process.env.JWT_AUDIENCE || "zippy-ios",
@@ -126,7 +134,6 @@ function requireUserId(req, res) {
   return userId;
 }
 
-
 function requireDb(req, res) {
   if (!dbPool) {
     res.status(500).json({ ok: false, error: "DATABASE_URL not set" });
@@ -137,11 +144,15 @@ function requireDb(req, res) {
 
 function getAuthUser(req) {
   const auth = String(req.headers.authorization || "");
-  if (auth.toLowerCase().startsWith("bearer ")) {
-    return { mode: "jwt", value: auth.slice(7, 20) + "..." };
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (m) {
+    const tok = m[1].trim();
+    return { mode: "jwt", value: tok.slice(0, 12) + "..." };
   }
+
   const uid = String(req.headers["x-user-id"] || "");
   if (uid) return { mode: "x-user-id", value: uid };
+
   return { mode: "none", value: "" };
 }
 
@@ -155,7 +166,9 @@ app.post("/auth/apple", (req, res) => {
 
   try {
     if (mode !== "dev") {
-      return res.status(501).json({ ok: false, error: "prod mode not implemented yet" });
+      return res
+        .status(501)
+        .json({ ok: false, error: "prod mode not implemented yet" });
     }
 
     const devSub = String(req.body?.devSub || "dev-user-001");
@@ -164,15 +177,11 @@ app.post("/auth/apple", (req, res) => {
       return res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
     }
 
-    const token = jwt.sign(
-      { sub: devSub, uid: devSub },
-      process.env.JWT_SECRET,
-      {
-        issuer: process.env.JWT_ISSUER || "zippy-api",
-        audience: process.env.JWT_AUDIENCE || "zippy-ios",
-        expiresIn: "30d",
-      }
-    );
+    const token = jwt.sign({ sub: devSub, uid: devSub }, process.env.JWT_SECRET, {
+      issuer: process.env.JWT_ISSUER || "zippy-api",
+      audience: process.env.JWT_AUDIENCE || "zippy-ios",
+      expiresIn: "30d",
+    });
 
     return res.json({ ok: true, token });
   } catch (e) {
