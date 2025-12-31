@@ -1,17 +1,61 @@
 const express = require("express");
 const { Pool } = require("pg");
 const app = express();
-const jwt = require("jsonwebtoken");
 
 app.use(express.json());
+
+// ---------------------------------------------
+// Auth config
+// ---------------------------------------------
+const AUTH_MODE = String(process.env.AUTH_MODE || "dev").toLowerCase();
+const JWT_SECRET = process.env.JWT_SECRET || "";
+const JWT_ISSUER = process.env.JWT_ISSUER || "zippy-api";
+const JWT_AUDIENCE = process.env.JWT_AUDIENCE || "zippy-ios";
+const APPLE_CLIENT_ID = process.env.APPLE_CLIENT_ID || "";
+const APPLE_ISSUER = "https://appleid.apple.com";
+const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
+
+// jose lazy loader (works in CommonJS)
+let josePromise = null;
+function getJose() {
+  if (!josePromise) {
+    josePromise = import("jose");
+  }
+  return josePromise;
+}
+
+// cache Apple JWKS
+let appleJwks = null;
+async function getAppleJwks() {
+  if (!appleJwks) {
+    const { createRemoteJWKSet } = await getJose();
+    appleJwks = createRemoteJWKSet(new URL(APPLE_JWKS_URL));
+  }
+  return appleJwks;
+}
+
+// sign our own Zippy JWT (HS256)
+async function signZippyToken(subject) {
+  if (!JWT_SECRET) return null;
+  const { SignJWT } = await getJose();
+  const encoder = new TextEncoder();
+
+  return new SignJWT({ uid: subject })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setSubject(subject)
+    .setIssuer(JWT_ISSUER)
+    .setAudience(JWT_AUDIENCE)
+    .setIssuedAt()
+    .setExpirationTime("30d")
+    .sign(encoder.encode(JWT_SECRET));
+}
 
 // ---------------------------------------------
 // Basic health
 // ---------------------------------------------
 app.get("/health", (req, res) => {
-  res.json({ ok: true, service: "zippy-api", version: "authdebug-1" });
+  res.json({ ok: true, service: "zippy-api" });
 });
-
 
 // ---------------------------------------------
 // Database pool
@@ -92,41 +136,38 @@ app.post("/admin/init", async (req, res) => {
 // ---------------------------------------------
 // Helpers
 // ---------------------------------------------
-function requireUserId(req, res) {
-  // express lowercases header keys
-  const auth = String(req.headers.authorization || "");
-
-  // debug (temporary)
-  console.log("[AuthDebug] headerKeys=", Object.keys(req.headers));
-  console.log("[AuthDebug] authorization=", auth ? auth.slice(0, 24) + "..." : "(none)");
-
+async function requireUserId(req, res) {
   // 1) prefer JWT
+  const auth = String(req.headers.authorization || "");
   const m = auth.match(/^Bearer\s+(.+)$/i);
+
   if (m) {
     const token = m[1].trim();
     try {
-      if (!process.env.JWT_SECRET) {
+      if (!JWT_SECRET) {
         res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
         return null;
       }
 
-      const decoded = jwt.verify(token, process.env.JWT_SECRET, {
-        issuer: process.env.JWT_ISSUER || "zippy-api",
-        audience: process.env.JWT_AUDIENCE || "zippy-ios",
+      const { jwtVerify } = await getJose();
+      const encoder = new TextEncoder();
+
+      const { payload } = await jwtVerify(token, encoder.encode(JWT_SECRET), {
+        issuer: JWT_ISSUER,
+        audience: JWT_AUDIENCE,
       });
 
-      const sub = String(decoded?.sub || "").trim();
+      const sub = String(payload?.sub || "").trim();
       if (sub) return sub;
 
       res.status(401).json({ ok: false, error: "JWT missing sub" });
       return null;
     } catch (e) {
-      // if JWT fails, fall back to x-user-id (dev safety)
       console.log("[Auth] jwt verify failed:", e?.message || e);
     }
   }
 
-  // 2) fallback: device id
+  // 2) fallback: x-user-id
   const userId = String(req.headers["x-user-id"] || "").trim();
   if (!userId) {
     res.status(401).json({ ok: false, error: "Missing auth" });
@@ -143,50 +184,64 @@ function requireDb(req, res) {
   return true;
 }
 
-function getAuthUser(req) {
-  const auth = String(req.headers.authorization || "");
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (m) {
-    const tok = m[1].trim();
-    return { mode: "jwt", value: tok.slice(0, 12) + "..." };
+// ---------------------------------------------
+// Sign in with Apple (dev + prod)
+// ---------------------------------------------
+app.post("/auth/apple", async (req, res) => {
+  // DEV MODE
+  if (AUTH_MODE !== "prod") {
+    const devSub = String(req.body?.devSub || "").trim();
+    if (!devSub) {
+      return res.status(400).json({ ok: false, error: "Missing devSub" });
+    }
+    if (!JWT_SECRET) {
+      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
+
+    try {
+      const token = await signZippyToken(devSub);
+      return res.json({ ok: true, token, mode: "dev" });
+    } catch (e) {
+      console.warn("Failed to mint dev token:", e?.message || e);
+      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
   }
 
-  const uid = String(req.headers["x-user-id"] || "");
-  if (uid) return { mode: "x-user-id", value: uid };
+  // PROD MODE
+  if (!APPLE_CLIENT_ID || !JWT_SECRET) {
+    console.warn("Missing APPLE_CLIENT_ID or JWT_SECRET for prod auth");
+    return res.status(500).json({ ok: false, error: "Server misconfigured" });
+  }
 
-  return { mode: "none", value: "" };
-}
-
-// ---------------------------------------------
-// Auth (dev stub)
-// ---------------------------------------------
-app.post("/auth/apple", (req, res) => {
-  console.log("[AuthCheck] /auth/apple", getAuthUser(req));
-
-  const mode = String(process.env.AUTH_MODE || "dev").toLowerCase();
+  const identityToken = String(req.body?.identityToken || "").trim();
+  if (!identityToken) {
+    return res.status(400).json({ ok: false, error: "Missing identityToken" });
+  }
 
   try {
-    if (mode !== "dev") {
-      return res
-        .status(501)
-        .json({ ok: false, error: "prod mode not implemented yet" });
-    }
+    const { jwtVerify } = await getJose();
+    const jwks = await getAppleJwks();
 
-    const devSub = String(req.body?.devSub || "dev-user-001");
-
-    if (!process.env.JWT_SECRET) {
-      return res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
-    }
-
-    const token = jwt.sign({ sub: devSub, uid: devSub }, process.env.JWT_SECRET, {
-      issuer: process.env.JWT_ISSUER || "zippy-api",
-      audience: process.env.JWT_AUDIENCE || "zippy-ios",
-      expiresIn: "30d",
+    const { payload } = await jwtVerify(identityToken, jwks, {
+      issuer: APPLE_ISSUER,
+      audience: APPLE_CLIENT_ID,
     });
 
-    return res.json({ ok: true, token });
+    const appleSub = String(payload?.sub || "").trim();
+    if (!appleSub) {
+      return res.status(401).json({ ok: false, error: "Invalid identityToken" });
+    }
+
+    const token = await signZippyToken(appleSub);
+    if (!token) {
+      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
+
+    return res.json({ ok: true, token, mode: "prod" });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message || "auth failed" });
+    const reason = e?.code || e?.name || e?.message || "unknown";
+    console.warn("Apple identityToken verification failed:", reason);
+    return res.status(401).json({ ok: false, error: "Invalid identityToken" });
   }
 });
 
@@ -194,9 +249,7 @@ app.post("/auth/apple", (req, res) => {
 // List saved items
 // ---------------------------------------------
 app.get("/me/saved", async (req, res) => {
-  console.log("[AuthCheck] /me/saved", getAuthUser(req));
-
-  const userId = requireUserId(req, res);
+  const userId = await requireUserId(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
@@ -233,7 +286,7 @@ app.get("/me/saved", async (req, res) => {
 // Save (upsert)
 // ---------------------------------------------
 app.post("/me/saved", async (req, res) => {
-  const userId = requireUserId(req, res);
+  const userId = await requireUserId(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
@@ -269,7 +322,7 @@ app.post("/me/saved", async (req, res) => {
 // Delete (soft delete)
 // ---------------------------------------------
 app.delete("/me/saved/:kind/:externalId", async (req, res) => {
-  const userId = requireUserId(req, res);
+  const userId = await requireUserId(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
@@ -304,3 +357,4 @@ const port = process.env.PORT || 4001;
 app.listen(port, "0.0.0.0", () => {
   console.log("zippy-api listening on port", port);
 });
+// proof
