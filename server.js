@@ -112,24 +112,82 @@ app.get("/", (req, res) => {
   });
 });
 // ---------------------------------------------
-// Places API (v1) - stubs (auth gated)
+// Places API (v1) - photo proxy (auth + limits)
 // ---------------------------------------------
 app.get("/v1/places/photo", async (req, res) => {
   const userId = await requireUserId(req, res);
   if (!userId) return;
 
-  const ref = String(req.query.ref || "").trim();
-  const maxWidth = Number(req.query.maxWidth || 800);
+  const apiKey = String(process.env.GOOGLE_PLACES_API_KEY || "").trim();
+  if (!apiKey) {
+    return res.status(500).json({ ok: false, error: "GOOGLE_PLACES_API_KEY not set" });
+  }
 
-  return res.json({
-    ok: true,
-    stub: true,
-    endpoint: "photo",
-    userId,
-    ref: ref ? "[provided]" : "",
-    maxWidth,
-  });
+  const ref = String(req.query.ref || "").trim();
+  if (!ref) {
+    return res.status(400).json({ ok: false, error: "Missing ref" });
+  }
+
+  let maxWidth = Number(req.query.maxWidth || 800);
+  if (!Number.isFinite(maxWidth)) maxWidth = 800;
+
+  // clamp to avoid expensive giant images
+  if (maxWidth < 200) maxWidth = 200;
+  if (maxWidth > 1200) maxWidth = 1200;
+
+  const plan = getPlanForNow(req);
+  const limit = enforcePhotoLimits(userId, plan);
+  if (!limit.ok) {
+    return res.status(limit.status).json({ ok: false, error: limit.error });
+  }
+
+  // cache key per ref+size
+  const cacheKey = `${ref}:${maxWidth}`;
+  const cached = getCachedPhoto(cacheKey);
+  if (cached) {
+    res.setHeader("Content-Type", cached.contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day client cache hint
+    return res.send(cached.buf);
+  }
+
+  // call Google Places Photo
+  const url =
+    `https://maps.googleapis.com/maps/api/place/photo` +
+    `?maxwidth=${encodeURIComponent(String(maxWidth))}` +
+    `&photoreference=${encodeURIComponent(ref)}` +
+    `&key=${encodeURIComponent(apiKey)}`;
+
+  try {
+    const r = await fetch(url, { redirect: "follow" });
+
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      return res.status(502).json({
+        ok: false,
+        error: `Google photo fetch failed (${r.status})`,
+        detail: text ? text.slice(0, 200) : "",
+      });
+    }
+
+    const contentType = r.headers.get("content-type") || "image/jpeg";
+    const buf = Buffer.from(await r.arrayBuffer());
+
+    // store in cache (7 days)
+    photoCache.set(cacheKey, {
+      buf,
+      contentType,
+      expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day client cache hint
+    return res.send(buf);
+  } catch (e) {
+    console.log("[PlacesPhoto] error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: "Server error fetching photo" });
+  }
 });
+
 
 app.get("/v1/places/details", async (req, res) => {
   const userId = await requireUserId(req, res);
@@ -197,6 +255,76 @@ app.post("/admin/init", async (req, res) => {
     return res.status(500).json({ ok: false, error: e.message });
   }
 });
+// ---------------------------------------------
+// Simple in-memory rate limits + cache (starter)
+// NOTE: resets when server restarts, good for MVP
+// ---------------------------------------------
+const photoMinuteCounters = new Map(); // key: userId:minute -> count
+const photoDailyCounters = new Map();  // key: userId:YYYY-MM-DD -> count
+const photoCache = new Map();          // key: ref:maxWidth -> { buf, contentType, expiresAt }
+
+function nowMinuteKey() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}T${String(d.getUTCHours()).padStart(2,"0")}:${String(d.getUTCMinutes()).padStart(2,"0")}`;
+}
+
+function todayKey() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
+}
+
+function getEnvInt(name, fallback) {
+  const raw = process.env[name];
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function getPlanForNow(req) {
+  // TODO: wire real free/paid from DB or subscription
+  // For now: treat all authenticated users as "paid"
+  return "paid";
+}
+
+function enforcePhotoLimits(userId, plan) {
+  const minute = nowMinuteKey();
+  const day = todayKey();
+
+  const rpmFree = getEnvInt("PLACES_PHOTO_RPM_FREE", 1);
+  const rpmPaid = getEnvInt("PLACES_PHOTO_RPM_PAID", 60);
+  const dailyFree = getEnvInt("PLACES_PHOTO_DAILY_FREE", 1);
+  const dailyPaid = getEnvInt("PLACES_PHOTO_DAILY_PAID", 120);
+
+  const rpmLimit = plan === "paid" ? rpmPaid : rpmFree;
+  const dailyLimit = plan === "paid" ? dailyPaid : dailyFree;
+
+  const minuteKey = `${userId}:${minute}`;
+  const dayKey = `${userId}:${day}`;
+
+  const minuteCount = (photoMinuteCounters.get(minuteKey) || 0) + 1;
+  const dayCount = (photoDailyCounters.get(dayKey) || 0) + 1;
+
+  if (rpmLimit >= 0 && minuteCount > rpmLimit) {
+    return { ok: false, status: 429, error: `Rate limit exceeded (photos per minute). Try again shortly.` };
+  }
+  if (dailyLimit >= 0 && dayCount > dailyLimit) {
+    return { ok: false, status: 429, error: `Daily photo limit reached. Try again tomorrow.` };
+  }
+
+  photoMinuteCounters.set(minuteKey, minuteCount);
+  photoDailyCounters.set(dayKey, dayCount);
+
+  return { ok: true, minuteCount, dayCount, rpmLimit, dailyLimit };
+}
+
+function getCachedPhoto(cacheKey) {
+  const hit = photoCache.get(cacheKey);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    photoCache.delete(cacheKey);
+    return null;
+  }
+  return hit;
+}
 
 // ---------------------------------------------
 // Helpers
