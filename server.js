@@ -171,6 +171,8 @@ app.get("/", (req, res) => {
     service: "zippy-api",
     routes: ["/health", "/health/db"],
   });
+});
+
 // ---------------------------------------------
 // Places Details (proxy)
 // GET /v1/places/details?placeId=...
@@ -266,6 +268,41 @@ app.get("/v1/places/details", async (req, res) => {
   }
 });
 
+// ---------------------------------------------
+// Places Photo (proxy)
+// GET /v1/places/photo?ref=...&maxWidth=...
+// ---------------------------------------------
+app.get("/v1/places/photo", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const apiKey = GOOGLE_PLACES_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ ok: false, error: "GOOGLE_PLACES_API_KEY not set" });
+  }
+
+  const ref = String(req.query.ref || "").trim();
+  if (!ref) {
+    return res.status(400).json({ ok: false, error: "Missing ref" });
+  }
+
+  const maxWidthRaw = String(req.query.maxWidth || "").trim();
+  const maxWidthNum = maxWidthRaw ? Number(maxWidthRaw) : 800;
+  const maxWidth = Number.isFinite(maxWidthNum) && maxWidthNum > 0 ? Math.round(maxWidthNum) : 800;
+  const cacheKey = `${ref}:${maxWidth}`;
+
+  const cached = getCachedPhoto(cacheKey);
+  if (cached) {
+    res.setHeader("Content-Type", cached.contentType || "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day client cache hint
+    return res.send(cached.buf);
+  }
+
+  const plan = getPlanForNow(req);
+  const lim = enforcePhotoLimits(userId, plan);
+  if (!lim.ok) {
+    return res.status(lim.status).json({ ok: false, error: lim.error });
+  }
 
   // call Google Places Photo
   const url =
@@ -305,21 +342,6 @@ app.get("/v1/places/details", async (req, res) => {
   }
 });
 
-
-app.get("/v1/places/details", async (req, res) => {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
-
-  const placeId = String(req.query.placeId || "").trim();
-
-  return res.json({
-    ok: true,
-    stub: true,
-    endpoint: "details",
-    userId,
-    placeId: placeId ? "[provided]" : "",
-  });
-});
 
 app.post("/v1/places/eta", async (req, res) => {
   const userId = await requireUserId(req, res);
@@ -666,5 +688,5 @@ const port = process.env.PORT || 4001;
 
 app.listen(port, "0.0.0.0", () => {
   console.log("zippy-api listening on port", port);
+  console.log("boot ok");
 });
-// proof
