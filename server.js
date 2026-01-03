@@ -63,6 +63,16 @@ app.get("/health", (req, res) => {
     jwtAudience: String(process.env.JWT_AUDIENCE || ""),
   });
 });
+// ---------------------------------------------
+// Version (deploy test)
+// ---------------------------------------------
+app.get("/version", (req, res) => {
+  res.json({
+    ok: true,
+    service: "zippy-api",
+    ts: new Date().toISOString(),
+  });
+});
 
 
 // ---------------------------------------------
