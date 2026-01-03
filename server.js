@@ -55,12 +55,18 @@ function makeFixedWindowLimiter({ windowMs, max }) {
 
 // caches
 const placesDetailsCache = makeTtlCache(); // key = placeId
+const placesDetailsPhotosCache = makeTtlCache(); // key = placeId:max
 
 // limiters (tune later)
 const placesDetailsLimiter = makeFixedWindowLimiter({
   windowMs: 60 * 1000,
   max: Number(process.env.PLACES_DETAILS_RPM || 30), // per user per minute
 });
+const placesDetailsPhotosLimiter = makeFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: Number(process.env.PLACES_DETAILS_PHOTOS_RPM || 20), // per user per minute
+});
+const placesDetailsPhotosDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
 
 // Google key (server-only)
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
@@ -269,6 +275,93 @@ app.get("/v1/places/details", async (req, res) => {
 });
 
 // ---------------------------------------------
+// Places Details Photos (proxy)
+// GET /v1/places/details/photos?placeId=...&max=...
+// ---------------------------------------------
+app.get("/v1/places/details/photos", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  if (!GOOGLE_PLACES_API_KEY) {
+    return res.status(500).json({ ok: false, error: "GOOGLE_PLACES_API_KEY not set" });
+  }
+
+  const placeId = String(req.query.placeId || "").trim();
+  if (!placeId) {
+    return res.status(400).json({ ok: false, error: "Missing placeId" });
+  }
+
+  const maxRaw = String(req.query.max || "").trim();
+  const maxNum = maxRaw ? Number(maxRaw) : 12;
+  let max = Number.isFinite(maxNum) ? Math.round(maxNum) : 12;
+  if (max <= 0) max = 12;
+  if (max > 20) max = 20;
+
+  // rate limit
+  const lim = placesDetailsPhotosLimiter.allow(`detailsPhotos:${userId}`);
+  if (!lim.ok) {
+    return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
+  }
+
+  const plan = getPlanForNow(req);
+  const daily = enforcePlacesDetailsPhotosDailyLimit(userId, plan);
+  if (!daily.ok) {
+    return res.status(daily.status).json({ ok: false, error: daily.error });
+  }
+
+  const cacheKey = `${placeId}:${max}`;
+  const cached = placesDetailsPhotosCache.get(cacheKey);
+  if (cached) {
+    const count = Array.isArray(cached) ? cached.length : 0;
+    console.log("[Places DETAILS PHOTOS]", "userId=" + userId, "placeId=" + placeId, "cacheHit=true", "count=" + count);
+    return res.json({ ok: true, cached: true, placeId, photoReferences: cached });
+  }
+
+  try {
+    const url =
+      "https://maps.googleapis.com/maps/api/place/details/json" +
+      "?place_id=" + encodeURIComponent(placeId) +
+      "&fields=" + encodeURIComponent("photos") +
+      "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
+
+    const r = await fetch(url);
+    const json = await r.json();
+
+    if (!r.ok || json.status !== "OK") {
+      const msg = json?.error_message || ("Google details failed: " + String(json.status || r.status));
+      console.log(
+        "[Places DETAILS PHOTOS]",
+        "userId=" + userId,
+        "placeId=" + placeId,
+        "cacheHit=false",
+        "status=" + String(json.status || r.status)
+      );
+      return res.status(502).json({ ok: false, error: "Google details photos fetch failed", detail: msg });
+    }
+
+    const photos = Array.isArray(json.result?.photos) ? json.result.photos : [];
+    const photoReferences = photos
+      .map((p) => String(p?.photo_reference || "").trim())
+      .filter((ref) => ref)
+      .slice(0, max);
+
+    placesDetailsPhotosCache.set(cacheKey, photoReferences, 24 * 60 * 60 * 1000);
+
+    console.log(
+      "[Places DETAILS PHOTOS]",
+      "userId=" + userId,
+      "placeId=" + placeId,
+      "cacheHit=false",
+      "count=" + photoReferences.length
+    );
+    return res.json({ ok: true, cached: false, placeId, photoReferences });
+  } catch (e) {
+    console.log("[Places DETAILS PHOTOS] error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+
+// ---------------------------------------------
 // Places Photo (proxy)
 // GET /v1/places/photo?ref=...&maxWidth=...
 // ---------------------------------------------
@@ -453,6 +546,24 @@ function enforcePhotoLimits(userId, plan) {
   photoDailyCounters.set(dayKey, dayCount);
 
   return { ok: true, minuteCount, dayCount, rpmLimit, dailyLimit };
+}
+
+function enforcePlacesDetailsPhotosDailyLimit(userId, plan) {
+  const day = todayKey();
+
+  const dailyFree = getEnvInt("PLACES_DETAILS_PHOTOS_DAILY_FREE", 10);
+  const dailyPaid = getEnvInt("PLACES_DETAILS_PHOTOS_DAILY_PAID", 60);
+
+  const dailyLimit = plan === "paid" ? dailyPaid : dailyFree;
+  const dayKey = `${userId}:${day}`;
+  const dayCount = (placesDetailsPhotosDailyCounters.get(dayKey) || 0) + 1;
+
+  if (dailyLimit >= 0 && dayCount > dailyLimit) {
+    return { ok: false, status: 429, error: "Daily details photos limit reached. Try again tomorrow." };
+  }
+
+  placesDetailsPhotosDailyCounters.set(dayKey, dayCount);
+  return { ok: true, dayCount, dailyLimit };
 }
 
 function getCachedPhoto(cacheKey) {
