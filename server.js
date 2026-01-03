@@ -3,6 +3,67 @@ const { Pool } = require("pg");
 const app = express();
 
 app.use(express.json());
+// ---------------------------------------------
+// Simple in-memory cache + rate limit helpers
+// ---------------------------------------------
+
+function nowMs() {
+  return Date.now();
+}
+
+// basic TTL cache
+function makeTtlCache() {
+  const map = new Map(); // key -> { exp, value }
+  return {
+    get(key) {
+      const hit = map.get(key);
+      if (!hit) return null;
+      if (hit.exp <= nowMs()) {
+        map.delete(key);
+        return null;
+      }
+      return hit.value;
+    },
+    set(key, value, ttlMs) {
+      map.set(key, { exp: nowMs() + ttlMs, value });
+    },
+    _size() {
+      return map.size;
+    },
+  };
+}
+
+// basic fixed-window rate limit per user
+function makeFixedWindowLimiter({ windowMs, max }) {
+  const map = new Map(); // key -> { start, count }
+  return {
+    allow(key) {
+      const t = nowMs();
+      const cur = map.get(key);
+      if (!cur || t - cur.start >= windowMs) {
+        map.set(key, { start: t, count: 1 });
+        return { ok: true, remaining: max - 1 };
+      }
+      if (cur.count >= max) {
+        return { ok: false, remaining: 0 };
+      }
+      cur.count += 1;
+      return { ok: true, remaining: max - cur.count };
+    },
+  };
+}
+
+// caches
+const placesDetailsCache = makeTtlCache(); // key = placeId
+
+// limiters (tune later)
+const placesDetailsLimiter = makeFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: Number(process.env.PLACES_DETAILS_RPM || 30), // per user per minute
+});
+
+// Google key (server-only)
+const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
 
 // ---------------------------------------------
 // Auth config
@@ -110,45 +171,101 @@ app.get("/", (req, res) => {
     service: "zippy-api",
     routes: ["/health", "/health/db"],
   });
-});
 // ---------------------------------------------
-// Places API (v1) - photo proxy (auth + limits)
+// Places Details (proxy)
+// GET /v1/places/details?placeId=...
 // ---------------------------------------------
-app.get("/v1/places/photo", async (req, res) => {
+app.get("/v1/places/details", async (req, res) => {
   const userId = await requireUserId(req, res);
   if (!userId) return;
 
-  const apiKey = String(process.env.GOOGLE_PLACES_API_KEY || "").trim();
-  if (!apiKey) {
+  if (!GOOGLE_PLACES_API_KEY) {
     return res.status(500).json({ ok: false, error: "GOOGLE_PLACES_API_KEY not set" });
   }
 
-  const ref = String(req.query.ref || "").trim();
-  if (!ref) {
-    return res.status(400).json({ ok: false, error: "Missing ref" });
+  const placeId = String(req.query.placeId || "").trim();
+  if (!placeId) {
+    return res.status(400).json({ ok: false, error: "Missing placeId" });
   }
 
-  let maxWidth = Number(req.query.maxWidth || 800);
-  if (!Number.isFinite(maxWidth)) maxWidth = 800;
-
-  // clamp to avoid expensive giant images
-  if (maxWidth < 200) maxWidth = 200;
-  if (maxWidth > 1200) maxWidth = 1200;
-
-  const plan = getPlanForNow(req);
-  const limit = enforcePhotoLimits(userId, plan);
-  if (!limit.ok) {
-    return res.status(limit.status).json({ ok: false, error: limit.error });
+  // rate limit
+  const lim = placesDetailsLimiter.allow(`details:${userId}`);
+  if (!lim.ok) {
+    return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
   }
 
-  // cache key per ref+size
-  const cacheKey = `${ref}:${maxWidth}`;
-  const cached = getCachedPhoto(cacheKey);
+  // cache (24h)
+  const cached = placesDetailsCache.get(placeId);
   if (cached) {
-    res.setHeader("Content-Type", cached.contentType);
-    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day client cache hint
-    return res.send(cached.buf);
+    console.log("[Places DETAILS]", "userId=" + userId, "placeId=" + placeId, "cacheHit=true");
+    return res.json({ ok: true, cached: true, item: cached });
   }
+
+  try {
+    // lean fields only (keeps payload small)
+    const fields = [
+      "place_id",
+      "name",
+      "formatted_address",
+      "geometry/location",
+      "rating",
+      "user_ratings_total",
+      "website",
+      "formatted_phone_number",
+      "opening_hours/open_now",
+      "opening_hours/weekday_text",
+      "price_level",
+      "photos",
+      "business_status",
+    ].join(",");
+
+    const url =
+      "https://maps.googleapis.com/maps/api/place/details/json" +
+      "?place_id=" + encodeURIComponent(placeId) +
+      "&fields=" + encodeURIComponent(fields) +
+      "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
+
+    const r = await fetch(url);
+    const json = await r.json();
+
+    if (!r.ok || json.status !== "OK") {
+      const msg = json?.error_message || ("Google details failed: " + String(json.status || r.status));
+      console.log("[Places DETAILS]", "userId=" + userId, "placeId=" + placeId, "cacheHit=false", "status=" + String(json.status || r.status));
+      return res.status(502).json({ ok: false, error: "Google details fetch failed", detail: msg });
+    }
+
+    const p = json.result || {};
+    const loc = p.geometry?.location || null;
+
+    const primaryPhotoReference =
+      Array.isArray(p.photos) && p.photos.length > 0 ? String(p.photos[0].photo_reference || "") : "";
+
+    const item = {
+      placeId: String(p.place_id || placeId),
+      name: String(p.name || ""),
+      formattedAddress: p.formatted_address ? String(p.formatted_address) : null,
+      location: loc && typeof loc.lat === "number" && typeof loc.lng === "number" ? { lat: loc.lat, lng: loc.lng } : null,
+      rating: typeof p.rating === "number" ? p.rating : null,
+      userRatingsTotal: typeof p.user_ratings_total === "number" ? p.user_ratings_total : null,
+      website: p.website ? String(p.website) : null,
+      phone: p.formatted_phone_number ? String(p.formatted_phone_number) : null,
+      openNow: typeof p.opening_hours?.open_now === "boolean" ? p.opening_hours.open_now : null,
+      weekdayText: Array.isArray(p.opening_hours?.weekday_text) ? p.opening_hours.weekday_text : null,
+      priceLevel: typeof p.price_level === "number" ? p.price_level : null,
+      businessStatus: p.business_status ? String(p.business_status) : null,
+      primaryPhotoReference: primaryPhotoReference || null,
+    };
+
+    placesDetailsCache.set(placeId, item, 24 * 60 * 60 * 1000);
+
+    console.log("[Places DETAILS]", "userId=" + userId, "placeId=" + placeId, "cacheHit=false", "status=OK");
+    return res.json({ ok: true, cached: false, item });
+  } catch (e) {
+    console.log("[Places DETAILS] error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+
 
   // call Google Places Photo
   const url =
