@@ -67,6 +67,13 @@ const placesDetailsPhotosLimiter = makeFixedWindowLimiter({
   max: Number(process.env.PLACES_DETAILS_PHOTOS_RPM || 20), // per user per minute
 });
 const placesDetailsPhotosDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
+// HOTELS_RPM, HOTELS_HOURLY, HOTELS_DAILY
+const hotelsMinuteLimiter = makeFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: Number(process.env.HOTELS_RPM || 10), // per user per minute
+});
+const hotelsHourlyCounters = new Map(); // key: userId:YYYY-MM-DDTHH -> count
+const hotelsDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
 
 // Google key (server-only)
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
@@ -177,6 +184,29 @@ app.get("/", (req, res) => {
     service: "zippy-api",
     routes: ["/health", "/health/db"],
   });
+});
+
+// ---------------------------------------------
+// Hotels abuse protection
+// ---------------------------------------------
+app.use("/v1/hotels", async (req, res, next) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const lim = hotelsMinuteLimiter.allow(`hotels:${userId}`);
+  if (!lim.ok) return res.status(429).json({ ok: false, error: "Hotel rate limit exceeded. Try again shortly." });
+
+  const q = enforceHotelsHourlyDaily(userId);
+  if (!q.ok) return res.status(q.status).json({ ok: false, error: q.error });
+
+  console.log(
+    "[Hotels LIMIT]",
+    "userId=" + userId,
+    "path=" + req.path,
+    "hour=" + q.hourCount + "/" + q.hourlyLimit,
+    "day=" + q.dayCount + "/" + q.dailyLimit
+  );
+  next();
 });
 
 // ---------------------------------------------
@@ -505,6 +535,11 @@ function todayKey() {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
 }
 
+function hourKeyUTC() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}T${String(d.getUTCHours()).padStart(2,"0")}`;
+}
+
 function getEnvInt(name, fallback) {
   const raw = process.env[name];
   const n = Number(raw);
@@ -515,6 +550,32 @@ function getPlanForNow(req) {
   // TODO: wire real free/paid from DB or subscription
   // For now: treat all authenticated users as "paid"
   return "paid";
+}
+
+function enforceHotelsHourlyDaily(userId) {
+  const hour = hourKeyUTC();
+  const day = todayKey();
+
+  const hourlyLimit = getEnvInt("HOTELS_HOURLY", 50);
+  const dailyLimit = getEnvInt("HOTELS_DAILY", 100);
+
+  const hourKey = `${userId}:${hour}`;
+  const dayKey = `${userId}:${day}`;
+
+  const hourCount = (hotelsHourlyCounters.get(hourKey) || 0) + 1;
+  const dayCount = (hotelsDailyCounters.get(dayKey) || 0) + 1;
+
+  if (hourlyLimit >= 0 && hourCount > hourlyLimit) {
+    return { ok: false, status: 429, error: "Hotel hourly limit reached. Try again later." };
+  }
+  if (dailyLimit >= 0 && dayCount > dailyLimit) {
+    return { ok: false, status: 429, error: "Hotel daily limit reached. Try again tomorrow." };
+  }
+
+  hotelsHourlyCounters.set(hourKey, hourCount);
+  hotelsDailyCounters.set(dayKey, dayCount);
+
+  return { ok: true, hourCount, dayCount, hourlyLimit, dailyLimit };
 }
 
 function enforcePhotoLimits(userId, plan) {
