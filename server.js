@@ -70,7 +70,7 @@ const placesDetailsPhotosDailyCounters = new Map(); // key: userId:YYYY-MM-DD ->
 // HOTELS_RPM, HOTELS_HOURLY, HOTELS_DAILY
 const hotelsMinuteLimiter = makeFixedWindowLimiter({
   windowMs: 60 * 1000,
-  max: Number(process.env.HOTELS_RPM || 10), // per user per minute
+  max: getEnvInt("HOTELS_RPM", 10), // per user per minute
 });
 const hotelsHourlyCounters = new Map(); // key: userId:YYYY-MM-DDTHH -> count
 const hotelsDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
@@ -207,6 +207,13 @@ app.use("/v1/hotels", async (req, res, next) => {
     "day=" + q.dayCount + "/" + q.dailyLimit
   );
   next();
+});
+
+// ---------------------------------------------
+// Hotels ping (test route)
+// ---------------------------------------------
+app.get("/v1/hotels/ping", (req, res) => {
+  res.json({ ok: true, hotelLimiter: true });
 });
 
 // ---------------------------------------------
