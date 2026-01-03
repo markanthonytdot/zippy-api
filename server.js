@@ -111,6 +111,53 @@ app.get("/", (req, res) => {
     routes: ["/health", "/health/db"],
   });
 });
+// ---------------------------------------------
+// Places API (v1) - stubs (auth gated)
+// ---------------------------------------------
+app.get("/v1/places/photo", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const ref = String(req.query.ref || "").trim();
+  const maxWidth = Number(req.query.maxWidth || 800);
+
+  return res.json({
+    ok: true,
+    stub: true,
+    endpoint: "photo",
+    userId,
+    ref: ref ? "[provided]" : "",
+    maxWidth,
+  });
+});
+
+app.get("/v1/places/details", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const placeId = String(req.query.placeId || "").trim();
+
+  return res.json({
+    ok: true,
+    stub: true,
+    endpoint: "details",
+    userId,
+    placeId: placeId ? "[provided]" : "",
+  });
+});
+
+app.post("/v1/places/eta", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  return res.json({
+    ok: true,
+    stub: true,
+    endpoint: "eta",
+    userId,
+    bodyKeys: Object.keys(req.body || {}),
+  });
+});
 
 // ---------------------------------------------
 // One-time DB init
