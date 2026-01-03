@@ -477,6 +477,20 @@ app.post("/v1/places/eta", async (req, res) => {
   const userId = await requireUserId(req, res);
   if (!userId) return;
 
+  const plan = getPlanForNow(req);
+  const lim = enforceEtaLimits(userId, plan);
+  if (!lim.ok) {
+    return res.status(429).json({ ok: false, error: lim.error });
+  }
+
+  console.log(
+    "[ETA LIMIT]",
+    "userId=" + userId,
+    "minute=" + lim.minuteCount + "/" + lim.rpmLimit,
+    "hour=" + lim.hourCount + "/" + lim.hourlyLimit,
+    "day=" + lim.dayCount + "/" + lim.dailyLimit
+  );
+
   return res.json({
     ok: true,
     stub: true,
@@ -528,6 +542,9 @@ app.post("/admin/init", async (req, res) => {
 // Simple in-memory rate limits + cache (starter)
 // NOTE: resets when server restarts, good for MVP
 // ---------------------------------------------
+const etaMinuteCounters = new Map(); // key: userId:minute -> count
+const etaHourlyCounters = new Map(); // key: userId:YYYY-MM-DDTHH -> count
+const etaDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
 const photoMinuteCounters = new Map(); // key: userId:minute -> count
 const photoDailyCounters = new Map();  // key: userId:YYYY-MM-DD -> count
 const photoCache = new Map();          // key: ref:maxWidth -> { buf, contentType, expiresAt }
@@ -614,6 +631,47 @@ function enforcePhotoLimits(userId, plan) {
   photoDailyCounters.set(dayKey, dayCount);
 
   return { ok: true, minuteCount, dayCount, rpmLimit, dailyLimit };
+}
+
+function enforceEtaLimits(userId, plan) {
+  const minute = nowMinuteKey();
+  const hour = hourKeyUTC();
+  const day = todayKey();
+
+  const rpmFree = getEnvInt("ETA_RPM_FREE", 1);
+  const rpmPaid = getEnvInt("ETA_RPM_PAID", 10);
+  const hourlyFree = getEnvInt("ETA_HOURLY_FREE", 1);
+  const hourlyPaid = getEnvInt("ETA_HOURLY_PAID", 20);
+  const dailyFree = getEnvInt("ETA_DAILY_FREE", 1);
+  const dailyPaid = getEnvInt("ETA_DAILY_PAID", 30);
+
+  const rpmLimit = plan === "paid" ? rpmPaid : rpmFree;
+  const hourlyLimit = plan === "paid" ? hourlyPaid : hourlyFree;
+  const dailyLimit = plan === "paid" ? dailyPaid : dailyFree;
+
+  const minuteKey = `${userId}:${minute}`;
+  const hourKey = `${userId}:${hour}`;
+  const dayKey = `${userId}:${day}`;
+
+  const minuteCount = (etaMinuteCounters.get(minuteKey) || 0) + 1;
+  const hourCount = (etaHourlyCounters.get(hourKey) || 0) + 1;
+  const dayCount = (etaDailyCounters.get(dayKey) || 0) + 1;
+
+  if (rpmLimit >= 0 && minuteCount > rpmLimit) {
+    return { ok: false, status: 429, error: "ETA rate limit exceeded (per minute). Try again shortly." };
+  }
+  if (hourlyLimit >= 0 && hourCount > hourlyLimit) {
+    return { ok: false, status: 429, error: "ETA hourly limit reached. Try again later." };
+  }
+  if (dailyLimit >= 0 && dayCount > dailyLimit) {
+    return { ok: false, status: 429, error: "ETA daily limit reached. Try again tomorrow." };
+  }
+
+  etaMinuteCounters.set(minuteKey, minuteCount);
+  etaHourlyCounters.set(hourKey, hourCount);
+  etaDailyCounters.set(dayKey, dayCount);
+
+  return { ok: true, minuteCount, hourCount, dayCount, rpmLimit, hourlyLimit, dailyLimit };
 }
 
 function enforcePlacesDetailsPhotosDailyLimit(userId, plan) {
