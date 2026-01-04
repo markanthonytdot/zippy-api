@@ -1,8 +1,12 @@
 const express = require("express");
+const helmet = require("helmet");
 const { Pool } = require("pg");
 const app = express();
 
-app.use(express.json());
+app.set("trust proxy", 1);
+app.use(helmet());
+app.use(express.json({ limit: "256kb" }));
+app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 // ---------------------------------------------
 // Simple in-memory cache + rate limit helpers
 // ---------------------------------------------
@@ -53,6 +57,60 @@ function makeFixedWindowLimiter({ windowMs, max }) {
   };
 }
 
+function makePrunableFixedWindowLimiter({ windowMs, max, pruneIntervalMs = 60 * 1000 }) {
+  const map = new Map(); // key -> { start, count }
+  let lastPrune = 0;
+  function prune() {
+    const t = nowMs();
+    if (t - lastPrune < pruneIntervalMs) return;
+    lastPrune = t;
+    for (const [key, val] of map) {
+      if (t - val.start >= windowMs) {
+        map.delete(key);
+      }
+    }
+  }
+  return {
+    allow(key) {
+      if (max < 0) return { ok: true, remaining: Infinity };
+      const t = nowMs();
+      prune();
+      const cur = map.get(key);
+      if (!cur || t - cur.start >= windowMs) {
+        map.set(key, { start: t, count: 1 });
+        return { ok: true, remaining: max - 1 };
+      }
+      if (cur.count >= max) {
+        return { ok: false, remaining: 0 };
+      }
+      cur.count += 1;
+      return { ok: true, remaining: max - cur.count };
+    },
+  };
+}
+
+function getRequestIp(req) {
+  const xfwd = String(req.headers["x-forwarded-for"] || "");
+  const first = xfwd.split(",")[0].trim();
+  return String(req.ip || first || req.connection?.remoteAddress || "").trim() || "unknown";
+}
+
+function getRateLimitKey(req, userId) {
+  const uid = String(userId || req.userId || "").trim();
+  if (uid) return `uid:${uid}`;
+  return `ip:${getRequestIp(req)}`;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // caches
 const placesDetailsCache = makeTtlCache(); // key = placeId
 const placesDetailsPhotosCache = makeTtlCache(); // key = placeId:max
@@ -82,6 +140,38 @@ const etaMinuteLimiterFree = makeFixedWindowLimiter({
 const etaMinuteLimiterPaid = makeFixedWindowLimiter({
   windowMs: 60 * 1000,
   max: getEnvInt("ETA_RPM_PAID", 10),
+});
+const globalLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("GLOBAL_RPM", 120),
+});
+const placesPhotoRouteLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("PLACES_PHOTO_ROUTE_RPM", 30),
+});
+const placesDetailsPhotosRouteLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("PLACES_DETAILS_PHOTOS_ROUTE_RPM", 30),
+});
+const etaRouteLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("ETA_ROUTE_RPM", 20),
+});
+const hotelsRouteLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("HOTELS_ROUTE_RPM", 20),
+});
+const authAppleLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("AUTH_APPLE_RPM", 10),
+});
+const meSavedLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("SAVED_RPM", 60),
+});
+const adminInitLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("ADMIN_INIT_RPM", 5),
 });
 
 // Google key (server-only)
@@ -133,10 +223,78 @@ async function signZippyToken(subject) {
     .sign(encoder.encode(JWT_SECRET));
 }
 
+async function hydrateUserIdFromAuth(req) {
+  if (req.userId) return;
+
+  const auth = String(req.headers.authorization || "");
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (m && JWT_SECRET) {
+    const token = m[1].trim();
+    try {
+      const { jwtVerify } = await getJose();
+      const encoder = new TextEncoder();
+      const { payload } = await jwtVerify(token, encoder.encode(JWT_SECRET), {
+        issuer: JWT_ISSUER,
+        audience: JWT_AUDIENCE,
+      });
+
+      const sub = String(payload?.sub || "").trim();
+      if (sub) {
+        req.userId = sub;
+        req.userIdVerified = true;
+        return;
+      }
+    } catch (_) {
+      // ignore auth errors here; real auth happens in requireUserId
+    }
+  }
+
+  const fallbackUserId = String(req.headers["x-user-id"] || "").trim();
+  if (fallbackUserId) {
+    req.userId = fallbackUserId;
+    req.userIdVerified = false;
+  }
+}
+
+function rateLimitMiddleware(limiter, label) {
+  return (req, res, next) => {
+    const key = getRateLimitKey(req);
+    const lim = limiter.allow(`${label}:${key}`);
+    if (!lim.ok) {
+      return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
+    }
+    return next();
+  };
+}
+
+app.use(async (req, res, next) => {
+  await hydrateUserIdFromAuth(req);
+  next();
+});
+
+app.use((req, res, next) => {
+  if (req.path === "/health") return next();
+  const key = getRateLimitKey(req);
+  const lim = globalLimiter.allow(`global:${key}`);
+  if (!lim.ok) {
+    return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
+  }
+  return next();
+});
+
+app.use("/v1/places/photo", rateLimitMiddleware(placesPhotoRouteLimiter, "placesPhoto"));
+app.use("/v1/places/details/photos", rateLimitMiddleware(placesDetailsPhotosRouteLimiter, "placesDetailsPhotos"));
+app.use("/v1/places/eta", rateLimitMiddleware(etaRouteLimiter, "eta"));
+app.use("/v1/hotels", rateLimitMiddleware(hotelsRouteLimiter, "hotels"));
+app.use("/auth/apple", rateLimitMiddleware(authAppleLimiter, "authApple"));
+app.use("/me/saved", rateLimitMiddleware(meSavedLimiter, "meSaved"));
+app.use("/admin/init", rateLimitMiddleware(adminInitLimiter, "adminInit"));
+
 // ---------------------------------------------
 // Basic health
 // ---------------------------------------------
 app.get("/health", (req, res) => {
+  console.log("health ip:", req.ip);
   res.json({
     ok: true,
     service: "zippy-api",
@@ -202,10 +360,11 @@ app.use("/v1/hotels", async (req, res, next) => {
   const userId = await requireUserId(req, res);
   if (!userId) return;
 
-  const lim = hotelsMinuteLimiter.allow(`hotels:${userId}`);
+  const limiterId = getRateLimitKey(req, userId);
+  const lim = hotelsMinuteLimiter.allow(`hotels:${limiterId}`);
   if (!lim.ok) return res.status(429).json({ ok: false, error: "Hotel rate limit exceeded. Try again shortly." });
 
-  const q = enforceHotelsHourlyDaily(userId);
+  const q = enforceHotelsHourlyDaily(limiterId);
   if (!q.ok) return res.status(q.status).json({ ok: false, error: q.error });
 
   console.log(
@@ -241,9 +400,13 @@ app.get("/v1/places/details", async (req, res) => {
   if (!placeId) {
     return res.status(400).json({ ok: false, error: "Missing placeId" });
   }
+  if (placeId.length > 200) {
+    return res.status(400).json({ ok: false, error: "Invalid placeId" });
+  }
 
   // rate limit
-  const lim = placesDetailsLimiter.allow(`details:${userId}`);
+  const limiterId = getRateLimitKey(req, userId);
+  const lim = placesDetailsLimiter.allow(`details:${limiterId}`);
   if (!lim.ok) {
     return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
   }
@@ -279,7 +442,7 @@ app.get("/v1/places/details", async (req, res) => {
       "&fields=" + encodeURIComponent(fields) +
       "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
 
-    const r = await fetch(url);
+    const r = await fetchWithTimeout(url);
     const json = await r.json();
 
     if (!r.ok || json.status !== "OK") {
@@ -336,6 +499,9 @@ app.get("/v1/places/details/photos", async (req, res) => {
   if (!placeId) {
     return res.status(400).json({ ok: false, error: "Missing placeId" });
   }
+  if (placeId.length > 200) {
+    return res.status(400).json({ ok: false, error: "Invalid placeId" });
+  }
 
   const maxRaw = String(req.query.max || "").trim();
   const maxNum = maxRaw ? Number(maxRaw) : 12;
@@ -344,13 +510,14 @@ app.get("/v1/places/details/photos", async (req, res) => {
   if (max > 20) max = 20;
 
   // rate limit
-  const lim = placesDetailsPhotosLimiter.allow(`detailsPhotos:${userId}`);
+  const limiterId = getRateLimitKey(req, userId);
+  const lim = placesDetailsPhotosLimiter.allow(`detailsPhotos:${limiterId}`);
   if (!lim.ok) {
     return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
   }
 
   const plan = getPlanForNow(req);
-  const daily = enforcePlacesDetailsPhotosDailyLimit(userId, plan);
+  const daily = enforcePlacesDetailsPhotosDailyLimit(limiterId, plan);
   if (!daily.ok) {
     return res.status(daily.status).json({ ok: false, error: daily.error });
   }
@@ -370,7 +537,7 @@ app.get("/v1/places/details/photos", async (req, res) => {
       "&fields=" + encodeURIComponent("photos") +
       "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
 
-    const r = await fetch(url);
+    const r = await fetchWithTimeout(url);
     const json = await r.json();
 
     if (!r.ok || json.status !== "OK") {
@@ -424,10 +591,20 @@ app.get("/v1/places/photo", async (req, res) => {
   if (!ref) {
     return res.status(400).json({ ok: false, error: "Missing ref" });
   }
+  if (ref.length > 500) {
+    return res.status(400).json({ ok: false, error: "Invalid ref" });
+  }
 
   const maxWidthRaw = String(req.query.maxWidth || "").trim();
-  const maxWidthNum = maxWidthRaw ? Number(maxWidthRaw) : 800;
-  const maxWidth = Number.isFinite(maxWidthNum) && maxWidthNum > 0 ? Math.round(maxWidthNum) : 800;
+  let maxWidthNum = maxWidthRaw ? Number(maxWidthRaw) : 800;
+  if (!Number.isFinite(maxWidthNum)) {
+    return res.status(400).json({ ok: false, error: "Invalid maxWidth" });
+  }
+  maxWidthNum = Math.round(maxWidthNum);
+  if (maxWidthNum < 1 || maxWidthNum > 1600) {
+    return res.status(400).json({ ok: false, error: "Invalid maxWidth" });
+  }
+  const maxWidth = maxWidthNum;
   const cacheKey = `${ref}:${maxWidth}`;
 
   const cached = getCachedPhoto(cacheKey);
@@ -438,7 +615,8 @@ app.get("/v1/places/photo", async (req, res) => {
   }
 
   const plan = getPlanForNow(req);
-  const lim = enforcePhotoLimits(userId, plan);
+  const limiterId = getRateLimitKey(req, userId);
+  const lim = enforcePhotoLimits(limiterId, plan);
   if (!lim.ok) {
     return res.status(lim.status).json({ ok: false, error: lim.error });
   }
@@ -451,7 +629,7 @@ app.get("/v1/places/photo", async (req, res) => {
     `&key=${encodeURIComponent(apiKey)}`;
 
   try {
-    const r = await fetch(url, { redirect: "follow" });
+    const r = await fetchWithTimeout(url, { redirect: "follow" }, 12000);
 
     if (!r.ok) {
       const text = await r.text().catch(() => "");
@@ -505,6 +683,18 @@ app.post("/v1/places/eta", async (req, res) => {
   ) {
     return res.status(400).json({ ok: false, error: "Missing or invalid origin/dest" });
   }
+  if (
+    originLat < -90 ||
+    originLat > 90 ||
+    originLng < -180 ||
+    originLng > 180 ||
+    destLat < -90 ||
+    destLat > 90 ||
+    destLng < -180 ||
+    destLng > 180
+  ) {
+    return res.status(400).json({ ok: false, error: "Invalid origin/dest bounds" });
+  }
 
   const mode = String(req.body?.mode || "driving").toLowerCase();
   if (mode !== "driving" && mode !== "walking") {
@@ -526,7 +716,8 @@ app.post("/v1/places/eta", async (req, res) => {
   }
 
   const plan = getPlanForNow(req);
-  const lim = enforceEtaLimits(userId, plan);
+  const limiterId = getRateLimitKey(req, userId);
+  const lim = enforceEtaLimits(limiterId, plan);
   if (!lim.ok) {
     return res.status(429).json({ ok: false, error: lim.error });
   }
@@ -579,7 +770,7 @@ app.post("/v1/places/eta", async (req, res) => {
   }
 
   try {
-    const r = await fetch(url);
+    const r = await fetchWithTimeout(url);
     const json = await r.json();
 
     if (!r.ok || json.status !== "OK") {
@@ -703,15 +894,15 @@ function getPlanForNow(req) {
   return "paid";
 }
 
-function enforceHotelsHourlyDaily(userId) {
+function enforceHotelsHourlyDaily(limiterId) {
   const hour = hourKeyUTC();
   const day = todayKey();
 
   const hourlyLimit = getEnvInt("HOTELS_HOURLY", 50);
   const dailyLimit = getEnvInt("HOTELS_DAILY", 100);
 
-  const hourKey = `${userId}:${hour}`;
-  const dayKey = `${userId}:${day}`;
+  const hourKey = `${limiterId}:${hour}`;
+  const dayKey = `${limiterId}:${day}`;
 
   const hourCount = (hotelsHourlyCounters.get(hourKey) || 0) + 1;
   const dayCount = (hotelsDailyCounters.get(dayKey) || 0) + 1;
@@ -729,7 +920,7 @@ function enforceHotelsHourlyDaily(userId) {
   return { ok: true, hourCount, dayCount, hourlyLimit, dailyLimit };
 }
 
-function enforcePhotoLimits(userId, plan) {
+function enforcePhotoLimits(limiterId, plan) {
   const minute = nowMinuteKey();
   const day = todayKey();
 
@@ -741,8 +932,8 @@ function enforcePhotoLimits(userId, plan) {
   const rpmLimit = plan === "paid" ? rpmPaid : rpmFree;
   const dailyLimit = plan === "paid" ? dailyPaid : dailyFree;
 
-  const minuteKey = `${userId}:${minute}`;
-  const dayKey = `${userId}:${day}`;
+  const minuteKey = `${limiterId}:${minute}`;
+  const dayKey = `${limiterId}:${day}`;
 
   const minuteCount = (photoMinuteCounters.get(minuteKey) || 0) + 1;
   const dayCount = (photoDailyCounters.get(dayKey) || 0) + 1;
@@ -760,7 +951,7 @@ function enforcePhotoLimits(userId, plan) {
   return { ok: true, minuteCount, dayCount, rpmLimit, dailyLimit };
 }
 
-function enforceEtaLimits(userId, plan) {
+function enforceEtaLimits(limiterId, plan) {
   const hour = hourKeyUTC();
   const day = todayKey();
 
@@ -776,13 +967,13 @@ function enforceEtaLimits(userId, plan) {
   const hourlyLimit = isPaid ? hourlyPaid : hourlyFree;
   const dailyLimit = isPaid ? dailyPaid : dailyFree;
 
-  const hourKey = `${userId}:${hour}`;
-  const dayKey = `${userId}:${day}`;
+  const hourKey = `${limiterId}:${hour}`;
+  const dayKey = `${limiterId}:${day}`;
 
   let minuteCount = 0;
   if (rpmLimit >= 0) {
     const minuteLimiter = isPaid ? etaMinuteLimiterPaid : etaMinuteLimiterFree;
-    const minuteResult = minuteLimiter.allow(`eta:${userId}`);
+    const minuteResult = minuteLimiter.allow(`eta:${limiterId}`);
     if (!minuteResult.ok) {
       return { ok: false, status: 429, error: "ETA rate limit exceeded (per minute). Try again shortly." };
     }
@@ -804,14 +995,14 @@ function enforceEtaLimits(userId, plan) {
   return { ok: true, minuteCount, hourCount, dayCount, rpmLimit, hourlyLimit, dailyLimit };
 }
 
-function enforcePlacesDetailsPhotosDailyLimit(userId, plan) {
+function enforcePlacesDetailsPhotosDailyLimit(limiterId, plan) {
   const day = todayKey();
 
   const dailyFree = getEnvInt("PLACES_DETAILS_PHOTOS_DAILY_FREE", 10);
   const dailyPaid = getEnvInt("PLACES_DETAILS_PHOTOS_DAILY_PAID", 60);
 
   const dailyLimit = plan === "paid" ? dailyPaid : dailyFree;
-  const dayKey = `${userId}:${day}`;
+  const dayKey = `${limiterId}:${day}`;
   const dayCount = (placesDetailsPhotosDailyCounters.get(dayKey) || 0) + 1;
 
   if (dailyLimit >= 0 && dayCount > dailyLimit) {
@@ -832,6 +1023,48 @@ function getCachedPhoto(cacheKey) {
   return hit;
 }
 
+function validateSavedPayload(payload) {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return { ok: false, error: "Invalid payload" };
+  }
+
+  const maxBytes = 32 * 1024;
+  const maxStringLen = 2000;
+  try {
+    const json = JSON.stringify(payload);
+    if (Buffer.byteLength(json, "utf8") > maxBytes) {
+      return { ok: false, error: "Payload too large" };
+    }
+  } catch (_) {
+    return { ok: false, error: "Invalid payload" };
+  }
+
+  const seen = new Set();
+  function walk(val, depth) {
+    if (typeof val === "string") return val.length <= maxStringLen;
+    if (typeof val !== "object" || val === null) return true;
+    if (seen.has(val)) return true;
+    if (depth <= 0) return false;
+    seen.add(val);
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (!walk(item, depth - 1)) return false;
+      }
+    } else {
+      for (const v of Object.values(val)) {
+        if (!walk(v, depth - 1)) return false;
+      }
+    }
+    return true;
+  }
+
+  if (!walk(payload, 5)) {
+    return { ok: false, error: "Payload too large" };
+  }
+
+  return { ok: true };
+}
+
 // ---------------------------------------------
 // Helpers
 // ---------------------------------------------
@@ -840,14 +1073,18 @@ async function requireUserId(req, res) {
   const auth = String(req.headers.authorization || "");
   const m = auth.match(/^Bearer\s+(.+)$/i);
 
+  if (m && !JWT_SECRET) {
+    res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
+    return null;
+  }
+
+  if (req.userId && req.userIdVerified) {
+    return req.userId;
+  }
+
   if (m) {
     const token = m[1].trim();
     try {
-      if (!JWT_SECRET) {
-        res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
-        return null;
-      }
-
       const { jwtVerify } = await getJose();
       const encoder = new TextEncoder();
 
@@ -857,7 +1094,11 @@ async function requireUserId(req, res) {
       });
 
       const sub = String(payload?.sub || "").trim();
-      if (sub) return sub;
+      if (sub) {
+        req.userId = sub;
+        req.userIdVerified = true;
+        return sub;
+      }
 
       res.status(401).json({ ok: false, error: "JWT missing sub" });
       return null;
@@ -867,11 +1108,13 @@ async function requireUserId(req, res) {
   }
 
   // 2) fallback: x-user-id
-  const userId = String(req.headers["x-user-id"] || "").trim();
+  const userId = String(req.userId || req.headers["x-user-id"] || "").trim();
   if (!userId) {
     res.status(401).json({ ok: false, error: "Missing auth" });
     return null;
   }
+  req.userId = userId;
+  req.userIdVerified = false;
   return userId;
 }
 
@@ -892,6 +1135,9 @@ app.post("/auth/apple", async (req, res) => {
     const devSub = String(req.body?.devSub || "").trim();
     if (!devSub) {
       return res.status(400).json({ ok: false, error: "Missing devSub" });
+    }
+    if (devSub.length > 4000) {
+      return res.status(400).json({ ok: false, error: "Invalid devSub" });
     }
     if (!JWT_SECRET) {
       return res.status(500).json({ ok: false, error: "Server misconfigured" });
@@ -915,6 +1161,9 @@ app.post("/auth/apple", async (req, res) => {
   const identityToken = String(req.body?.identityToken || "").trim();
   if (!identityToken) {
     return res.status(400).json({ ok: false, error: "Missing identityToken" });
+  }
+  if (identityToken.length > 4000) {
+    return res.status(400).json({ ok: false, error: "Invalid identityToken" });
   }
 
   try {
@@ -995,6 +1244,10 @@ app.post("/me/saved", async (req, res) => {
 
   if (!kind || !externalId) {
     return res.status(400).json({ ok: false, error: "Missing kind or externalId" });
+  }
+  const payloadCheck = validateSavedPayload(payload);
+  if (!payloadCheck.ok) {
+    return res.status(400).json({ ok: false, error: payloadCheck.error });
   }
 
   try {
