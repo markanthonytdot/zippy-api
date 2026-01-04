@@ -521,7 +521,7 @@ app.post("/v1/places/eta", async (req, res) => {
     } else {
       traffic = trafficRaw;
     }
-  } else if (trafficRaw !== undefined) {
+  } else if (trafficRaw === true) {
     return res.status(400).json({ ok: false, error: "Traffic only allowed for driving" });
   }
 
