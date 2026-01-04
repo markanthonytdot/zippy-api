@@ -464,6 +464,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   max = Math.round(max);
   if (max <= 0) max = 12;
   if (max > 50) max = 50;
+  const hotelsPageLimit = Math.min(max, 20);
 
   let searchLat = latInput;
   let searchLng = lngInput;
@@ -487,6 +488,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   const hotelsUrl = new URL(`${AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-geocode`);
   hotelsUrl.searchParams.set("latitude", String(searchLat));
   hotelsUrl.searchParams.set("longitude", String(searchLng));
+  hotelsUrl.searchParams.set("page[limit]", String(hotelsPageLimit));
   const includeRadius = false;
   const includeRadiusUnit = false;
   const includeHotelSource = false;
@@ -526,8 +528,16 @@ app.post("/v1/hotels/search", async (req, res) => {
   }
 
   const hotelsData = Array.isArray(hotelsJson?.data) ? hotelsJson.data : [];
-  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, max);
-  const hotelIds = hotelItems.map((item) => String(item.hotelId).trim()).filter(Boolean);
+  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, hotelsPageLimit);
+  const hotelIds = [];
+  const seenHotelIds = new Set();
+  for (const item of hotelItems) {
+    const id = String(item?.hotelId || "").trim();
+    if (id && !seenHotelIds.has(id)) {
+      seenHotelIds.add(id);
+      hotelIds.push(id);
+    }
+  }
 
   console.log(
     "[Hotels LIST]",
@@ -570,84 +580,174 @@ app.post("/v1/hotels/search", async (req, res) => {
     const id = String(item?.hotelId || "").trim();
     if (id) hotelsById.set(id, item);
   }
+  async function fetchOffersBatch(batchIds, batchLabel) {
+    const offersUrl = new URL(`${AMADEUS_BASE_URL}/v3/shopping/hotel-offers`);
+    offersUrl.searchParams.set("hotelIds", batchIds.join(","));
+    offersUrl.searchParams.set("checkInDate", checkIn);
+    offersUrl.searchParams.set("checkOutDate", checkOut);
+    offersUrl.searchParams.set("adults", String(adults));
+    offersUrl.searchParams.set("roomQuantity", "1");
+    offersUrl.searchParams.set("paymentPolicy", "NONE");
+    offersUrl.searchParams.set("bestRateOnly", "true");
 
-  const offersUrl = new URL(`${AMADEUS_BASE_URL}/v3/shopping/hotel-offers`);
-  offersUrl.searchParams.set("hotelIds", hotelIds.join(","));
-  offersUrl.searchParams.set("checkInDate", checkIn);
-  offersUrl.searchParams.set("checkOutDate", checkOut);
-  offersUrl.searchParams.set("adults", String(adults));
-  offersUrl.searchParams.set("roomQuantity", "1");
-  offersUrl.searchParams.set("paymentPolicy", "NONE");
-  offersUrl.searchParams.set("bestRateOnly", "true");
+    let offersRes;
+    let offersJson = {};
+    let offersText = "";
+    try {
+      offersRes = await fetchWithTimeout(offersUrl.toString(), {
+        headers: { Authorization: `Bearer ${tokenResult.token}` },
+      });
+      offersText = await offersRes.text().catch(() => "");
+      offersJson = safeJsonParse(offersText);
+    } catch (e) {
+      console.log(
+        "[Hotels OFFERS]",
+        "requestId=" + requestId,
+        "userId=" + userId,
+        "status=ERR",
+        "count=0",
+        "batch=" + batchLabel
+      );
+      return { ok: false, status: 502, error: "Amadeus offers fetch failed" };
+    }
 
-  let offersRes;
-  let offersJson = {};
-  let offersText = "";
-  try {
-    offersRes = await fetchWithTimeout(offersUrl.toString(), {
-      headers: { Authorization: `Bearer ${tokenResult.token}` },
-    });
-    offersText = await offersRes.text().catch(() => "");
-    offersJson = safeJsonParse(offersText);
-  } catch (e) {
-    console.log("[Hotels OFFERS]", "requestId=" + requestId, "userId=" + userId, "status=ERR", "count=0");
-    return res.status(502).json({ ok: false, error: "Amadeus offers fetch failed" });
-  }
-
-  const offersData = Array.isArray(offersJson?.data) ? offersJson.data : [];
-  console.log(
-    "[Hotels OFFERS]",
-    "requestId=" + requestId,
-    "userId=" + userId,
-    "status=" + offersRes.status,
-    "count=" + offersData.length
-  );
-
-  if (!offersRes.ok) {
-    const hostPath = `${offersUrl.host}${offersUrl.pathname}`;
-    const bodySnippet = truncateText(offersText, 500);
+    const offersData = Array.isArray(offersJson?.data) ? offersJson.data : [];
     console.log(
       "[Hotels OFFERS]",
       "requestId=" + requestId,
-      "hostPath=" + hostPath,
+      "userId=" + userId,
       "status=" + offersRes.status,
-      "body=" + bodySnippet
+      "count=" + offersData.length,
+      "batch=" + batchLabel,
+      "ids=" + batchIds.length
     );
+
+    if (!offersRes.ok) {
+      const hostPath = `${offersUrl.host}${offersUrl.pathname}`;
+      const bodySnippet = truncateText(offersText, 500);
+      console.log(
+        "[Hotels OFFERS]",
+        "requestId=" + requestId,
+        "hostPath=" + hostPath,
+        "status=" + offersRes.status,
+        "batch=" + batchLabel,
+        "body=" + bodySnippet
+      );
+      return {
+        ok: false,
+        status: 502,
+        error: "Amadeus offers fetch failed",
+        hint: `step=offers status=${offersRes.status} body=${bodySnippet}`,
+      };
+    }
+
+    return { ok: true, offersData };
+  }
+
+  let offersData = [];
+  let offersError = null;
+  const offersAttempt = await fetchOffersBatch(hotelIds, "all");
+  if (offersAttempt.ok) {
+    offersData = offersAttempt.offersData;
+  } else if (hotelIds.length > 10) {
+    console.log(
+      "[Hotels OFFERS]",
+      "requestId=" + requestId,
+      "userId=" + userId,
+      "status=RETRY",
+      "reason=batch",
+      "ids=" + hotelIds.length
+    );
+    const batches = chunkArray(hotelIds, 10);
+    for (let i = 0; i < batches.length; i += 1) {
+      const batch = batches[i];
+      const batchLabel = `batch=${i + 1}/${batches.length}`;
+      const result = await fetchOffersBatch(batch, batchLabel);
+      if (result.ok) {
+        offersData = offersData.concat(result.offersData);
+      } else if (!offersError) {
+        offersError = result;
+      }
+    }
+    if (offersData.length === 0) {
+      const error = offersError?.error || offersAttempt.error || "Amadeus offers fetch failed";
+      const hint = offersError?.hint || offersAttempt.hint;
+      return res.status(502).json({ ok: false, error, hint });
+    }
+  } else {
     return res.status(502).json({
       ok: false,
-      error: "Amadeus offers fetch failed",
-      hint: `step=offers status=${offersRes.status} body=${bodySnippet}`,
+      error: offersAttempt.error || "Amadeus offers fetch failed",
+      hint: offersAttempt.hint,
     });
   }
 
-  const items = offersData
-    .map((entry) => {
-      const hotel = entry?.hotel || {};
-      const hotelId = String(hotel.hotelId || entry?.hotelId || "").trim();
-      if (!hotelId) return null;
-      const fallback = hotelsById.get(hotelId) || {};
-      const geo = hotel.geoCode || fallback.geoCode || {};
-      const lat = Number(geo.latitude ?? geo.lat);
-      const lng = Number(geo.longitude ?? geo.lng);
-      const name = String(hotel.name || fallback.name || "").trim();
-      const address = formatAmadeusAddress(hotel.address || fallback.address);
-      const rating = parseAmadeusRating(hotel.rating || hotel.hotelRating || fallback.rating);
-      const price = pickBestOfferPrice(entry?.offers);
+  const offersReturnedCount = offersData.length;
+  const offersByHotelId = new Map();
+  for (const entry of offersData) {
+    const hotel = entry?.hotel || {};
+    const hotelId = String(hotel.hotelId || entry?.hotelId || "").trim();
+    if (!hotelId) continue;
+    const price = pickBestOfferPrice(entry?.offers);
+    const existing = offersByHotelId.get(hotelId);
+    if (!existing) {
+      offersByHotelId.set(hotelId, { entry, price });
+      continue;
+    }
+    if (price && !existing.price) {
+      offersByHotelId.set(hotelId, { entry, price });
+      continue;
+    }
+    if (price && existing.price) {
+      const newTotal = Number(price.total);
+      const oldTotal = Number(existing.price.total);
+      const sameCurrency = !price.currency || !existing.price.currency || price.currency === existing.price.currency;
+      if (sameCurrency && Number.isFinite(newTotal) && Number.isFinite(oldTotal) && newTotal < oldTotal) {
+        offersByHotelId.set(hotelId, { entry, price });
+      }
+    }
+  }
 
-      return {
-        hotelId,
-        name,
-        lat: Number.isFinite(lat) ? lat : null,
-        lng: Number.isFinite(lng) ? lng : null,
-        address,
-        rating,
-        price,
-        bookingUrl: null,
-      };
-    })
-    .filter(Boolean);
+  const outputMax = Math.min(max, 50);
+  const items = [];
+  for (const hotelId of hotelIds) {
+    const offer = offersByHotelId.get(hotelId);
+    if (!offer) continue;
+    const entry = offer.entry || {};
+    const hotel = entry?.hotel || {};
+    const fallback = hotelsById.get(hotelId) || {};
+    const geo = hotel.geoCode || fallback.geoCode || {};
+    const lat = Number(geo.latitude ?? geo.lat);
+    const lng = Number(geo.longitude ?? geo.lng);
+    const name = String(hotel.name || fallback.name || "").trim();
+    const address = formatAmadeusAddress(hotel.address || fallback.address);
+    const rating = parseAmadeusRating(hotel.rating || hotel.hotelRating || fallback.rating);
+    const price = offer.price
+      ? { total: offer.price.total, currency: offer.price.currency }
+      : null;
 
-  const itemsWithPhotos = await enrichHotelItemsWithPhotos(items, city, req);
+    items.push({
+      hotelId,
+      name,
+      lat: Number.isFinite(lat) ? lat : null,
+      lng: Number.isFinite(lng) ? lng : null,
+      address,
+      rating,
+      price,
+      bookingUrl: null,
+    });
+  }
+
+  const itemsLimited = items.slice(0, outputMax);
+  const itemsWithPhotos = await enrichHotelItemsWithPhotos(itemsLimited, city, req);
+  console.log(
+    "[Hotels DEBUG]",
+    "requestId=" + requestId,
+    "hotelIdsFound=" + hotelIds.length,
+    "hotelIdsPriced=" + offersByHotelId.size,
+    "offersReturned=" + offersReturnedCount,
+    "finalItems=" + itemsWithPhotos.length
+  );
 
   return res.json({
     ok: true,
@@ -1364,6 +1464,14 @@ function truncateText(value, maxLen) {
   const text = String(value || "");
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen);
+}
+
+function chunkArray(items, size) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
 }
 
 function safeJsonParse(text) {
