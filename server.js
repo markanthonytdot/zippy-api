@@ -180,10 +180,7 @@ const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
 const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
-const AMADEUS_BASE_URL =
-  process.env.AMADEUS_BASE_URL ||
-  (process.env.NODE_ENV === "production" ? "https://api.amadeus.com" : "https://test.api.amadeus.com");
-const AMADEUS_TOKEN_URL = "https://test.api.amadeus.com/v1/security/oauth2/token";
+const AMADEUS_BASE_URL = process.env.AMADEUS_BASE_URL || "https://test.api.amadeus.com";
 
 // ---------------------------------------------
 // Auth config
@@ -483,9 +480,6 @@ app.post("/v1/hotels/search", async (req, res) => {
     return res.status(tokenResult.status).json({ ok: false, error: tokenResult.error });
   }
 
-  const amadeusBaseHost = getUrlHost(AMADEUS_BASE_URL);
-  console.log("[Hotels AMADEUS]", "requestId=" + requestId, "baseHost=" + amadeusBaseHost);
-
   const hotelsUrl = new URL(`${AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-geocode`);
   hotelsUrl.searchParams.set("latitude", String(searchLat));
   hotelsUrl.searchParams.set("longitude", String(searchLng));
@@ -493,6 +487,18 @@ app.post("/v1/hotels/search", async (req, res) => {
   hotelsUrl.searchParams.set("radiusUnit", "KM");
   hotelsUrl.searchParams.set("hotelSource", "ALL");
   hotelsUrl.searchParams.set("page[limit]", String(max));
+
+  const tokenHost = getUrlHost(getAmadeusTokenUrl());
+  const hotelsHost = hotelsUrl.host;
+  const tokenPrefix = tokenResult.token.slice(0, 12);
+  console.log(
+    "[Hotels AMADEUS]",
+    "requestId=" + requestId,
+    "tokenHost=" + tokenHost,
+    "hotelsHost=" + hotelsHost,
+    "tokenPrefix=" + tokenPrefix,
+    "tokenLen=" + tokenResult.token.length
+  );
 
   let hotelsRes;
   let hotelsJson = {};
@@ -1363,6 +1369,10 @@ function getUrlHost(rawUrl) {
   }
 }
 
+function getAmadeusTokenUrl() {
+  return `${AMADEUS_BASE_URL}/v1/security/oauth2/token`;
+}
+
 function formatAmadeusAddress(address) {
   if (!address || typeof address !== "object") return null;
   const parts = [];
@@ -1426,13 +1436,14 @@ async function geocodeCityToLatLng(city) {
 }
 
 async function fetchAmadeusToken(requestId) {
-  const url = AMADEUS_TOKEN_URL;
+  const url = getAmadeusTokenUrl();
   const body =
     "grant_type=client_credentials" +
     "&client_id=" + encodeURIComponent(AMADEUS_CLIENT_ID) +
     "&client_secret=" + encodeURIComponent(AMADEUS_CLIENT_SECRET);
   const clientIdLen = AMADEUS_CLIENT_ID.length;
   const secretLen = AMADEUS_CLIENT_SECRET.length;
+  const host = getUrlHost(url);
 
   let r;
   try {
@@ -1445,7 +1456,7 @@ async function fetchAmadeusToken(requestId) {
     console.log(
       "[Hotels TOKEN]",
       "requestId=" + requestId,
-      "url=" + url,
+      "host=" + host,
       "status=ERR",
       "clientIdLen=" + clientIdLen,
       "secretLen=" + secretLen
@@ -1457,7 +1468,7 @@ async function fetchAmadeusToken(requestId) {
   console.log(
     "[Hotels TOKEN]",
     "requestId=" + requestId,
-    "url=" + url,
+    "host=" + host,
     "status=" + r.status,
     "clientIdLen=" + clientIdLen,
     "secretLen=" + secretLen
