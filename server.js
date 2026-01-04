@@ -586,24 +586,33 @@ app.get("/v1/places/photo", async (req, res) => {
     return res.status(500).json({ ok: false, error: "GOOGLE_PLACES_API_KEY not set" });
   }
 
-  const ref = String(req.query.ref || "").trim();
+  const refParam = req.query.ref;
+  if (refParam === undefined) {
+    return res.status(400).json({ ok: false, error: "Missing ref" });
+  }
+  if (typeof refParam !== "string") {
+    return res.status(400).json({ ok: false, error: "Invalid ref: must be a string" });
+  }
+  const ref = refParam.trim();
   if (!ref) {
     return res.status(400).json({ ok: false, error: "Missing ref" });
   }
-  if (ref.length > 500) {
-    return res.status(400).json({ ok: false, error: "Invalid ref" });
+  if (ref.length < 20) {
+    return res.status(400).json({ ok: false, error: "Invalid ref: too short (min 20 chars)" });
   }
 
-  const maxWidthRaw = String(req.query.maxWidth || "").trim();
-  let maxWidthNum = maxWidthRaw ? Number(maxWidthRaw) : 800;
-  if (!Number.isFinite(maxWidthNum)) {
-    return res.status(400).json({ ok: false, error: "Invalid maxWidth" });
+  const maxWidthParam = req.query.maxWidth;
+  let maxWidth = 800;
+  if (maxWidthParam !== undefined) {
+    if (typeof maxWidthParam !== "string") {
+      return res.status(400).json({ ok: false, error: "Invalid maxWidth: must be a string number" });
+    }
+    const parsed = parseInt(maxWidthParam, 10);
+    if (!Number.isFinite(parsed)) {
+      return res.status(400).json({ ok: false, error: "Invalid maxWidth: must be numeric" });
+    }
+    maxWidth = Math.min(1600, Math.max(100, parsed));
   }
-  maxWidthNum = Math.round(maxWidthNum);
-  if (maxWidthNum < 1 || maxWidthNum > 1600) {
-    return res.status(400).json({ ok: false, error: "Invalid maxWidth" });
-  }
-  const maxWidth = maxWidthNum;
   const cacheKey = `${ref}:${maxWidth}`;
 
   const cached = getCachedPhoto(cacheKey);
@@ -634,7 +643,8 @@ app.get("/v1/places/photo", async (req, res) => {
       const text = await r.text().catch(() => "");
       return res.status(502).json({
         ok: false,
-        error: `Google photo fetch failed (${r.status})`,
+        error: "Google photo fetch failed",
+        upstreamStatus: r.status,
         detail: text ? text.slice(0, 200) : "",
       });
     }
