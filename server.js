@@ -483,10 +483,14 @@ app.post("/v1/hotels/search", async (req, res) => {
   const hotelsUrl = new URL(`${AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-geocode`);
   hotelsUrl.searchParams.set("latitude", String(searchLat));
   hotelsUrl.searchParams.set("longitude", String(searchLng));
-  hotelsUrl.searchParams.set("radius", String(radiusKm));
-  hotelsUrl.searchParams.set("radiusUnit", "KM");
-  hotelsUrl.searchParams.set("hotelSource", "ALL");
-  hotelsUrl.searchParams.set("max", String(max));
+  const includeRadius = false;
+  const includeRadiusUnit = false;
+  const includeHotelSource = false;
+  const includeMax = false;
+  if (includeRadius) hotelsUrl.searchParams.set("radius", String(radiusKm));
+  if (includeRadiusUnit) hotelsUrl.searchParams.set("radiusUnit", "KM");
+  if (includeHotelSource) hotelsUrl.searchParams.set("hotelSource", "ALL");
+  if (includeMax) hotelsUrl.searchParams.set("max", String(max));
 
   console.log("[Hotels LIST]", "requestId=" + requestId, "lat=" + searchLat, "lng=" + searchLng);
   console.log("[Hotels LIST]", "requestId=" + requestId, "url=" + hotelsUrl.toString());
