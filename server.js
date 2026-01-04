@@ -842,41 +842,102 @@ app.get("/v1/hotels/photo", async (req, res) => {
     maxWidth = Math.min(1600, Math.max(100, parsed));
   }
 
+  const debugEnabled = isHotelsDebugEnabled();
+  const debugLogEnabled = isHotelsDebugLoggingEnabled();
+
   const cached = hotelPhotoRefCache.get(hotelIdKey);
   if (cached) {
     const photoUrl = cached.photoRef ? buildPlacesPhotoUrl(req, cached.photoRef, maxWidth) : null;
-    return res.json({ ok: true, hotelId: hotelIdRaw, cached: true, photoUrl });
+    const debug = debugEnabled
+      ? {
+          triedQueries: Array.isArray(cached?.debug?.triedQueries) ? cached.debug.triedQueries : [],
+          chosenQuery: cached?.debug?.chosenQuery || null,
+          googleSearchResultsCount: typeof cached?.debug?.googleSearchResultsCount === "number" ? cached.debug.googleSearchResultsCount : 0,
+          chosenPlaceId: cached?.placeId || null,
+          detailsPhotosCount: typeof cached?.debug?.detailsPhotosCount === "number" ? cached.debug.detailsPhotosCount : null,
+          reason: photoUrl ? "ok" : cached?.debug?.reason || "no_photos_in_details",
+        }
+      : undefined;
+    if (debugLogEnabled) {
+      console.log("[Hotels PHOTO]", JSON.stringify(debug));
+    }
+    return res.json({ ok: true, hotelId: hotelIdRaw, cached: true, photoUrl, ...(debugEnabled ? { debug } : {}) });
   }
 
   if (!GOOGLE_PLACES_API_KEY) {
-    return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null });
+    const debug = debugEnabled
+      ? {
+          triedQueries: [],
+          chosenQuery: null,
+          googleSearchResultsCount: 0,
+          chosenPlaceId: null,
+          detailsPhotosCount: null,
+          reason: "no_google_results",
+        }
+      : undefined;
+    if (debugLogEnabled) {
+      console.log("[Hotels PHOTO]", JSON.stringify(debug));
+    }
+    return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null, ...(debugEnabled ? { debug } : {}) });
   }
 
   const details = hotelDetailsCache.get(hotelIdKey);
   if (!details) {
-    return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null });
+    const debug = debugEnabled
+      ? {
+          triedQueries: [],
+          chosenQuery: null,
+          googleSearchResultsCount: 0,
+          chosenPlaceId: null,
+          detailsPhotosCount: null,
+          reason: "no_hotel_context",
+        }
+      : undefined;
+    if (debugLogEnabled) {
+      console.log("[Hotels PHOTO]", JSON.stringify(debug));
+    }
+    return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null, ...(debugEnabled ? { debug } : {}) });
   }
 
-  const result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details);
+  let result;
+  try {
+    result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details);
+  } catch (_) {
+    result = { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0, query: null, triedQueries: [], reason: "unexpected" };
+  }
   const photoRef = result?.photoRef || null;
   const ttl = photoRef ? HOTEL_PHOTO_REF_TTL_MS : HOTEL_PHOTO_REF_NULL_TTL_MS;
   hotelPhotoRefCache.set(
     hotelIdKey,
-    { photoRef, placeId: result?.placeId || null, placeName: result?.placeName || null },
+    {
+      photoRef,
+      placeId: result?.placeId || null,
+      placeName: result?.placeName || null,
+      debug: {
+        triedQueries: Array.isArray(result?.triedQueries) ? result.triedQueries : [],
+        chosenQuery: result?.query || null,
+        googleSearchResultsCount: typeof result?.candidatesCount === "number" ? result.candidatesCount : 0,
+        detailsPhotosCount: typeof result?.photosCount === "number" ? result.photosCount : null,
+        reason: result?.reason || (photoRef ? "ok" : "no_photos_in_details"),
+      },
+    },
     ttl
   );
   const photoUrl = photoRef ? buildPlacesPhotoUrl(req, photoRef, maxWidth) : null;
-  if (isHotelsDebugEnabled()) {
-    console.log(
-      "[Hotels PHOTO]",
-      "query=" + (result?.query || ""),
-      "results=" + (result?.candidatesCount || 0),
-      "placeId=" + (result?.placeId || ""),
-      "photos=" + (result?.photosCount || 0),
-      "returned=" + (photoUrl ? "photoUrl" : "null")
-    );
+  const debug = debugEnabled
+    ? {
+        triedQueries: Array.isArray(result?.triedQueries) ? result.triedQueries : [],
+        chosenQuery: result?.query || null,
+        googleSearchResultsCount: typeof result?.candidatesCount === "number" ? result.candidatesCount : 0,
+        chosenPlaceId: result?.placeId || null,
+        detailsPhotosCount: typeof result?.photosCount === "number" ? result.photosCount : null,
+        reason: result?.reason || (photoUrl ? "ok" : "no_photos_in_details"),
+      }
+    : undefined;
+  if (debugLogEnabled) {
+    console.log("[Hotels PHOTO]", JSON.stringify({ ...debug, returned: photoUrl ? "photoUrl" : "null" }));
   }
-  return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl });
+  return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl, ...(debugEnabled ? { debug } : {}) });
 });
 
 // ---------------------------------------------
@@ -1686,6 +1747,11 @@ function isHotelsDebugEnabled() {
   return env !== "production";
 }
 
+function isHotelsDebugLoggingEnabled() {
+  const debug = String(process.env.DEBUG_HOTELS || "").trim().toLowerCase();
+  return debug === "true";
+}
+
 function splitAddressParts(address) {
   if (!address) return [];
   return String(address)
@@ -1754,20 +1820,22 @@ function buildHotelPhotoQueries(details) {
 
 async function fetchHotelPhotoReferenceWithFallback(details) {
   const queries = buildHotelPhotoQueries(details);
-  if (queries.length === 0) return null;
+  if (queries.length === 0) {
+    return {
+      photoRef: null,
+      placeId: null,
+      placeName: null,
+      photosCount: 0,
+      candidatesCount: 0,
+      query: null,
+      triedQueries: [],
+      reason: "no_hotel_context",
+    };
+  }
   let lastResult = null;
   for (const query of queries) {
     const result = await fetchPlacesFindPlacePhotoReference(query);
     lastResult = { ...result, query };
-    if (isHotelsDebugEnabled()) {
-      console.log(
-        "[Hotels PHOTO]",
-        "query=" + query,
-        "candidates=" + result.candidatesCount,
-        "placeId=" + (result.placeId || ""),
-        "photos=" + result.photosCount
-      );
-    }
     if (result.photoRef) {
       return {
         photoRef: result.photoRef,
@@ -1776,8 +1844,13 @@ async function fetchHotelPhotoReferenceWithFallback(details) {
         photosCount: result.photosCount,
         candidatesCount: result.candidatesCount,
         query,
+        triedQueries: queries,
+        reason: null,
       };
     }
+  }
+  if (lastResult) {
+    return { ...lastResult, triedQueries: queries };
   }
   return lastResult;
 }
@@ -1808,7 +1881,7 @@ async function fetchPlacesDetailsPhotoReference(placeId) {
 
 async function fetchPlacesFindPlacePhotoReference(query) {
   if (!GOOGLE_PLACES_API_KEY) {
-    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0 };
+    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0, reason: "no_google_results" };
   }
   const url =
     "https://maps.googleapis.com/maps/api/place/findplacefromtext/json" +
@@ -1823,10 +1896,13 @@ async function fetchPlacesFindPlacePhotoReference(query) {
     r = await fetchWithTimeout(url);
     json = await r.json().catch(() => ({}));
   } catch (_) {
-    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0 };
+    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0, reason: "unexpected" };
   }
   const candidates = Array.isArray(json?.candidates) ? json.candidates : [];
   const candidatesCount = candidates.length;
+  if (candidatesCount === 0) {
+    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount, reason: "no_google_results" };
+  }
   for (const candidate of candidates) {
     const placeId = String(candidate?.place_id || "").trim();
     if (!placeId) continue;
@@ -1838,6 +1914,7 @@ async function fetchPlacesFindPlacePhotoReference(query) {
       placeName,
       photosCount: details.photosCount,
       candidatesCount,
+      reason: details.photoRef ? null : "no_photos_in_details",
     };
   }
   return {
@@ -1846,6 +1923,7 @@ async function fetchPlacesFindPlacePhotoReference(query) {
     placeName: null,
     photosCount: 0,
     candidatesCount,
+    reason: "no_place_id",
   };
 }
 
