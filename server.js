@@ -688,22 +688,26 @@ app.post("/v1/hotels/search", async (req, res) => {
     const hotel = entry?.hotel || {};
     const hotelId = String(hotel.hotelId || entry?.hotelId || "").trim();
     if (!hotelId) continue;
-    const price = pickBestOfferPrice(entry?.offers);
+    const bestOffer = pickBestOfferDetails(entry?.offers);
+    if (!bestOffer) continue;
+    const price = bestOffer.price;
     const existing = offersByHotelId.get(hotelId);
     if (!existing) {
-      offersByHotelId.set(hotelId, { entry, price });
+      offersByHotelId.set(hotelId, { entry, bestOffer, price });
       continue;
     }
     if (price && !existing.price) {
-      offersByHotelId.set(hotelId, { entry, price });
+      offersByHotelId.set(hotelId, { entry, bestOffer, price });
       continue;
     }
     if (price && existing.price) {
-      const newTotal = Number(price.total);
-      const oldTotal = Number(existing.price.total);
+      const newTotal = price.totalNum;
+      const oldTotal = existing.price.totalNum;
       const sameCurrency = !price.currency || !existing.price.currency || price.currency === existing.price.currency;
       if (sameCurrency && Number.isFinite(newTotal) && Number.isFinite(oldTotal) && newTotal < oldTotal) {
-        offersByHotelId.set(hotelId, { entry, price });
+        offersByHotelId.set(hotelId, { entry, bestOffer, price });
+      } else if (!Number.isFinite(oldTotal) && Number.isFinite(newTotal)) {
+        offersByHotelId.set(hotelId, { entry, bestOffer, price });
       }
     }
   }
@@ -715,6 +719,7 @@ app.post("/v1/hotels/search", async (req, res) => {
     if (!offer) continue;
     const entry = offer.entry || {};
     const hotel = entry?.hotel || {};
+    const bestOffer = offer.bestOffer?.offer || null;
     const fallback = hotelsById.get(hotelId) || {};
     const geo = hotel.geoCode || fallback.geoCode || {};
     const lat = Number(geo.latitude ?? geo.lat);
@@ -722,8 +727,39 @@ app.post("/v1/hotels/search", async (req, res) => {
     const name = String(hotel.name || fallback.name || "").trim();
     const address = formatAmadeusAddress(hotel.address || fallback.address);
     const rating = parseAmadeusRating(hotel.rating || hotel.hotelRating || fallback.rating);
-    const price = offer.price
-      ? { total: offer.price.total, currency: offer.price.currency }
+    const offerPrice = offer.price || null;
+    const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
+    const roomType = pickOfferRoomType(bestOffer);
+    const roomDescription = pickOfferRoomDescription(bestOffer);
+    const bedType = pickOfferBedType(bestOffer);
+    const boardType = pickOfferBoardType(bestOffer);
+    const paymentType = pickOfferPaymentType(bestOffer);
+    const cancellationInfo = pickOfferCancellation(bestOffer);
+    const offerCheckIn = pickOfferCheckInDate(bestOffer, checkIn);
+    const offerCheckOut = pickOfferCheckOutDate(bestOffer, checkOut, offerCheckIn, nights);
+    const offerPayload = bestOffer
+      ? {
+          id: pickOfferId(bestOffer),
+          checkInDate: offerCheckIn,
+          checkOutDate: offerCheckOut,
+          adults,
+          roomType,
+          roomDescription,
+          bedType,
+          boardType,
+          paymentType,
+          refundable: cancellationInfo.refundable,
+          cancellation: cancellationInfo.cancellation,
+          price: offerPrice
+            ? {
+                total: offerPrice.total,
+                base: offerPrice.base,
+                taxes: offerPrice.taxes,
+                currency: offerPrice.currency,
+              }
+            : { total: null, base: null, taxes: null, currency: null },
+          raw: buildOfferRawDebug(bestOffer),
+        }
       : null;
 
     items.push({
@@ -734,6 +770,7 @@ app.post("/v1/hotels/search", async (req, res) => {
       address,
       rating,
       price,
+      offer: offerPayload,
       bookingUrl: null,
     });
   }
@@ -745,9 +782,10 @@ app.post("/v1/hotels/search", async (req, res) => {
     "requestId=" + requestId,
     "hotelIdsFound=" + hotelIds.length,
     "hotelIdsPriced=" + offersByHotelId.size,
-    "offersReturned=" + offersReturnedCount,
+    "offersCount=" + offersReturnedCount,
     "finalItems=" + itemsWithPhotos.length
   );
+  logOfferFieldDebug(itemsWithPhotos, requestId);
 
   return res.json({
     ok: true,
@@ -1640,6 +1678,203 @@ function pickBestOfferPrice(offers) {
   }
   if (!best) return null;
   return { total: best.total, currency: best.currency };
+}
+
+function pickBestOfferDetails(offers) {
+  if (!Array.isArray(offers) || offers.length === 0) return null;
+  let best = null;
+  for (const offer of offers) {
+    const price = buildOfferPrice(offer);
+    if (!best) {
+      best = { offer, price };
+      continue;
+    }
+    const newTotal = price.totalNum;
+    const oldTotal = best.price.totalNum;
+    if (!Number.isFinite(oldTotal) && Number.isFinite(newTotal)) {
+      best = { offer, price };
+      continue;
+    }
+    if (Number.isFinite(newTotal) && Number.isFinite(oldTotal)) {
+      const sameCurrency = !price.currency || !best.price.currency || price.currency === best.price.currency;
+      if (sameCurrency && newTotal < oldTotal) {
+        best = { offer, price };
+      }
+    }
+  }
+  if (!best) return null;
+  return { offer: best.offer, price: best.price };
+}
+
+function buildOfferPrice(offer) {
+  const price = offer?.price || {};
+  const total = normalizeOfferValue(price.total);
+  const base = normalizeOfferValue(price.base);
+  const currency = normalizeOfferValue(price.currency);
+  let taxes = null;
+  if (price.taxes !== undefined && price.taxes !== null) {
+    if (Array.isArray(price.taxes)) {
+      let sum = 0;
+      let count = 0;
+      for (const item of price.taxes) {
+        const amtRaw = item?.amount ?? item?.value;
+        const amt = Number(amtRaw);
+        if (Number.isFinite(amt)) {
+          sum += amt;
+          count += 1;
+        }
+      }
+      if (count > 0) taxes = String(sum);
+    } else {
+      taxes = normalizeOfferValue(price.taxes);
+    }
+  }
+  const totalNum = Number(total);
+  return {
+    total,
+    base,
+    taxes,
+    currency,
+    totalNum: Number.isFinite(totalNum) ? totalNum : null,
+  };
+}
+
+function normalizeOfferValue(value) {
+  const text = String(value ?? "").trim();
+  return text ? text : null;
+}
+
+function pickOfferId(offer) {
+  return normalizeOfferValue(offer?.id);
+}
+
+function pickOfferRoomType(offer) {
+  const typeEstimated = offer?.room?.typeEstimated;
+  return normalizeOfferValue(typeEstimated?.category || offer?.room?.type);
+}
+
+function pickOfferBedType(offer) {
+  const typeEstimated = offer?.room?.typeEstimated;
+  return normalizeOfferValue(typeEstimated?.bedType);
+}
+
+function pickOfferRoomDescription(offer) {
+  return normalizeOfferValue(offer?.room?.description?.text);
+}
+
+function pickOfferBoardType(offer) {
+  return normalizeOfferValue(offer?.boardType);
+}
+
+function pickOfferPaymentType(offer) {
+  return normalizeOfferValue(offer?.paymentType);
+}
+
+function pickOfferCheckInDate(offer, fallback) {
+  return normalizeOfferValue(offer?.checkInDate) || fallback;
+}
+
+function pickOfferCheckOutDate(offer, fallback, checkInDate, nights) {
+  const raw = normalizeOfferValue(offer?.checkOutDate);
+  if (raw) return raw;
+  const derived = checkInDate && Number.isFinite(Number(nights))
+    ? addNightsToDate(checkInDate, Number(nights))
+    : null;
+  return derived || fallback;
+}
+
+function pickOfferCancellation(offer) {
+  let refundable = null;
+  const refundableFlag = offer?.policies?.refundable?.cancellationRefundable;
+  if (typeof refundableFlag === "boolean") {
+    refundable = refundableFlag;
+  } else if (typeof offer?.policies?.refundable === "boolean") {
+    refundable = offer.policies.refundable;
+  }
+
+  const cancellations = Array.isArray(offer?.policies?.cancellations) ? offer.policies.cancellations : [];
+  if (cancellations.length === 0) {
+    return { refundable, cancellation: null };
+  }
+
+  let pick = null;
+  let pickTime = null;
+  for (const item of cancellations) {
+    const deadlineRaw = item?.deadline;
+    const deadlineTime = deadlineRaw ? new Date(deadlineRaw).getTime() : NaN;
+    if (Number.isFinite(deadlineTime)) {
+      if (pickTime === null || deadlineTime < pickTime) {
+        pick = item;
+        pickTime = deadlineTime;
+      }
+    } else if (!pick) {
+      pick = item;
+    }
+  }
+
+  if (!pick) {
+    return { refundable, cancellation: null };
+  }
+
+  const deadline = normalizeOfferValue(pick?.deadline);
+  const description = normalizeOfferValue(pick?.description?.text || pick?.description || pick?.policy?.text);
+  return {
+    refundable,
+    cancellation: {
+      deadline,
+      description,
+    },
+  };
+}
+
+function buildOfferRawDebug(offer) {
+  if (!offer) return null;
+  const room = offer.room || null;
+  const roomOut = room
+    ? {
+        type: normalizeOfferValue(room?.type),
+        typeEstimated: room?.typeEstimated
+          ? {
+              category: normalizeOfferValue(room.typeEstimated?.category),
+              bedType: normalizeOfferValue(room.typeEstimated?.bedType),
+            }
+          : null,
+        description: normalizeOfferValue(room?.description?.text),
+      }
+    : null;
+  const policies = offer.policies
+    ? {
+        refundable: offer.policies.refundable ?? null,
+        cancellations: offer.policies.cancellations ?? null,
+      }
+    : null;
+  return {
+    rateCode: normalizeOfferValue(offer.rateCode),
+    room: roomOut,
+    policies,
+    paymentType: normalizeOfferValue(offer.paymentType),
+    boardType: normalizeOfferValue(offer.boardType),
+  };
+}
+
+function logOfferFieldDebug(items, requestId) {
+  const sample = Array.isArray(items) ? items.slice(0, 2) : [];
+  for (let i = 0; i < sample.length; i += 1) {
+    const item = sample[i] || {};
+    const offer = item.offer || {};
+    const cancellation = offer.cancellation || null;
+    const cancelPresent = Boolean(cancellation && (cancellation.deadline || cancellation.description));
+    console.log(
+      "[Hotels DEBUG OFFER]",
+      "requestId=" + requestId,
+      "idx=" + i,
+      "hotelId=" + String(item.hotelId || ""),
+      "roomType=" + (offer.roomType ? "present" : "missing"),
+      "boardType=" + (offer.boardType ? "present" : "missing"),
+      "paymentType=" + (offer.paymentType ? "present" : "missing"),
+      "cancellation=" + (cancelPresent ? "present" : "missing")
+    );
+  }
 }
 
 async function geocodeCityToLatLng(city) {
