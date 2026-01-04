@@ -294,7 +294,6 @@ app.use("/admin/init", rateLimitMiddleware(adminInitLimiter, "adminInit"));
 // Basic health
 // ---------------------------------------------
 app.get("/health", (req, res) => {
-  console.log("health ip:", req.ip);
   res.json({
     ok: true,
     service: "zippy-api",
