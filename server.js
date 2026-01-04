@@ -123,7 +123,7 @@ const hotelPhotoRefCache = makeTtlCache(); // key = hotelId
 const HOTEL_PHOTO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOTEL_PHOTO_MAX_WIDTH = 900;
 const HOTEL_PHOTO_REF_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const HOTEL_DETAILS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const HOTEL_DETAILS_TTL_MS = 24 * 60 * 60 * 1000;
 const HOTEL_PHOTO_REF_NULL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // limiters (tune later)
@@ -866,6 +866,16 @@ app.get("/v1/hotels/photo", async (req, res) => {
     ttl
   );
   const photoUrl = photoRef ? buildPlacesPhotoUrl(req, photoRef, maxWidth) : null;
+  if (isHotelsDebugEnabled()) {
+    console.log(
+      "[Hotels PHOTO]",
+      "query=" + (result?.query || ""),
+      "results=" + (result?.candidatesCount || 0),
+      "placeId=" + (result?.placeId || ""),
+      "photos=" + (result?.photosCount || 0),
+      "returned=" + (photoUrl ? "photoUrl" : "null")
+    );
+  }
   return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl });
 });
 
@@ -1720,11 +1730,11 @@ async function fetchHotelPhotoReferenceByDetails(hotelId, details) {
 function buildHotelPhotoQueries(details) {
   const name = String(details?.name || "").trim();
   if (!name) return [];
+  const address = String(details?.address || "").trim();
   const city = String(details?.city || "").trim() || deriveCityFromAddress(details?.address);
-  const country = String(details?.country || "").trim() || deriveCountryFromAddress(details?.address);
   const queries = [];
-  if (city && country) {
-    queries.push(`${name} ${city} ${country}`);
+  if (address && city) {
+    queries.push(`${name} ${address} ${city} Canada`);
   }
   if (city) {
     queries.push(`${name} ${city} Canada`);
@@ -1745,15 +1755,16 @@ function buildHotelPhotoQueries(details) {
 async function fetchHotelPhotoReferenceWithFallback(details) {
   const queries = buildHotelPhotoQueries(details);
   if (queries.length === 0) return null;
+  let lastResult = null;
   for (const query of queries) {
     const result = await fetchPlacesFindPlacePhotoReference(query);
+    lastResult = { ...result, query };
     if (isHotelsDebugEnabled()) {
       console.log(
         "[Hotels PHOTO]",
         "query=" + query,
         "candidates=" + result.candidatesCount,
         "placeId=" + (result.placeId || ""),
-        "name=" + (result.placeName || ""),
         "photos=" + result.photosCount
       );
     }
@@ -1762,10 +1773,13 @@ async function fetchHotelPhotoReferenceWithFallback(details) {
         photoRef: result.photoRef,
         placeId: result.placeId,
         placeName: result.placeName,
+        photosCount: result.photosCount,
+        candidatesCount: result.candidatesCount,
+        query,
       };
     }
   }
-  return null;
+  return lastResult;
 }
 
 async function fetchPlacesDetailsPhotoReference(placeId) {
@@ -1813,36 +1827,24 @@ async function fetchPlacesFindPlacePhotoReference(query) {
   }
   const candidates = Array.isArray(json?.candidates) ? json.candidates : [];
   const candidatesCount = candidates.length;
-  let fallback = { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount };
   for (const candidate of candidates) {
     const placeId = String(candidate?.place_id || "").trim();
     if (!placeId) continue;
     const placeName = String(candidate?.name || "").trim() || null;
     const details = await fetchPlacesDetailsPhotoReference(placeId);
-    if (!fallback.placeId) {
-      fallback = {
-        photoRef: null,
-        placeId,
-        placeName,
-        photosCount: details.photosCount,
-        candidatesCount,
-      };
-    }
-    if (details.photoRef) {
-      return {
-        photoRef: details.photoRef,
-        placeId,
-        placeName,
-        photosCount: details.photosCount,
-        candidatesCount,
-      };
-    }
+    return {
+      photoRef: details.photoRef,
+      placeId,
+      placeName,
+      photosCount: details.photosCount,
+      candidatesCount,
+    };
   }
   return {
     photoRef: null,
-    placeId: fallback.placeId,
-    placeName: fallback.placeName,
-    photosCount: fallback.photosCount,
+    placeId: null,
+    placeName: null,
+    photosCount: 0,
     candidatesCount,
   };
 }
