@@ -486,7 +486,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   hotelsUrl.searchParams.set("radius", String(radiusKm));
   hotelsUrl.searchParams.set("radiusUnit", "KM");
   hotelsUrl.searchParams.set("hotelSource", "ALL");
-  hotelsUrl.searchParams.set("page[limit]", String(max));
+  hotelsUrl.searchParams.set("max", String(max));
 
   console.log("[Hotels LIST]", "requestId=" + requestId, "lat=" + searchLat, "lng=" + searchLng);
   console.log("[Hotels LIST]", "requestId=" + requestId, "url=" + hotelsUrl.toString());
