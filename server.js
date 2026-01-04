@@ -117,9 +117,13 @@ const placesDetailsCache = makeTtlCache(); // key = placeId
 const placesDetailsPhotosCache = makeTtlCache(); // key = placeId:max
 const etaCache = makeTtlCache(); // key = rounded origin/dest + mode/traffic
 const hotelPhotoCache = makeTtlCache(); // key = hotelId or name+city
+const hotelDetailsCache = makeTtlCache(); // key = hotelId
+const hotelPhotoRefCache = makeTtlCache(); // key = hotelId
 
 const HOTEL_PHOTO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOTEL_PHOTO_MAX_WIDTH = 900;
+const HOTEL_PHOTO_REF_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const HOTEL_DETAILS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 // limiters (tune later)
 const placesDetailsLimiter = makeFixedWindowLimiter({
@@ -768,6 +772,8 @@ app.post("/v1/hotels/search", async (req, res) => {
         }
       : null;
 
+    cacheHotelDetails(hotelId, name, address, city);
+
     items.push({
       hotelId,
       name,
@@ -799,6 +805,58 @@ app.post("/v1/hotels/search", async (req, res) => {
     query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
     items: itemsWithPhotos,
   });
+});
+
+// ---------------------------------------------
+// Hotels Photo (lazy)
+// GET /v1/hotels/photo?hotelId=...&maxWidth=...
+// ---------------------------------------------
+app.get("/v1/hotels/photo", async (req, res) => {
+  const hotelIdRaw = String(req.query.hotelId || "").trim();
+  if (!hotelIdRaw) {
+    return res.status(400).json({ ok: false, error: "Missing hotelId" });
+  }
+  if (hotelIdRaw.length > 200) {
+    return res.status(400).json({ ok: false, error: "Invalid hotelId" });
+  }
+
+  const hotelIdKey = normalizeCacheKeyPart(hotelIdRaw);
+  if (!hotelIdKey) {
+    return res.status(400).json({ ok: false, error: "Invalid hotelId" });
+  }
+
+  let maxWidth = HOTEL_PHOTO_MAX_WIDTH;
+  const maxWidthParam = req.query.maxWidth;
+  if (maxWidthParam !== undefined) {
+    if (typeof maxWidthParam !== "string") {
+      return res.status(400).json({ ok: false, error: "Invalid maxWidth: must be a string number" });
+    }
+    const parsed = parseInt(maxWidthParam, 10);
+    if (!Number.isFinite(parsed)) {
+      return res.status(400).json({ ok: false, error: "Invalid maxWidth: must be numeric" });
+    }
+    maxWidth = Math.min(1600, Math.max(100, parsed));
+  }
+
+  const cached = hotelPhotoRefCache.get(hotelIdKey);
+  if (cached) {
+    const photoUrl = cached.photoRef ? buildPlacesPhotoUrl(req, cached.photoRef, maxWidth) : null;
+    return res.json({ ok: true, hotelId: hotelIdRaw, cached: true, photoUrl });
+  }
+
+  if (!GOOGLE_PLACES_API_KEY) {
+    return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null });
+  }
+
+  const details = hotelDetailsCache.get(hotelIdKey);
+  if (!details) {
+    return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null });
+  }
+
+  const photoRef = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details);
+  hotelPhotoRefCache.set(hotelIdKey, { photoRef: photoRef || null }, HOTEL_PHOTO_REF_TTL_MS);
+  const photoUrl = photoRef ? buildPlacesPhotoUrl(req, photoRef, maxWidth) : null;
+  return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl });
 });
 
 // ---------------------------------------------
@@ -1599,6 +1657,29 @@ function buildPlacesPhotoUrl(req, photoRef, maxWidth = HOTEL_PHOTO_MAX_WIDTH) {
   const base = getApiBase(req);
   if (!base) return null;
   return `${base}/v1/places/photo?ref=${encodeURIComponent(photoRef)}&maxWidth=${encodeURIComponent(String(maxWidth))}`;
+}
+
+function cacheHotelDetails(hotelId, name, address, city) {
+  const id = normalizeCacheKeyPart(hotelId);
+  const hotelName = String(name || "").trim();
+  if (!id || !hotelName) return;
+  const record = {
+    name: hotelName,
+    address: address ? String(address) : null,
+    city: city ? String(city) : null,
+  };
+  hotelDetailsCache.set(id, record, HOTEL_DETAILS_TTL_MS);
+}
+
+async function fetchHotelPhotoReferenceByDetails(hotelId, details) {
+  if (!details) return null;
+  if (!GOOGLE_PLACES_API_KEY) return null;
+  const item = {
+    hotelId,
+    name: details.name,
+    address: details.address,
+  };
+  return await fetchHotelPrimaryPhotoReference(item, details.city);
 }
 
 async function fetchHotelPrimaryPhotoReference(item, fallbackCity) {
