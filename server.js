@@ -1,5 +1,6 @@
 const express = require("express");
 const helmet = require("helmet");
+const { randomUUID } = require("crypto");
 const { Pool } = require("pg");
 const app = express();
 
@@ -176,6 +177,12 @@ const adminInitLimiter = makePrunableFixedWindowLimiter({
 
 // Google key (server-only)
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
+// Amadeus config (server-only)
+const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
+const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
+const AMADEUS_BASE_URL =
+  process.env.AMADEUS_BASE_URL ||
+  (process.env.NODE_ENV === "production" ? "https://api.amadeus.com" : "https://test.api.amadeus.com");
 
 // ---------------------------------------------
 // Auth config
@@ -301,6 +308,8 @@ app.get("/health", (req, res) => {
     hasJwtSecret: !!process.env.JWT_SECRET,
     jwtIssuer: String(process.env.JWT_ISSUER || ""),
     jwtAudience: String(process.env.JWT_AUDIENCE || ""),
+    hasAmadeusId: !!process.env.AMADEUS_CLIENT_ID,
+    hasAmadeusSecret: !!process.env.AMADEUS_CLIENT_SECRET,
   });
 });
 // ---------------------------------------------
@@ -381,6 +390,217 @@ app.use("/v1/hotels", async (req, res, next) => {
 // ---------------------------------------------
 app.get("/v1/hotels/ping", (req, res) => {
   res.json({ ok: true, hotelLimiter: true });
+});
+
+// ---------------------------------------------
+// Hotels Search (Amadeus)
+// POST /v1/hotels/search
+// ---------------------------------------------
+app.post("/v1/hotels/search", async (req, res) => {
+  const userId = String(req.userId || "unknown");
+  const requestId = randomUUID();
+
+  if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
+    return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
+  }
+
+  const body = req.body || {};
+  const city = String(body.city || "").trim();
+  if (city && city.length > 200) {
+    return res.status(400).json({ ok: false, error: "Invalid city" });
+  }
+
+  const hasLatField = body.lat !== undefined || body.lng !== undefined;
+  const latInput = Number(body.lat);
+  const lngInput = Number(body.lng);
+
+  if (hasLatField) {
+    if (!Number.isFinite(latInput) || !Number.isFinite(lngInput)) {
+      return res.status(400).json({ ok: false, error: "Invalid lat/lng" });
+    }
+    if (latInput < -90 || latInput > 90 || lngInput < -180 || lngInput > 180) {
+      return res.status(400).json({ ok: false, error: "Invalid lat/lng bounds" });
+    }
+  }
+
+  if (!city && !hasLatField) {
+    return res.status(400).json({ ok: false, error: "Missing city or lat/lng" });
+  }
+
+  const checkIn = String(body.checkIn || "").trim();
+  if (!checkIn) {
+    return res.status(400).json({ ok: false, error: "Missing checkIn" });
+  }
+
+  const nightsRaw = Number(body.nights);
+  if (!Number.isFinite(nightsRaw)) {
+    return res.status(400).json({ ok: false, error: "Missing nights" });
+  }
+  const nights = Math.round(nightsRaw);
+  if (nights <= 0 || nights > 30) {
+    return res.status(400).json({ ok: false, error: "Invalid nights" });
+  }
+
+  const checkOut = addNightsToDate(checkIn, nights);
+  if (!checkOut) {
+    return res.status(400).json({ ok: false, error: "Invalid checkIn" });
+  }
+
+  let adults = Number(body.adults);
+  if (!Number.isFinite(adults)) adults = 1;
+  adults = Math.round(adults);
+  if (adults <= 0) adults = 1;
+  if (adults > 9) adults = 9;
+
+  let radiusKm = Number(body.radiusKm);
+  if (!Number.isFinite(radiusKm)) radiusKm = 15;
+  if (radiusKm <= 0) radiusKm = 15;
+  if (radiusKm > 50) radiusKm = 50;
+
+  let max = Number(body.max);
+  if (!Number.isFinite(max)) max = 12;
+  max = Math.round(max);
+  if (max <= 0) max = 12;
+  if (max > 50) max = 50;
+
+  let searchLat = latInput;
+  let searchLng = lngInput;
+  if (!hasLatField) {
+    if (!GOOGLE_PLACES_API_KEY) {
+      return res.status(500).json({ ok: false, error: "GOOGLE_PLACES_API_KEY not set" });
+    }
+    const geocoded = await geocodeCityToLatLng(city);
+    if (!geocoded) {
+      return res.status(400).json({ ok: false, error: "Unable to geocode city" });
+    }
+    searchLat = geocoded.lat;
+    searchLng = geocoded.lng;
+  }
+
+  const tokenResult = await fetchAmadeusToken(requestId);
+  if (!tokenResult.ok) {
+    return res.status(tokenResult.status).json({ ok: false, error: tokenResult.error });
+  }
+
+  const hotelsUrl = new URL(`${AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-geocode`);
+  hotelsUrl.searchParams.set("latitude", String(searchLat));
+  hotelsUrl.searchParams.set("longitude", String(searchLng));
+  hotelsUrl.searchParams.set("radius", String(radiusKm));
+  hotelsUrl.searchParams.set("radiusUnit", "KM");
+  hotelsUrl.searchParams.set("hotelSource", "ALL");
+  hotelsUrl.searchParams.set("page[limit]", String(max));
+
+  let hotelsRes;
+  let hotelsJson = {};
+  try {
+    hotelsRes = await fetchWithTimeout(hotelsUrl.toString(), {
+      headers: { Authorization: `Bearer ${tokenResult.token}` },
+    });
+    hotelsJson = await hotelsRes.json().catch(() => ({}));
+  } catch (e) {
+    console.log("[Hotels LIST]", "requestId=" + requestId, "userId=" + userId, "status=ERR", "count=0");
+    return res.status(502).json({ ok: false, error: "Amadeus hotels fetch failed" });
+  }
+
+  const hotelsData = Array.isArray(hotelsJson?.data) ? hotelsJson.data : [];
+  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, max);
+  const hotelIds = hotelItems.map((item) => String(item.hotelId).trim()).filter(Boolean);
+
+  console.log(
+    "[Hotels LIST]",
+    "requestId=" + requestId,
+    "userId=" + userId,
+    "status=" + hotelsRes.status,
+    "count=" + hotelIds.length
+  );
+
+  if (!hotelsRes.ok) {
+    return res.status(502).json({ ok: false, error: "Amadeus hotels fetch failed" });
+  }
+
+  if (hotelIds.length === 0) {
+    console.log("[Hotels OFFERS]", "requestId=" + requestId, "userId=" + userId, "status=SKIP", "count=0");
+    return res.json({
+      ok: true,
+      cached: false,
+      query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
+      items: [],
+    });
+  }
+
+  const hotelsById = new Map();
+  for (const item of hotelItems) {
+    const id = String(item?.hotelId || "").trim();
+    if (id) hotelsById.set(id, item);
+  }
+
+  const offersUrl = new URL(`${AMADEUS_BASE_URL}/v3/shopping/hotel-offers`);
+  offersUrl.searchParams.set("hotelIds", hotelIds.join(","));
+  offersUrl.searchParams.set("checkInDate", checkIn);
+  offersUrl.searchParams.set("checkOutDate", checkOut);
+  offersUrl.searchParams.set("adults", String(adults));
+  offersUrl.searchParams.set("roomQuantity", "1");
+  offersUrl.searchParams.set("paymentPolicy", "NONE");
+  offersUrl.searchParams.set("bestRateOnly", "true");
+
+  let offersRes;
+  let offersJson = {};
+  try {
+    offersRes = await fetchWithTimeout(offersUrl.toString(), {
+      headers: { Authorization: `Bearer ${tokenResult.token}` },
+    });
+    offersJson = await offersRes.json().catch(() => ({}));
+  } catch (e) {
+    console.log("[Hotels OFFERS]", "requestId=" + requestId, "userId=" + userId, "status=ERR", "count=0");
+    return res.status(502).json({ ok: false, error: "Amadeus offers fetch failed" });
+  }
+
+  const offersData = Array.isArray(offersJson?.data) ? offersJson.data : [];
+  console.log(
+    "[Hotels OFFERS]",
+    "requestId=" + requestId,
+    "userId=" + userId,
+    "status=" + offersRes.status,
+    "count=" + offersData.length
+  );
+
+  if (!offersRes.ok) {
+    return res.status(502).json({ ok: false, error: "Amadeus offers fetch failed" });
+  }
+
+  const items = offersData
+    .map((entry) => {
+      const hotel = entry?.hotel || {};
+      const hotelId = String(hotel.hotelId || entry?.hotelId || "").trim();
+      if (!hotelId) return null;
+      const fallback = hotelsById.get(hotelId) || {};
+      const geo = hotel.geoCode || fallback.geoCode || {};
+      const lat = Number(geo.latitude ?? geo.lat);
+      const lng = Number(geo.longitude ?? geo.lng);
+      const name = String(hotel.name || fallback.name || "").trim();
+      const address = formatAmadeusAddress(hotel.address || fallback.address);
+      const rating = parseAmadeusRating(hotel.rating || hotel.hotelRating || fallback.rating);
+      const price = pickBestOfferPrice(entry?.offers);
+
+      return {
+        hotelId,
+        name,
+        lat: Number.isFinite(lat) ? lat : null,
+        lng: Number.isFinite(lng) ? lng : null,
+        address,
+        rating,
+        price,
+        bookingUrl: null,
+      };
+    })
+    .filter(Boolean);
+
+  return res.json({
+    ok: true,
+    cached: false,
+    query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
+    items,
+  });
 });
 
 // ---------------------------------------------
@@ -1077,6 +1297,106 @@ function validateSavedPayload(payload) {
 // ---------------------------------------------
 // Helpers
 // ---------------------------------------------
+function addNightsToDate(checkIn, nights) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn)) return null;
+  const date = new Date(`${checkIn}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  const out = new Date(date.getTime());
+  out.setUTCDate(out.getUTCDate() + nights);
+  return out.toISOString().slice(0, 10);
+}
+
+function formatAmadeusAddress(address) {
+  if (!address || typeof address !== "object") return null;
+  const parts = [];
+  if (Array.isArray(address.lines) && address.lines.length > 0) {
+    const line = address.lines.map((item) => String(item || "").trim()).filter(Boolean).join(", ");
+    if (line) parts.push(line);
+  }
+  if (address.addressLine) parts.push(String(address.addressLine));
+  if (address.line1) parts.push(String(address.line1));
+  if (address.line2) parts.push(String(address.line2));
+  if (address.cityName) parts.push(String(address.cityName));
+  if (address.stateCode) parts.push(String(address.stateCode));
+  if (address.postalCode) parts.push(String(address.postalCode));
+  if (address.countryCode) parts.push(String(address.countryCode));
+  const formatted = parts.map((item) => String(item).trim()).filter(Boolean).join(", ");
+  return formatted || null;
+}
+
+function parseAmadeusRating(value) {
+  if (value === undefined || value === null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pickBestOfferPrice(offers) {
+  if (!Array.isArray(offers)) return null;
+  let best = null;
+  for (const offer of offers) {
+    const totalRaw = offer?.price?.total;
+    const currencyRaw = offer?.price?.currency;
+    const total = String(totalRaw || "").trim();
+    const currency = String(currencyRaw || "").trim();
+    const totalNum = Number(total);
+    if (!Number.isFinite(totalNum) || !currency) continue;
+    if (!best || totalNum < best.totalNum) {
+      best = { total, currency, totalNum };
+    }
+  }
+  if (!best) return null;
+  return { total: best.total, currency: best.currency };
+}
+
+async function geocodeCityToLatLng(city) {
+  const url =
+    "https://maps.googleapis.com/maps/api/geocode/json" +
+    "?address=" + encodeURIComponent(city) +
+    "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
+
+  let r;
+  try {
+    r = await fetchWithTimeout(url);
+  } catch (_) {
+    return null;
+  }
+  const json = await r.json().catch(() => ({}));
+  if (!r.ok || json.status !== "OK") return null;
+
+  const loc = json?.results?.[0]?.geometry?.location;
+  if (!loc || typeof loc.lat !== "number" || typeof loc.lng !== "number") return null;
+  return { lat: loc.lat, lng: loc.lng };
+}
+
+async function fetchAmadeusToken(requestId) {
+  const url = `${AMADEUS_BASE_URL}/v1/security/oauth2/token`;
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: AMADEUS_CLIENT_ID,
+    client_secret: AMADEUS_CLIENT_SECRET,
+  }).toString();
+
+  let r;
+  try {
+    r = await fetchWithTimeout(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+  } catch (e) {
+    console.log("[Hotels TOKEN]", "requestId=" + requestId, "status=ERR");
+    return { ok: false, status: 502, error: "Amadeus auth failed" };
+  }
+
+  console.log("[Hotels TOKEN]", "requestId=" + requestId, "status=" + r.status);
+  const json = await r.json().catch(() => ({}));
+  const token = String(json?.access_token || "").trim();
+  if (!r.ok || !token) {
+    return { ok: false, status: 502, error: "Amadeus auth failed" };
+  }
+  return { ok: true, token };
+}
+
 async function requireUserId(req, res) {
   // 1) prefer JWT
   const auth = String(req.headers.authorization || "");
