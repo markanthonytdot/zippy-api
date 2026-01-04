@@ -1670,7 +1670,10 @@ function buildPlacesPhotoUrl(req, photoRef, maxWidth = HOTEL_PHOTO_MAX_WIDTH) {
 }
 
 function isHotelsDebugEnabled() {
-  return String(process.env.DEBUG_HOTELS || "").trim().toLowerCase() === "true";
+  const debug = String(process.env.DEBUG_HOTELS || "").trim().toLowerCase();
+  if (debug === "true") return true;
+  const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  return env !== "production";
 }
 
 function splitAddressParts(address) {
@@ -1721,12 +1724,13 @@ function buildHotelPhotoQueries(details) {
   const country = String(details?.country || "").trim() || deriveCountryFromAddress(details?.address);
   const queries = [];
   if (city && country) {
-    queries.push(`${name}, ${city}, ${country}`);
+    queries.push(`${name} ${city} ${country}`);
   }
   if (city) {
-    queries.push(`${name}, ${city}`);
+    queries.push(`${name} ${city} Canada`);
+    queries.push(`${name} ${city}`);
   }
-  queries.push(name);
+  queries.push(`${name}`);
   const seen = new Set();
   const out = [];
   for (const q of queries) {
@@ -1764,6 +1768,30 @@ async function fetchHotelPhotoReferenceWithFallback(details) {
   return null;
 }
 
+async function fetchPlacesDetailsPhotoReference(placeId) {
+  if (!GOOGLE_PLACES_API_KEY) {
+    return { photoRef: null, photosCount: 0 };
+  }
+  const url =
+    "https://maps.googleapis.com/maps/api/place/details/json" +
+    "?place_id=" + encodeURIComponent(placeId) +
+    "&fields=" + encodeURIComponent("photos") +
+    "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
+
+  try {
+    const r = await fetchWithTimeout(url);
+    const json = await r.json().catch(() => ({}));
+    if (!r.ok || json.status !== "OK") {
+      return { photoRef: null, photosCount: 0 };
+    }
+    const photos = Array.isArray(json.result?.photos) ? json.result.photos : [];
+    const photoRef = String(photos[0]?.photo_reference || "").trim() || null;
+    return { photoRef, photosCount: photos.length };
+  } catch (_) {
+    return { photoRef: null, photosCount: 0 };
+  }
+}
+
 async function fetchPlacesFindPlacePhotoReference(query) {
   if (!GOOGLE_PLACES_API_KEY) {
     return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0 };
@@ -1772,7 +1800,7 @@ async function fetchPlacesFindPlacePhotoReference(query) {
     "https://maps.googleapis.com/maps/api/place/findplacefromtext/json" +
     "?input=" + encodeURIComponent(query) +
     "&inputtype=textquery" +
-    "&fields=" + encodeURIComponent("place_id,name,photos") +
+    "&fields=" + encodeURIComponent("place_id,name") +
     "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
 
   let r;
@@ -1785,26 +1813,36 @@ async function fetchPlacesFindPlacePhotoReference(query) {
   }
   const candidates = Array.isArray(json?.candidates) ? json.candidates : [];
   const candidatesCount = candidates.length;
+  let fallback = { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount };
   for (const candidate of candidates) {
-    const photos = Array.isArray(candidate?.photos) ? candidate.photos : [];
-    if (photos.length === 0) continue;
-    const ref = String(photos[0]?.photo_reference || "").trim();
-    if (!ref) continue;
-    return {
-      photoRef: ref,
-      placeId: String(candidate?.place_id || "").trim() || null,
-      placeName: String(candidate?.name || "").trim() || null,
-      photosCount: photos.length,
-      candidatesCount,
-    };
+    const placeId = String(candidate?.place_id || "").trim();
+    if (!placeId) continue;
+    const placeName = String(candidate?.name || "").trim() || null;
+    const details = await fetchPlacesDetailsPhotoReference(placeId);
+    if (!fallback.placeId) {
+      fallback = {
+        photoRef: null,
+        placeId,
+        placeName,
+        photosCount: details.photosCount,
+        candidatesCount,
+      };
+    }
+    if (details.photoRef) {
+      return {
+        photoRef: details.photoRef,
+        placeId,
+        placeName,
+        photosCount: details.photosCount,
+        candidatesCount,
+      };
+    }
   }
-  const first = candidates[0] || null;
-  const firstPhotos = Array.isArray(first?.photos) ? first.photos.length : 0;
   return {
     photoRef: null,
-    placeId: String(first?.place_id || "").trim() || null,
-    placeName: String(first?.name || "").trim() || null,
-    photosCount: firstPhotos,
+    placeId: fallback.placeId,
+    placeName: fallback.placeName,
+    photosCount: fallback.photosCount,
     candidatesCount,
   };
 }
