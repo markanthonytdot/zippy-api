@@ -459,12 +459,13 @@ app.post("/v1/hotels/search", async (req, res) => {
   if (radiusKm <= 0) radiusKm = 15;
   if (radiusKm > 50) radiusKm = 50;
 
-  let max = Number(body.max);
+  const rawMax = body.max;
+  let max = Number(rawMax);
   if (!Number.isFinite(max)) max = 12;
   max = Math.round(max);
   if (max <= 0) max = 12;
   if (max > 50) max = 50;
-  const hotelsPageLimit = Math.min(max, 20);
+  const limit = Math.min(Math.max(1, Number.isFinite(Number(rawMax)) ? Math.round(Number(rawMax)) : 6), 20);
 
   let searchLat = latInput;
   let searchLng = lngInput;
@@ -488,15 +489,10 @@ app.post("/v1/hotels/search", async (req, res) => {
   const hotelsUrl = new URL(`${AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-geocode`);
   hotelsUrl.searchParams.set("latitude", String(searchLat));
   hotelsUrl.searchParams.set("longitude", String(searchLng));
-  hotelsUrl.searchParams.set("page[limit]", String(hotelsPageLimit));
-  const includeRadius = false;
-  const includeRadiusUnit = false;
-  const includeHotelSource = false;
-  const includeMax = false;
-  if (includeRadius) hotelsUrl.searchParams.set("radius", String(radiusKm));
-  if (includeRadiusUnit) hotelsUrl.searchParams.set("radiusUnit", "KM");
-  if (includeHotelSource) hotelsUrl.searchParams.set("hotelSource", "ALL");
-  if (includeMax) hotelsUrl.searchParams.set("max", String(max));
+  hotelsUrl.searchParams.set("page[limit]", String(limit));
+  hotelsUrl.searchParams.set("radius", String(radiusKm));
+  hotelsUrl.searchParams.set("radiusUnit", "KM");
+  hotelsUrl.searchParams.set("hotelSource", "ALL");
 
   console.log("[Hotels LIST]", "requestId=" + requestId, "lat=" + searchLat, "lng=" + searchLng);
   console.log("[Hotels LIST]", "requestId=" + requestId, "url=" + hotelsUrl.toString());
@@ -528,7 +524,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   }
 
   const hotelsData = Array.isArray(hotelsJson?.data) ? hotelsJson.data : [];
-  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, hotelsPageLimit);
+  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, limit);
   const hotelIds = [];
   const seenHotelIds = new Set();
   for (const item of hotelItems) {
