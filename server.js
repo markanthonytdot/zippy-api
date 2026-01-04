@@ -56,6 +56,7 @@ function makeFixedWindowLimiter({ windowMs, max }) {
 // caches
 const placesDetailsCache = makeTtlCache(); // key = placeId
 const placesDetailsPhotosCache = makeTtlCache(); // key = placeId:max
+const etaCache = makeTtlCache(); // key = rounded origin/dest + mode/traffic
 
 // limiters (tune later)
 const placesDetailsLimiter = makeFixedWindowLimiter({
@@ -74,6 +75,14 @@ const hotelsMinuteLimiter = makeFixedWindowLimiter({
 });
 const hotelsHourlyCounters = new Map(); // key: userId:YYYY-MM-DDTHH -> count
 const hotelsDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
+const etaMinuteLimiterFree = makeFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("ETA_RPM_FREE", 1),
+});
+const etaMinuteLimiterPaid = makeFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("ETA_RPM_PAID", 10),
+});
 
 // Google key (server-only)
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
@@ -477,6 +486,45 @@ app.post("/v1/places/eta", async (req, res) => {
   const userId = await requireUserId(req, res);
   if (!userId) return;
 
+  if (!GOOGLE_PLACES_API_KEY) {
+    return res.status(500).json({ ok: false, error: "GOOGLE_PLACES_API_KEY not set" });
+  }
+
+  const origin = req.body?.origin || {};
+  const dest = req.body?.dest || {};
+  const originLat = Number(origin.lat);
+  const originLng = Number(origin.lng);
+  const destLat = Number(dest.lat);
+  const destLng = Number(dest.lng);
+
+  if (
+    !Number.isFinite(originLat) ||
+    !Number.isFinite(originLng) ||
+    !Number.isFinite(destLat) ||
+    !Number.isFinite(destLng)
+  ) {
+    return res.status(400).json({ ok: false, error: "Missing or invalid origin/dest" });
+  }
+
+  const mode = String(req.body?.mode || "driving").toLowerCase();
+  if (mode !== "driving" && mode !== "walking") {
+    return res.status(400).json({ ok: false, error: "Invalid mode" });
+  }
+
+  const trafficRaw = req.body?.traffic;
+  let traffic = false;
+  if (mode === "driving") {
+    if (trafficRaw === undefined) {
+      traffic = true;
+    } else if (typeof trafficRaw !== "boolean") {
+      return res.status(400).json({ ok: false, error: "Invalid traffic" });
+    } else {
+      traffic = trafficRaw;
+    }
+  } else if (trafficRaw !== undefined) {
+    return res.status(400).json({ ok: false, error: "Traffic only allowed for driving" });
+  }
+
   const plan = getPlanForNow(req);
   const lim = enforceEtaLimits(userId, plan);
   if (!lim.ok) {
@@ -491,13 +539,93 @@ app.post("/v1/places/eta", async (req, res) => {
     "day=" + lim.dayCount + "/" + lim.dailyLimit
   );
 
-  return res.json({
-    ok: true,
-    stub: true,
-    endpoint: "eta",
-    userId,
-    bodyKeys: Object.keys(req.body || {}),
-  });
+  const coordKey = (n) => (Math.round(n * 10000) / 10000).toFixed(4);
+  const cacheKey = [
+    "eta",
+    coordKey(originLat),
+    coordKey(originLng),
+    coordKey(destLat),
+    coordKey(destLng),
+    mode,
+    traffic ? "1" : "0",
+  ].join(":");
+
+  const cached = etaCache.get(cacheKey);
+  if (cached) {
+    const minutes = cached.minutes;
+    const meters = cached.meters;
+    const cachedFlag = true;
+    console.log(
+      "[ETA]",
+      "userId=" + userId,
+      "mode=" + mode,
+      "traffic=" + traffic,
+      "cached=" + cachedFlag,
+      "minutes=" + minutes,
+      "meters=" + meters
+    );
+    return res.json({ ok: true, cached: true, minutes, meters, mode, traffic });
+  }
+
+  let url =
+    "https://maps.googleapis.com/maps/api/distancematrix/json" +
+    "?origins=" + encodeURIComponent(`${originLat},${originLng}`) +
+    "&destinations=" + encodeURIComponent(`${destLat},${destLng}`) +
+    "&mode=" + encodeURIComponent(mode) +
+    "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
+
+  if (mode === "driving" && traffic) {
+    url += "&departure_time=now";
+  }
+
+  try {
+    const r = await fetch(url);
+    const json = await r.json();
+
+    if (!r.ok || json.status !== "OK") {
+      const detail = json?.error_message || String(json.status || r.status);
+      return res.status(502).json({ ok: false, error: "Google ETA failed", detail });
+    }
+
+    const element = json?.rows?.[0]?.elements?.[0];
+    if (!element || element.status !== "OK") {
+      const detail = String(element?.status || "NO_ELEMENTS");
+      return res.status(502).json({ ok: false, error: "Google ETA failed", detail });
+    }
+
+    const duration = mode === "driving" && traffic ? element.duration_in_traffic : element.duration;
+    const durationValue = Number(duration?.value);
+    const distanceValue = Number(element.distance?.value);
+
+    if (!Number.isFinite(durationValue) || !Number.isFinite(distanceValue)) {
+      return res.status(502).json({ ok: false, error: "Google ETA failed", detail: "Missing duration/distance" });
+    }
+
+    const minutes = Math.round(durationValue / 60);
+    const meters = Math.round(distanceValue);
+    let ttlMs = 60 * 1000;
+    if (mode === "walking" || (mode === "driving" && !traffic)) {
+      ttlMs = 10 * 60 * 1000;
+    }
+
+    etaCache.set(cacheKey, { minutes, meters }, ttlMs);
+
+    const cachedFlag = false;
+    console.log(
+      "[ETA]",
+      "userId=" + userId,
+      "mode=" + mode,
+      "traffic=" + traffic,
+      "cached=" + cachedFlag,
+      "minutes=" + minutes,
+      "meters=" + meters
+    );
+
+    return res.json({ ok: true, cached: false, minutes, meters, mode, traffic });
+  } catch (e) {
+    console.log("[ETA] error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
 });
 
 // ---------------------------------------------
@@ -542,7 +670,6 @@ app.post("/admin/init", async (req, res) => {
 // Simple in-memory rate limits + cache (starter)
 // NOTE: resets when server restarts, good for MVP
 // ---------------------------------------------
-const etaMinuteCounters = new Map(); // key: userId:minute -> count
 const etaHourlyCounters = new Map(); // key: userId:YYYY-MM-DDTHH -> count
 const etaDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
 const photoMinuteCounters = new Map(); // key: userId:minute -> count
@@ -634,7 +761,6 @@ function enforcePhotoLimits(userId, plan) {
 }
 
 function enforceEtaLimits(userId, plan) {
-  const minute = nowMinuteKey();
   const hour = hourKeyUTC();
   const day = todayKey();
 
@@ -645,21 +771,26 @@ function enforceEtaLimits(userId, plan) {
   const dailyFree = getEnvInt("ETA_DAILY_FREE", 1);
   const dailyPaid = getEnvInt("ETA_DAILY_PAID", 30);
 
-  const rpmLimit = plan === "paid" ? rpmPaid : rpmFree;
-  const hourlyLimit = plan === "paid" ? hourlyPaid : hourlyFree;
-  const dailyLimit = plan === "paid" ? dailyPaid : dailyFree;
+  const isPaid = plan === "paid";
+  const rpmLimit = isPaid ? rpmPaid : rpmFree;
+  const hourlyLimit = isPaid ? hourlyPaid : hourlyFree;
+  const dailyLimit = isPaid ? dailyPaid : dailyFree;
 
-  const minuteKey = `${userId}:${minute}`;
   const hourKey = `${userId}:${hour}`;
   const dayKey = `${userId}:${day}`;
 
-  const minuteCount = (etaMinuteCounters.get(minuteKey) || 0) + 1;
+  let minuteCount = 0;
+  if (rpmLimit >= 0) {
+    const minuteLimiter = isPaid ? etaMinuteLimiterPaid : etaMinuteLimiterFree;
+    const minuteResult = minuteLimiter.allow(`eta:${userId}`);
+    if (!minuteResult.ok) {
+      return { ok: false, status: 429, error: "ETA rate limit exceeded (per minute). Try again shortly." };
+    }
+    minuteCount = rpmLimit - minuteResult.remaining;
+  }
   const hourCount = (etaHourlyCounters.get(hourKey) || 0) + 1;
   const dayCount = (etaDailyCounters.get(dayKey) || 0) + 1;
 
-  if (rpmLimit >= 0 && minuteCount > rpmLimit) {
-    return { ok: false, status: 429, error: "ETA rate limit exceeded (per minute). Try again shortly." };
-  }
   if (hourlyLimit >= 0 && hourCount > hourlyLimit) {
     return { ok: false, status: 429, error: "ETA hourly limit reached. Try again later." };
   }
@@ -667,7 +798,6 @@ function enforceEtaLimits(userId, plan) {
     return { ok: false, status: 429, error: "ETA daily limit reached. Try again tomorrow." };
   }
 
-  etaMinuteCounters.set(minuteKey, minuteCount);
   etaHourlyCounters.set(hourKey, hourCount);
   etaDailyCounters.set(dayKey, dayCount);
 
