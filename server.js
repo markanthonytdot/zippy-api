@@ -183,6 +183,7 @@ const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
 const AMADEUS_BASE_URL =
   process.env.AMADEUS_BASE_URL ||
   (process.env.NODE_ENV === "production" ? "https://api.amadeus.com" : "https://test.api.amadeus.com");
+const AMADEUS_TOKEN_URL = "https://test.api.amadeus.com/v1/security/oauth2/token";
 
 // ---------------------------------------------
 // Auth config
@@ -1369,12 +1370,13 @@ async function geocodeCityToLatLng(city) {
 }
 
 async function fetchAmadeusToken(requestId) {
-  const url = `${AMADEUS_BASE_URL}/v1/security/oauth2/token`;
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: AMADEUS_CLIENT_ID,
-    client_secret: AMADEUS_CLIENT_SECRET,
-  }).toString();
+  const url = AMADEUS_TOKEN_URL;
+  const body =
+    "grant_type=client_credentials" +
+    "&client_id=" + encodeURIComponent(AMADEUS_CLIENT_ID) +
+    "&client_secret=" + encodeURIComponent(AMADEUS_CLIENT_SECRET);
+  const clientIdLen = AMADEUS_CLIENT_ID.length;
+  const secretLen = AMADEUS_CLIENT_SECRET.length;
 
   let r;
   try {
@@ -1384,12 +1386,41 @@ async function fetchAmadeusToken(requestId) {
       body,
     });
   } catch (e) {
-    console.log("[Hotels TOKEN]", "requestId=" + requestId, "status=ERR");
+    console.log(
+      "[Hotels TOKEN]",
+      "requestId=" + requestId,
+      "url=" + url,
+      "status=ERR",
+      "clientIdLen=" + clientIdLen,
+      "secretLen=" + secretLen
+    );
     return { ok: false, status: 502, error: "Amadeus auth failed" };
   }
 
-  console.log("[Hotels TOKEN]", "requestId=" + requestId, "status=" + r.status);
-  const json = await r.json().catch(() => ({}));
+  const responseText = await r.text().catch(() => "");
+  console.log(
+    "[Hotels TOKEN]",
+    "requestId=" + requestId,
+    "url=" + url,
+    "status=" + r.status,
+    "clientIdLen=" + clientIdLen,
+    "secretLen=" + secretLen
+  );
+  if (!r.ok) {
+    console.log(
+      "[Hotels TOKEN]",
+      "requestId=" + requestId,
+      "status=FAIL",
+      "body=" + String(responseText).slice(0, 300)
+    );
+  }
+
+  let json = {};
+  try {
+    json = responseText ? JSON.parse(responseText) : {};
+  } catch (_) {
+    json = {};
+  }
   const token = String(json?.access_token || "").trim();
   if (!r.ok || !token) {
     return { ok: false, status: 502, error: "Amadeus auth failed" };
