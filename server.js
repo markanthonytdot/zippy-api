@@ -465,7 +465,6 @@ app.post("/v1/hotels/search", async (req, res) => {
   max = Math.round(max);
   if (max <= 0) max = 12;
   if (max > 50) max = 50;
-  const limit = Math.min(Math.max(1, Number.isFinite(Number(rawMax)) ? Math.round(Number(rawMax)) : 6), 20);
 
   let searchLat = latInput;
   let searchLng = lngInput;
@@ -487,15 +486,16 @@ app.post("/v1/hotels/search", async (req, res) => {
   }
 
   const hotelsUrl = new URL(`${AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-geocode`);
-  hotelsUrl.searchParams.set("latitude", String(searchLat));
-  hotelsUrl.searchParams.set("longitude", String(searchLng));
-  hotelsUrl.searchParams.set("page[limit]", String(limit));
-  hotelsUrl.searchParams.set("radius", String(radiusKm));
-  hotelsUrl.searchParams.set("radiusUnit", "KM");
-  hotelsUrl.searchParams.set("hotelSource", "ALL");
+  setOptionalQueryParam(hotelsUrl, "latitude", searchLat);
+  setOptionalQueryParam(hotelsUrl, "longitude", searchLng);
+  setOptionalQueryParam(hotelsUrl, "radius", radiusKm);
+  setOptionalQueryParam(hotelsUrl, "radiusUnit", "KM");
+  setOptionalQueryParam(hotelsUrl, "hotelSource", "ALL");
 
   console.log("[Hotels LIST]", "requestId=" + requestId, "lat=" + searchLat, "lng=" + searchLng);
-  console.log("[Hotels LIST]", "requestId=" + requestId, "url=" + hotelsUrl.toString());
+  if (shouldLogHotelsUrl()) {
+    console.log("[Hotels LIST]", "requestId=" + requestId, "url=" + hotelsUrl.toString());
+  }
 
   const tokenHost = getUrlHost(getAmadeusTokenUrl());
   const hotelsHost = hotelsUrl.host;
@@ -524,7 +524,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   }
 
   const hotelsData = Array.isArray(hotelsJson?.data) ? hotelsJson.data : [];
-  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, limit);
+  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, max);
   const hotelIds = [];
   const seenHotelIds = new Set();
   for (const item of hotelItems) {
@@ -546,14 +546,24 @@ app.post("/v1/hotels/search", async (req, res) => {
   if (!hotelsRes.ok) {
     const hostPath = `${hotelsUrl.host}${hotelsUrl.pathname}`;
     const bodySnippet = truncateText(hotelsText, 500);
-    console.log(
-      "[Hotels LIST]",
-      "requestId=" + requestId,
-      "url=" + hotelsUrl.toString(),
-      "hostPath=" + hostPath,
-      "status=" + hotelsRes.status,
-      "body=" + bodySnippet
-    );
+    if (shouldLogHotelsUrl()) {
+      console.log(
+        "[Hotels LIST]",
+        "requestId=" + requestId,
+        "url=" + hotelsUrl.toString(),
+        "hostPath=" + hostPath,
+        "status=" + hotelsRes.status,
+        "body=" + bodySnippet
+      );
+    } else {
+      console.log(
+        "[Hotels LIST]",
+        "requestId=" + requestId,
+        "hostPath=" + hostPath,
+        "status=" + hotelsRes.status,
+        "body=" + bodySnippet
+      );
+    }
     return res.status(502).json({
       ok: false,
       error: "Amadeus hotels fetch failed",
@@ -1498,6 +1508,26 @@ function truncateText(value, maxLen) {
   const text = String(value || "");
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen);
+}
+
+function setOptionalQueryParam(url, key, value) {
+  if (!url || !key) return;
+  if (value === undefined || value === null) return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return;
+    url.searchParams.set(key, String(value));
+    return;
+  }
+  const text = String(value).trim();
+  if (!text) return;
+  url.searchParams.set(key, text);
+}
+
+function shouldLogHotelsUrl() {
+  const debug = String(process.env.DEBUG_HOTELS || "").trim().toLowerCase();
+  if (debug === "true") return true;
+  const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  return env !== "production";
 }
 
 function chunkArray(items, size) {
