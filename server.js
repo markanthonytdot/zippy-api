@@ -488,6 +488,9 @@ app.post("/v1/hotels/search", async (req, res) => {
   hotelsUrl.searchParams.set("hotelSource", "ALL");
   hotelsUrl.searchParams.set("page[limit]", String(max));
 
+  console.log("[Hotels LIST]", "requestId=" + requestId, "lat=" + searchLat, "lng=" + searchLng);
+  console.log("[Hotels LIST]", "requestId=" + requestId, "url=" + hotelsUrl.toString());
+
   const tokenHost = getUrlHost(getAmadeusTokenUrl());
   const hotelsHost = hotelsUrl.host;
   const tokenPrefix = tokenResult.token.slice(0, 12);
@@ -532,6 +535,7 @@ app.post("/v1/hotels/search", async (req, res) => {
     console.log(
       "[Hotels LIST]",
       "requestId=" + requestId,
+      "url=" + hotelsUrl.toString(),
       "hostPath=" + hostPath,
       "status=" + hotelsRes.status,
       "body=" + bodySnippet
@@ -539,7 +543,7 @@ app.post("/v1/hotels/search", async (req, res) => {
     return res.status(502).json({
       ok: false,
       error: "Amadeus hotels fetch failed",
-      hint: `step=hotels status=${hotelsRes.status} body=${bodySnippet}`,
+      hint: `step=hotels url=${hotelsUrl.toString()} status=${hotelsRes.status} body=${bodySnippet}`,
     });
   }
 
