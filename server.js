@@ -842,7 +842,9 @@ app.get("/v1/hotels/photo", async (req, res) => {
     maxWidth = Math.min(1600, Math.max(100, parsed));
   }
 
-  const debugEnabled = isHotelsDebugEnabled();
+  const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  const isProduction = env === "production";
+  const debugEnabled = !isProduction && (AUTH_MODE === "dev" || isHotelsDebugEnabled());
   const debugLogEnabled = isHotelsDebugLoggingEnabled();
 
   const cached = hotelPhotoRefCache.get(hotelIdKey);
