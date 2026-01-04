@@ -124,6 +124,7 @@ const HOTEL_PHOTO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOTEL_PHOTO_MAX_WIDTH = 900;
 const HOTEL_PHOTO_REF_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const HOTEL_DETAILS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const HOTEL_PHOTO_REF_NULL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // limiters (tune later)
 const placesDetailsLimiter = makeFixedWindowLimiter({
@@ -812,6 +813,9 @@ app.post("/v1/hotels/search", async (req, res) => {
 // GET /v1/hotels/photo?hotelId=...&maxWidth=...
 // ---------------------------------------------
 app.get("/v1/hotels/photo", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
   const hotelIdRaw = String(req.query.hotelId || "").trim();
   if (!hotelIdRaw) {
     return res.status(400).json({ ok: false, error: "Missing hotelId" });
@@ -853,8 +857,14 @@ app.get("/v1/hotels/photo", async (req, res) => {
     return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null });
   }
 
-  const photoRef = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details);
-  hotelPhotoRefCache.set(hotelIdKey, { photoRef: photoRef || null }, HOTEL_PHOTO_REF_TTL_MS);
+  const result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details);
+  const photoRef = result?.photoRef || null;
+  const ttl = photoRef ? HOTEL_PHOTO_REF_TTL_MS : HOTEL_PHOTO_REF_NULL_TTL_MS;
+  hotelPhotoRefCache.set(
+    hotelIdKey,
+    { photoRef, placeId: result?.placeId || null, placeName: result?.placeName || null },
+    ttl
+  );
   const photoUrl = photoRef ? buildPlacesPhotoUrl(req, photoRef, maxWidth) : null;
   return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl });
 });
@@ -1659,14 +1669,41 @@ function buildPlacesPhotoUrl(req, photoRef, maxWidth = HOTEL_PHOTO_MAX_WIDTH) {
   return `${base}/v1/places/photo?ref=${encodeURIComponent(photoRef)}&maxWidth=${encodeURIComponent(String(maxWidth))}`;
 }
 
+function isHotelsDebugEnabled() {
+  return String(process.env.DEBUG_HOTELS || "").trim().toLowerCase() === "true";
+}
+
+function splitAddressParts(address) {
+  if (!address) return [];
+  return String(address)
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function deriveCountryFromAddress(address) {
+  const parts = splitAddressParts(address);
+  if (parts.length === 0) return null;
+  return parts[parts.length - 1] || null;
+}
+
+function deriveCityFromAddress(address) {
+  const parts = splitAddressParts(address);
+  if (parts.length < 2) return null;
+  return parts[parts.length - 2] || null;
+}
+
 function cacheHotelDetails(hotelId, name, address, city) {
   const id = normalizeCacheKeyPart(hotelId);
   const hotelName = String(name || "").trim();
   if (!id || !hotelName) return;
+  const derivedCity = city ? String(city) : deriveCityFromAddress(address);
+  const derivedCountry = deriveCountryFromAddress(address);
   const record = {
     name: hotelName,
     address: address ? String(address) : null,
-    city: city ? String(city) : null,
+    city: derivedCity || null,
+    country: derivedCountry || null,
   };
   hotelDetailsCache.set(id, record, HOTEL_DETAILS_TTL_MS);
 }
@@ -1674,12 +1711,102 @@ function cacheHotelDetails(hotelId, name, address, city) {
 async function fetchHotelPhotoReferenceByDetails(hotelId, details) {
   if (!details) return null;
   if (!GOOGLE_PLACES_API_KEY) return null;
-  const item = {
-    hotelId,
-    name: details.name,
-    address: details.address,
+  return await fetchHotelPhotoReferenceWithFallback(details);
+}
+
+function buildHotelPhotoQueries(details) {
+  const name = String(details?.name || "").trim();
+  if (!name) return [];
+  const city = String(details?.city || "").trim() || deriveCityFromAddress(details?.address);
+  const country = String(details?.country || "").trim() || deriveCountryFromAddress(details?.address);
+  const queries = [];
+  if (city && country) {
+    queries.push(`${name}, ${city}, ${country}`);
+  }
+  if (city) {
+    queries.push(`${name}, ${city}`);
+  }
+  queries.push(name);
+  const seen = new Set();
+  const out = [];
+  for (const q of queries) {
+    const trimmed = truncateText(String(q || "").trim(), 200);
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+async function fetchHotelPhotoReferenceWithFallback(details) {
+  const queries = buildHotelPhotoQueries(details);
+  if (queries.length === 0) return null;
+  for (const query of queries) {
+    const result = await fetchPlacesFindPlacePhotoReference(query);
+    if (isHotelsDebugEnabled()) {
+      console.log(
+        "[Hotels PHOTO]",
+        "query=" + query,
+        "candidates=" + result.candidatesCount,
+        "placeId=" + (result.placeId || ""),
+        "name=" + (result.placeName || ""),
+        "photos=" + result.photosCount
+      );
+    }
+    if (result.photoRef) {
+      return {
+        photoRef: result.photoRef,
+        placeId: result.placeId,
+        placeName: result.placeName,
+      };
+    }
+  }
+  return null;
+}
+
+async function fetchPlacesFindPlacePhotoReference(query) {
+  if (!GOOGLE_PLACES_API_KEY) {
+    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0 };
+  }
+  const url =
+    "https://maps.googleapis.com/maps/api/place/findplacefromtext/json" +
+    "?input=" + encodeURIComponent(query) +
+    "&inputtype=textquery" +
+    "&fields=" + encodeURIComponent("place_id,name,photos") +
+    "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
+
+  let r;
+  let json = {};
+  try {
+    r = await fetchWithTimeout(url);
+    json = await r.json().catch(() => ({}));
+  } catch (_) {
+    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0 };
+  }
+  const candidates = Array.isArray(json?.candidates) ? json.candidates : [];
+  const candidatesCount = candidates.length;
+  for (const candidate of candidates) {
+    const photos = Array.isArray(candidate?.photos) ? candidate.photos : [];
+    if (photos.length === 0) continue;
+    const ref = String(photos[0]?.photo_reference || "").trim();
+    if (!ref) continue;
+    return {
+      photoRef: ref,
+      placeId: String(candidate?.place_id || "").trim() || null,
+      placeName: String(candidate?.name || "").trim() || null,
+      photosCount: photos.length,
+      candidatesCount,
+    };
+  }
+  const first = candidates[0] || null;
+  const firstPhotos = Array.isArray(first?.photos) ? first.photos.length : 0;
+  return {
+    photoRef: null,
+    placeId: String(first?.place_id || "").trim() || null,
+    placeName: String(first?.name || "").trim() || null,
+    photosCount: firstPhotos,
+    candidatesCount,
   };
-  return await fetchHotelPrimaryPhotoReference(item, details.city);
 }
 
 async function fetchHotelPrimaryPhotoReference(item, fallbackCity) {
