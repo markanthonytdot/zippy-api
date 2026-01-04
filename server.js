@@ -483,6 +483,9 @@ app.post("/v1/hotels/search", async (req, res) => {
     return res.status(tokenResult.status).json({ ok: false, error: tokenResult.error });
   }
 
+  const amadeusBaseHost = getUrlHost(AMADEUS_BASE_URL);
+  console.log("[Hotels AMADEUS]", "requestId=" + requestId, "baseHost=" + amadeusBaseHost);
+
   const hotelsUrl = new URL(`${AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-geocode`);
   hotelsUrl.searchParams.set("latitude", String(searchLat));
   hotelsUrl.searchParams.set("longitude", String(searchLng));
@@ -493,11 +496,13 @@ app.post("/v1/hotels/search", async (req, res) => {
 
   let hotelsRes;
   let hotelsJson = {};
+  let hotelsText = "";
   try {
     hotelsRes = await fetchWithTimeout(hotelsUrl.toString(), {
       headers: { Authorization: `Bearer ${tokenResult.token}` },
     });
-    hotelsJson = await hotelsRes.json().catch(() => ({}));
+    hotelsText = await hotelsRes.text().catch(() => "");
+    hotelsJson = safeJsonParse(hotelsText);
   } catch (e) {
     console.log("[Hotels LIST]", "requestId=" + requestId, "userId=" + userId, "status=ERR", "count=0");
     return res.status(502).json({ ok: false, error: "Amadeus hotels fetch failed" });
@@ -516,7 +521,20 @@ app.post("/v1/hotels/search", async (req, res) => {
   );
 
   if (!hotelsRes.ok) {
-    return res.status(502).json({ ok: false, error: "Amadeus hotels fetch failed" });
+    const hostPath = `${hotelsUrl.host}${hotelsUrl.pathname}`;
+    const bodySnippet = truncateText(hotelsText, 500);
+    console.log(
+      "[Hotels LIST]",
+      "requestId=" + requestId,
+      "hostPath=" + hostPath,
+      "status=" + hotelsRes.status,
+      "body=" + bodySnippet
+    );
+    return res.status(502).json({
+      ok: false,
+      error: "Amadeus hotels fetch failed",
+      hint: `step=hotels status=${hotelsRes.status} body=${bodySnippet}`,
+    });
   }
 
   if (hotelIds.length === 0) {
@@ -546,11 +564,13 @@ app.post("/v1/hotels/search", async (req, res) => {
 
   let offersRes;
   let offersJson = {};
+  let offersText = "";
   try {
     offersRes = await fetchWithTimeout(offersUrl.toString(), {
       headers: { Authorization: `Bearer ${tokenResult.token}` },
     });
-    offersJson = await offersRes.json().catch(() => ({}));
+    offersText = await offersRes.text().catch(() => "");
+    offersJson = safeJsonParse(offersText);
   } catch (e) {
     console.log("[Hotels OFFERS]", "requestId=" + requestId, "userId=" + userId, "status=ERR", "count=0");
     return res.status(502).json({ ok: false, error: "Amadeus offers fetch failed" });
@@ -566,7 +586,20 @@ app.post("/v1/hotels/search", async (req, res) => {
   );
 
   if (!offersRes.ok) {
-    return res.status(502).json({ ok: false, error: "Amadeus offers fetch failed" });
+    const hostPath = `${offersUrl.host}${offersUrl.pathname}`;
+    const bodySnippet = truncateText(offersText, 500);
+    console.log(
+      "[Hotels OFFERS]",
+      "requestId=" + requestId,
+      "hostPath=" + hostPath,
+      "status=" + offersRes.status,
+      "body=" + bodySnippet
+    );
+    return res.status(502).json({
+      ok: false,
+      error: "Amadeus offers fetch failed",
+      hint: `step=offers status=${offersRes.status} body=${bodySnippet}`,
+    });
   }
 
   const items = offersData
@@ -1305,6 +1338,29 @@ function addNightsToDate(checkIn, nights) {
   const out = new Date(date.getTime());
   out.setUTCDate(out.getUTCDate() + nights);
   return out.toISOString().slice(0, 10);
+}
+
+function truncateText(value, maxLen) {
+  const text = String(value || "");
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen);
+}
+
+function safeJsonParse(text) {
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    return {};
+  }
+}
+
+function getUrlHost(rawUrl) {
+  try {
+    return new URL(rawUrl).host;
+  } catch (_) {
+    return "";
+  }
 }
 
 function formatAmadeusAddress(address) {
