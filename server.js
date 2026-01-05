@@ -190,7 +190,7 @@ const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 // Duffel key (server-only)
 const DUFFEL_API_KEY = process.env.DUFFEL_API_KEY || "";
-const DUFFEL_API_VERSION = process.env.DUFFEL_API_VERSION || "2024-01-10";
+const DUFFEL_API_VERSION = String(process.env.DUFFEL_API_VERSION || "v2").trim() || "v2";
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
 const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
