@@ -1471,7 +1471,9 @@ app.post("/v1/flights/search", async (req, res) => {
     console.log("[Duffel]", "version=" + DUFFEL_API_VERSION);
   }
 
-  const payload = req.body || {};
+  const rawPayload = req.body || {};
+  const unwrapped = rawPayload && typeof rawPayload === "object" && rawPayload.data && typeof rawPayload.data === "object";
+  const payload = unwrapped ? rawPayload.data : rawPayload;
   const data = {};
   if (Array.isArray(payload.slices)) {
     data.slices = payload.slices;
@@ -1498,7 +1500,13 @@ app.post("/v1/flights/search", async (req, res) => {
   if (env !== "production") {
     const slicesCount = Array.isArray(data.slices) ? data.slices.length : 0;
     const passengersCount = Array.isArray(data.passengers) ? data.passengers.length : 0;
-    console.log("[Duffel]", "data_key=true", "slices=" + slicesCount, "passengers=" + passengersCount);
+    console.log(
+      "[Duffel]",
+      "data_key=true",
+      "unwrapped=" + String(unwrapped),
+      "slices=" + slicesCount,
+      "passengers=" + passengersCount
+    );
   }
 
   const url = "https://api.duffel.com/air/offer_requests";
