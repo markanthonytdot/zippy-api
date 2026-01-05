@@ -204,9 +204,9 @@ const AUTH_MODE = String(process.env.AUTH_MODE || "dev").toLowerCase();
 const JWT_SECRET = process.env.JWT_SECRET || "";
 const JWT_ISSUER = process.env.JWT_ISSUER || "zippy-api";
 const JWT_AUDIENCE = process.env.JWT_AUDIENCE || "zippy-ios";
-const APPLE_CLIENT_ID = process.env.APPLE_CLIENT_ID || "";
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
+const APPLE_AUDIENCE = "com.heyzippi.zippi";
 
 // jose lazy loader (works in CommonJS)
 let josePromise = null;
@@ -307,6 +307,7 @@ app.use("/v1/places/details/photos", rateLimitMiddleware(placesDetailsPhotosRout
 app.use("/v1/places/eta", rateLimitMiddleware(etaRouteLimiter, "eta"));
 app.use("/v1/hotels", rateLimitMiddleware(hotelsRouteLimiter, "hotels"));
 app.use("/auth/apple", rateLimitMiddleware(authAppleLimiter, "authApple"));
+app.use("/auth/dev", rateLimitMiddleware(authAppleLimiter, "authDev"));
 app.use("/me/saved", rateLimitMiddleware(meSavedLimiter, "meSaved"));
 app.use("/admin/init", rateLimitMiddleware(adminInitLimiter, "adminInit"));
 
@@ -317,7 +318,7 @@ app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "zippy-api",
-    authMode: String(process.env.AUTH_MODE || "dev"),
+    authMode: AUTH_MODE,
     hasJwtSecret: !!process.env.JWT_SECRET,
     jwtIssuer: String(process.env.JWT_ISSUER || ""),
     jwtAudience: String(process.env.JWT_AUDIENCE || ""),
@@ -2896,6 +2897,34 @@ function requireDb(req, res) {
 }
 
 // ---------------------------------------------
+// Dev auth (dev mode only)
+// ---------------------------------------------
+app.post("/auth/dev", async (req, res) => {
+  if (AUTH_MODE === "prod") {
+    return res.status(404).json({ ok: false, error: "Dev auth disabled" });
+  }
+
+  const devSub = String(req.body?.devSub || "").trim();
+  if (!devSub) {
+    return res.status(400).json({ ok: false, error: "Missing devSub" });
+  }
+  if (devSub.length > 4000) {
+    return res.status(400).json({ ok: false, error: "Invalid devSub" });
+  }
+  if (!JWT_SECRET) {
+    return res.status(500).json({ ok: false, error: "Server misconfigured" });
+  }
+
+  try {
+    const token = await signZippyToken(devSub);
+    return res.json({ ok: true, token, mode: "dev" });
+  } catch (e) {
+    console.warn("Failed to mint dev token:", e?.message || e);
+    return res.status(500).json({ ok: false, error: "Server misconfigured" });
+  }
+});
+
+// ---------------------------------------------
 // Sign in with Apple (dev + prod)
 // ---------------------------------------------
 app.post("/auth/apple", async (req, res) => {
@@ -2922,8 +2951,8 @@ app.post("/auth/apple", async (req, res) => {
   }
 
   // PROD MODE
-  if (!APPLE_CLIENT_ID || !JWT_SECRET) {
-    console.warn("Missing APPLE_CLIENT_ID or JWT_SECRET for prod auth");
+  if (!JWT_SECRET) {
+    console.warn("Missing JWT_SECRET for prod auth");
     return res.status(500).json({ ok: false, error: "Server misconfigured" });
   }
 
@@ -2935,14 +2964,32 @@ app.post("/auth/apple", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid identityToken" });
   }
 
+  const rawNonce = req.body?.nonce;
+  let nonce = "";
+  let nonceProvided = false;
+  if (rawNonce !== undefined) {
+    nonce = String(rawNonce).trim();
+    if (!nonce) {
+      return res.status(400).json({ ok: false, error: "Invalid nonce" });
+    }
+    nonceProvided = true;
+  }
+
   try {
     const { jwtVerify } = await getJose();
     const jwks = await getAppleJwks();
 
     const { payload } = await jwtVerify(identityToken, jwks, {
       issuer: APPLE_ISSUER,
-      audience: APPLE_CLIENT_ID,
+      audience: APPLE_AUDIENCE,
     });
+
+    if (nonceProvided) {
+      const tokenNonce = String(payload?.nonce || "").trim();
+      if (!tokenNonce || tokenNonce !== nonce) {
+        return res.status(401).json({ ok: false, error: "Invalid nonce" });
+      }
+    }
 
     const appleSub = String(payload?.sub || "").trim();
     if (!appleSub) {
@@ -2954,7 +3001,7 @@ app.post("/auth/apple", async (req, res) => {
       return res.status(500).json({ ok: false, error: "Server misconfigured" });
     }
 
-    return res.json({ ok: true, token, mode: "prod" });
+    return res.json({ ok: true, token, user: { sub: appleSub } });
   } catch (e) {
     const reason = e?.code || e?.name || e?.message || "unknown";
     console.warn("Apple identityToken verification failed:", reason);
