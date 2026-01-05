@@ -188,6 +188,9 @@ const adminInitLimiter = makePrunableFixedWindowLimiter({
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
 // OpenAI key (server-only)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+// Duffel key (server-only)
+const DUFFEL_API_KEY = process.env.DUFFEL_API_KEY || "";
+const DUFFEL_API_VERSION = process.env.DUFFEL_API_VERSION || "2020-09-18";
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
 const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
@@ -1443,6 +1446,57 @@ app.post("/v1/responses", async (req, res) => {
 
   if (!r.ok) {
     console.log("[Responses]", "step=openai_response", "status=" + String(r.status));
+  }
+  return res.status(r.status).json(json);
+});
+
+// ---------------------------------------------
+// Duffel Flights Search (proxy)
+// POST /v1/flights/search
+// ---------------------------------------------
+app.post("/v1/flights/search", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  if (!DUFFEL_API_KEY) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  }
+
+  if (!req.body || typeof req.body !== "object") {
+    return res.status(400).json({ ok: false, error: "Invalid JSON body" });
+  }
+
+  const url = "https://api.duffel.com/air/offer_requests";
+  let r;
+  try {
+    r = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${DUFFEL_API_KEY}`,
+          "Duffel-Version": DUFFEL_API_VERSION,
+        },
+        body: JSON.stringify(req.body),
+      },
+      15000
+    );
+  } catch (e) {
+    console.log("[Duffel]", "step=offer_requests", "status=error");
+    return res.status(502).json({ ok: false, error: "Duffel request failed", hint: "offer_requests" });
+  }
+
+  let json;
+  try {
+    json = await r.json();
+  } catch (e) {
+    console.log("[Duffel]", "step=offer_requests", "status=" + String(r.status || "unknown"));
+    return res.status(502).json({ ok: false, error: "Duffel response invalid", hint: "offer_requests" });
+  }
+
+  if (!r.ok) {
+    console.log("[Duffel]", "step=offer_requests", "status=" + String(r.status));
   }
   return res.status(r.status).json(json);
 });
