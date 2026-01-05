@@ -186,6 +186,7 @@ const adminInitLimiter = makePrunableFixedWindowLimiter({
 
 // Google key (server-only)
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
+const GOOGLE_DIRECTIONS_API_KEY = process.env.GOOGLE_DIRECTIONS_API_KEY || "";
 // OpenAI key (server-only)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 // Duffel key (server-only)
@@ -1545,6 +1546,96 @@ app.post("/v1/flights/search", async (req, res) => {
 });
 
 
+// ---------------------------------------------
+// Places Directions (proxy)
+// GET/POST /v1/places/directions
+// ---------------------------------------------
+async function handlePlacesDirections(req, res) {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  if (!GOOGLE_DIRECTIONS_API_KEY) {
+    return res.status(500).json({ ok: false, error: "GOOGLE_DIRECTIONS_API_KEY not set" });
+  }
+
+  const input = req.method === "GET" ? req.query : req.body;
+  const origin = formatDirectionsLocation(input?.origin);
+  const destination = formatDirectionsLocation(input?.destination);
+  if (!origin || !destination) {
+    return res.status(400).json({ ok: false, error: "Missing origin or destination" });
+  }
+
+  const mode = String(input?.mode || "driving").trim().toLowerCase();
+  const allowedModes = new Set(["driving", "walking", "bicycling", "transit"]);
+  if (!allowedModes.has(mode)) {
+    return res.status(400).json({ ok: false, error: "Invalid mode" });
+  }
+
+  const alternativesRaw = input?.alternatives;
+  const alternatives =
+    alternativesRaw === true ||
+    (typeof alternativesRaw === "string" && alternativesRaw.trim().toLowerCase() === "true");
+  const departureTime = input?.departure_time;
+  const trafficModel = input?.traffic_model;
+
+  const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
+  url.searchParams.set("origin", origin);
+  url.searchParams.set("destination", destination);
+  url.searchParams.set("mode", mode);
+  if (alternatives) {
+    url.searchParams.set("alternatives", "true");
+  }
+  setOptionalQueryParam(url, "departure_time", departureTime);
+  setOptionalQueryParam(url, "traffic_model", trafficModel);
+  url.searchParams.set("key", GOOGLE_DIRECTIONS_API_KEY);
+
+  let r;
+  let json = {};
+  try {
+    r = await fetchWithTimeout(url.toString(), {}, 12000);
+    json = await r.json().catch(() => ({}));
+  } catch (e) {
+    console.log("[Directions]", "status=error", "detail=" + (e?.message || e));
+    return res.status(502).json({ ok: false, error: "Google directions fetch failed" });
+  }
+
+  const status = String(json?.status || "").trim();
+  if (!r.ok || (status && status !== "OK" && status !== "ZERO_RESULTS")) {
+    const msg = json?.error_message || ("Google directions failed: " + String(status || r.status));
+    return res.status(502).json({ ok: false, error: "Google directions fetch failed", detail: msg });
+  }
+  if (status === "ZERO_RESULTS") {
+    return res.json({
+      ok: true,
+      overviewPolyline: null,
+      distanceMeters: null,
+      durationSeconds: null,
+      durationInTrafficSeconds: null,
+    });
+  }
+
+  const route = Array.isArray(json.routes) ? json.routes[0] : null;
+  const leg = Array.isArray(route?.legs) ? route.legs[0] : null;
+  const overview = route?.overview_polyline?.points || null;
+  const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  const debugRaw = String(input?.debug || "").trim() === "1";
+  const response = {
+    ok: true,
+    overviewPolyline: overview,
+    distanceMeters: typeof leg?.distance?.value === "number" ? leg.distance.value : null,
+    durationSeconds: typeof leg?.duration?.value === "number" ? leg.duration.value : null,
+    durationInTrafficSeconds:
+      typeof leg?.duration_in_traffic?.value === "number" ? leg.duration_in_traffic.value : null,
+  };
+  if (env !== "production" && debugRaw) {
+    response.raw = json;
+  }
+  return res.json(response);
+}
+
+app.get("/v1/places/directions", handlePlacesDirections);
+app.post("/v1/places/directions", handlePlacesDirections);
+
 app.post("/v1/places/eta", async (req, res) => {
   const userId = await requireUserId(req, res);
   if (!userId) return;
@@ -1986,6 +2077,19 @@ function shouldLogHotelsUrl() {
   if (debug === "true") return true;
   const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
   return env !== "production";
+}
+
+function formatDirectionsLocation(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "object") {
+    const lat = Number(value.lat);
+    const lng = Number(value.lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return `${lat},${lng}`;
+    }
+  }
+  return "";
 }
 
 function chunkArray(items, size) {
