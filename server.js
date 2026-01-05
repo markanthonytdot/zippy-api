@@ -186,6 +186,8 @@ const adminInitLimiter = makePrunableFixedWindowLimiter({
 
 // Google key (server-only)
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
+// OpenAI key (server-only)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
 const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
@@ -1386,6 +1388,63 @@ app.get("/v1/places/photo", async (req, res) => {
     console.log("[PlacesPhoto] error:", e?.message || e);
     return res.status(500).json({ ok: false, error: "Server error fetching photo" });
   }
+});
+
+// ---------------------------------------------
+// OpenAI Responses (proxy)
+// POST /v1/responses
+// ---------------------------------------------
+app.post("/v1/responses", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  if (!OPENAI_API_KEY) {
+    return res.status(500).json({ ok: false, error: "OPENAI_API_KEY not set" });
+  }
+
+  if (!req.body || typeof req.body !== "object") {
+    return res.status(400).json({ ok: false, error: "Invalid JSON body" });
+  }
+
+  const streamRaw = req.body?.stream;
+  const streamEnabled =
+    streamRaw === true || (typeof streamRaw === "string" && streamRaw.trim().toLowerCase() === "true");
+  if (streamEnabled) {
+    return res.status(400).json({ ok: false, error: "Streaming not supported" });
+  }
+
+  const url = "https://api.openai.com/v1/responses";
+  let r;
+  try {
+    r = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify(req.body),
+      },
+      15000
+    );
+  } catch (e) {
+    console.log("[Responses]", "step=openai_request", "status=error");
+    return res.status(502).json({ ok: false, error: "OpenAI request failed", hint: "openai_request" });
+  }
+
+  let json;
+  try {
+    json = await r.json();
+  } catch (e) {
+    console.log("[Responses]", "step=openai_response", "status=" + String(r.status || "unknown"));
+    return res.status(502).json({ ok: false, error: "OpenAI response invalid", hint: "openai_response" });
+  }
+
+  if (!r.ok) {
+    console.log("[Responses]", "step=openai_response", "status=" + String(r.status));
+  }
+  return res.status(r.status).json(json);
 });
 
 
