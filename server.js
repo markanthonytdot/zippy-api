@@ -842,6 +842,38 @@ app.get("/v1/hotels/photo", async (req, res) => {
     maxWidth = Math.min(1600, Math.max(100, parsed));
   }
 
+  const nameParam = req.query.name;
+  if (nameParam !== undefined && typeof nameParam !== "string") {
+    return res.status(400).json({ ok: false, error: "Invalid name: must be a string" });
+  }
+  const nameInput = String(nameParam || "").trim();
+  if (nameInput.length > 200) {
+    return res.status(400).json({ ok: false, error: "Invalid name" });
+  }
+
+  const cityParam = req.query.city;
+  if (cityParam !== undefined && typeof cityParam !== "string") {
+    return res.status(400).json({ ok: false, error: "Invalid city: must be a string" });
+  }
+  const cityInput = String(cityParam || "").trim();
+  if (cityInput.length > 200) {
+    return res.status(400).json({ ok: false, error: "Invalid city" });
+  }
+
+  const latParam = req.query.lat;
+  const lngParam = req.query.lng;
+  const latNum = latParam !== undefined ? Number.parseFloat(String(latParam)) : NaN;
+  const lngNum = lngParam !== undefined ? Number.parseFloat(String(lngParam)) : NaN;
+  const locationBias =
+    Number.isFinite(latNum) &&
+    Number.isFinite(lngNum) &&
+    latNum >= -90 &&
+    latNum <= 90 &&
+    lngNum >= -180 &&
+    lngNum <= 180
+      ? { lat: latNum, lng: lngNum }
+      : null;
+
   const debugParam = String(req.query.debug || "").trim();
   const debugEnabled = debugParam === "1";
   const requestStart = Date.now();
@@ -869,6 +901,17 @@ app.get("/v1/hotels/photo", async (req, res) => {
     if (info?.reason) parts.push("reason=" + info.reason);
     console.log(...parts);
   };
+
+  const hasClientContext = Boolean(nameInput);
+  const clientDetails = hasClientContext
+    ? {
+        name: nameInput,
+        address: null,
+        city: cityInput || null,
+        country: null,
+      }
+    : null;
+  const clientQueries = hasClientContext ? buildHotelPhotoQueriesFromClient(nameInput, cityInput) : [];
 
   const cached = hotelPhotoRefCache.get(hotelIdKey);
   if (cached) {
@@ -898,6 +941,74 @@ app.get("/v1/hotels/photo", async (req, res) => {
       logStep("google_search", { ms: Date.now() - requestStart, reason: debug.reason });
     }
     return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null, ...(debugEnabled ? { debug } : {}) });
+  }
+
+  if (hasClientContext) {
+    if (debugEnabled) {
+      debug.step = "client_context";
+      debug.hotelName = nameInput;
+      debug.city = cityInput || null;
+      debug.triedQueries = clientQueries;
+      logStep("client_context", { ms: Date.now() - requestStart, reason: "ok" });
+    }
+    let result;
+    try {
+      result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, clientDetails, {
+        onStep: logStep,
+        queries: clientQueries,
+        locationBias,
+      });
+    } catch (err) {
+      const failedStep = err?.step || "details_photos";
+      if (debugEnabled) {
+        debug.reason = "exception";
+        debug.triedQueries = clientQueries;
+        logStep(failedStep, { ms: Date.now() - requestStart, reason: debug.reason });
+      }
+      return res.status(500).json({
+        ok: false,
+        error: "Hotel photo lookup failed",
+        hint: failedStep,
+        ...(debugEnabled ? { debug } : {}),
+      });
+    }
+    const photoRef = result?.photoRef || null;
+    const ttl = photoRef ? HOTEL_PHOTO_REF_TTL_MS : HOTEL_PHOTO_REF_NULL_TTL_MS;
+    const normalizedReason = normalizeHotelPhotoDebugReason(result?.reason, Boolean(photoRef));
+    hotelPhotoRefCache.set(
+      hotelIdKey,
+      {
+        photoRef,
+        placeId: result?.placeId || null,
+        placeName: result?.placeName || null,
+        debug: {
+          triedQueries: Array.isArray(result?.triedQueries) ? result.triedQueries : [],
+          chosenQuery: result?.query || null,
+          googleSearchResultsCount: typeof result?.candidatesCount === "number" ? result.candidatesCount : 0,
+          detailsPhotosCount: typeof result?.photosCount === "number" ? result.photosCount : 0,
+          reason: normalizedReason,
+        },
+      },
+      ttl
+    );
+    const photoUrl = photoRef ? buildPlacesPhotoUrl(req, photoRef, maxWidth) : null;
+    if (debugEnabled) {
+      debug.triedQueries = Array.isArray(result?.triedQueries) ? result.triedQueries : [];
+      debug.chosenQuery = result?.query || null;
+      debug.googleSearchResultsCount = typeof result?.candidatesCount === "number" ? result.candidatesCount : 0;
+      debug.chosenPlaceId = result?.placeId || null;
+      debug.detailsPhotosCount = typeof result?.photosCount === "number" ? result.photosCount : 0;
+      debug.reason = normalizedReason;
+      logStep("done", {
+        ms: Date.now() - requestStart,
+        reason: debug.reason,
+        query: debug.chosenQuery,
+        resultsCount: debug.googleSearchResultsCount,
+        placeId: debug.chosenPlaceId,
+        photosCount: debug.detailsPhotosCount,
+      });
+    }
+    return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl, ...(debugEnabled ? { debug } : {}) });
   }
 
   let details;
@@ -937,7 +1048,7 @@ app.get("/v1/hotels/photo", async (req, res) => {
 
   let result;
   try {
-    result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details, { onStep: logStep });
+    result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details, { onStep: logStep, locationBias });
   } catch (err) {
     if (debugEnabled) {
       debug.step = err?.step || "details_photos";
@@ -1892,9 +2003,31 @@ function buildHotelPhotoQueries(details) {
   return out;
 }
 
+function buildHotelPhotoQueriesFromClient(name, city) {
+  const baseName = String(name || "").trim();
+  if (!baseName) return [];
+  const cityText = String(city || "").trim();
+  const queries = [];
+  if (cityText) {
+    queries.push(`${baseName} ${cityText}`);
+    queries.push(`${baseName} hotel ${cityText}`);
+  } else {
+    queries.push(`${baseName} hotel`);
+  }
+  const seen = new Set();
+  const out = [];
+  for (const q of queries) {
+    const trimmed = truncateText(String(q || "").trim(), 200);
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
 async function fetchHotelPhotoReferenceWithFallback(details, options = {}) {
   const onStep = typeof options.onStep === "function" ? options.onStep : null;
-  const queries = buildHotelPhotoQueries(details);
+  const queries = Array.isArray(options.queries) ? options.queries : buildHotelPhotoQueries(details);
   if (queries.length === 0) {
     return {
       photoRef: null,
@@ -1918,7 +2051,7 @@ async function fetchHotelPhotoReferenceWithFallback(details, options = {}) {
     reason: "no_search_results",
   };
   for (const query of queries) {
-    const result = await fetchPlacesFindPlacePhotoReference(query, { onStep });
+    const result = await fetchPlacesFindPlacePhotoReference(query, { onStep, locationBias: options.locationBias || null });
     lastResult = { ...result, query };
     if (result.photoRef) {
       return {
@@ -1972,17 +2105,28 @@ async function fetchPlacesDetailsPhotoReference(placeId) {
 
 async function fetchPlacesFindPlacePhotoReference(query, options = {}) {
   const onStep = typeof options.onStep === "function" ? options.onStep : null;
+  const locationBias = options.locationBias || null;
   if (!GOOGLE_PLACES_API_KEY) {
     const err = new Error("Google Places API key missing");
     err.step = "google_search";
     throw err;
   }
-  const url =
+  let url =
     "https://maps.googleapis.com/maps/api/place/findplacefromtext/json" +
     "?input=" + encodeURIComponent(query) +
     "&inputtype=textquery" +
     "&fields=" + encodeURIComponent("place_id,name") +
     "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
+  if (
+    locationBias &&
+    typeof locationBias.lat === "number" &&
+    typeof locationBias.lng === "number" &&
+    Number.isFinite(locationBias.lat) &&
+    Number.isFinite(locationBias.lng)
+  ) {
+    const bias = `point:${locationBias.lat},${locationBias.lng}`;
+    url += "&locationbias=" + encodeURIComponent(bias);
+  }
 
   let r;
   let json = {};
