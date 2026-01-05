@@ -842,73 +842,119 @@ app.get("/v1/hotels/photo", async (req, res) => {
     maxWidth = Math.min(1600, Math.max(100, parsed));
   }
 
-  const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
-  const isProduction = env === "production";
-  const debugEnabled = !isProduction && (AUTH_MODE === "dev" || isHotelsDebugEnabled());
-  const debugLogEnabled = isHotelsDebugLoggingEnabled();
+  const debugParam = String(req.query.debug || "").trim();
+  const debugEnabled = debugParam === "1";
+  const requestStart = Date.now();
+  const debug = debugEnabled
+    ? {
+        step: "amadeus_lookup",
+        hotelId: hotelIdRaw,
+        hotelName: null,
+        city: null,
+        triedQueries: [],
+        chosenQuery: null,
+        googleSearchResultsCount: 0,
+        chosenPlaceId: null,
+        detailsPhotosCount: 0,
+        reason: "ok",
+      }
+    : null;
+  const logStep = (step, info) => {
+    if (!debugEnabled) return;
+    const parts = ["[Hotels PHOTO]", "step=" + step, "ms=" + String(info?.ms || 0), "hotelId=" + hotelIdRaw];
+    if (info?.query) parts.push("query=" + info.query);
+    if (typeof info?.resultsCount === "number") parts.push("results=" + info.resultsCount);
+    if (info?.placeId) parts.push("placeId=" + info.placeId);
+    if (typeof info?.photosCount === "number") parts.push("photos=" + info.photosCount);
+    if (info?.reason) parts.push("reason=" + info.reason);
+    console.log(...parts);
+  };
 
   const cached = hotelPhotoRefCache.get(hotelIdKey);
   if (cached) {
     const photoUrl = cached.photoRef ? buildPlacesPhotoUrl(req, cached.photoRef, maxWidth) : null;
-    const debug = debugEnabled
-      ? {
-          triedQueries: Array.isArray(cached?.debug?.triedQueries) ? cached.debug.triedQueries : [],
-          chosenQuery: cached?.debug?.chosenQuery || null,
-          googleSearchResultsCount: typeof cached?.debug?.googleSearchResultsCount === "number" ? cached.debug.googleSearchResultsCount : 0,
-          chosenPlaceId: cached?.placeId || null,
-          detailsPhotosCount: typeof cached?.debug?.detailsPhotosCount === "number" ? cached.debug.detailsPhotosCount : null,
-          reason: photoUrl ? "ok" : cached?.debug?.reason || "no_photos_in_details",
-        }
-      : undefined;
-    if (debugLogEnabled) {
-      console.log("[Hotels PHOTO]", JSON.stringify(debug));
+    if (debugEnabled) {
+      const details = hotelDetailsCache.get(hotelIdKey);
+      const city = String(details?.city || "").trim() || deriveCityFromAddress(details?.address);
+      debug.hotelName = details?.name ? String(details.name) : null;
+      debug.city = city || null;
+      debug.triedQueries = Array.isArray(cached?.debug?.triedQueries) ? cached.debug.triedQueries : [];
+      debug.chosenQuery = cached?.debug?.chosenQuery || null;
+      debug.googleSearchResultsCount =
+        typeof cached?.debug?.googleSearchResultsCount === "number" ? cached.debug.googleSearchResultsCount : 0;
+      debug.chosenPlaceId = cached?.placeId || null;
+      debug.detailsPhotosCount = typeof cached?.debug?.detailsPhotosCount === "number" ? cached.debug.detailsPhotosCount : 0;
+      debug.reason = normalizeHotelPhotoDebugReason(cached?.debug?.reason, Boolean(photoUrl));
+      debug.step = getHotelPhotoDebugStep(debug.reason);
+      logStep("done", { ms: Date.now() - requestStart, reason: debug.reason });
     }
     return res.json({ ok: true, hotelId: hotelIdRaw, cached: true, photoUrl, ...(debugEnabled ? { debug } : {}) });
   }
 
   if (!GOOGLE_PLACES_API_KEY) {
-    const debug = debugEnabled
-      ? {
-          triedQueries: [],
-          chosenQuery: null,
-          googleSearchResultsCount: 0,
-          chosenPlaceId: null,
-          detailsPhotosCount: null,
-          reason: "no_google_results",
-        }
-      : undefined;
-    if (debugLogEnabled) {
-      console.log("[Hotels PHOTO]", JSON.stringify(debug));
+    if (debugEnabled) {
+      debug.step = "google_search";
+      debug.reason = "exception";
+      logStep("google_search", { ms: Date.now() - requestStart, reason: debug.reason });
     }
     return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null, ...(debugEnabled ? { debug } : {}) });
   }
 
-  const details = hotelDetailsCache.get(hotelIdKey);
-  if (!details) {
-    const debug = debugEnabled
-      ? {
-          triedQueries: [],
-          chosenQuery: null,
-          googleSearchResultsCount: 0,
-          chosenPlaceId: null,
-          detailsPhotosCount: null,
-          reason: "no_hotel_context",
-        }
-      : undefined;
-    if (debugLogEnabled) {
-      console.log("[Hotels PHOTO]", JSON.stringify(debug));
+  let details;
+  const amadeusStart = Date.now();
+  try {
+    details = hotelDetailsCache.get(hotelIdKey);
+  } catch (_) {
+    if (debugEnabled) {
+      debug.step = "amadeus_lookup";
+      debug.reason = "amadeus_failed";
+      logStep("amadeus_lookup", { ms: Date.now() - amadeusStart, reason: debug.reason });
+    }
+    return res.status(500).json({
+      ok: false,
+      error: "Hotel context lookup failed",
+      hint: "amadeus_lookup",
+      ...(debugEnabled ? { debug } : {}),
+    });
+  }
+  const name = String(details?.name || "").trim();
+  const city = String(details?.city || "").trim() || deriveCityFromAddress(details?.address);
+  if (debugEnabled) {
+    debug.hotelName = name || null;
+    debug.city = city || null;
+  }
+  if (!details || !name) {
+    if (debugEnabled) {
+      debug.step = "amadeus_lookup";
+      debug.reason = "no_hotel_context";
+      logStep("amadeus_lookup", { ms: Date.now() - amadeusStart, reason: debug.reason });
     }
     return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null, ...(debugEnabled ? { debug } : {}) });
+  }
+  if (debugEnabled) {
+    logStep("amadeus_lookup", { ms: Date.now() - amadeusStart, reason: "ok" });
   }
 
   let result;
   try {
-    result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details);
-  } catch (_) {
-    result = { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0, query: null, triedQueries: [], reason: "unexpected" };
+    result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details, { onStep: logStep });
+  } catch (err) {
+    if (debugEnabled) {
+      debug.step = err?.step || "details_photos";
+      debug.reason = "exception";
+      debug.triedQueries = buildHotelPhotoQueries(details);
+      logStep(debug.step, { ms: Date.now() - requestStart, reason: debug.reason });
+    }
+    return res.status(500).json({
+      ok: false,
+      error: "Hotel photo lookup failed",
+      hint: err?.step || "details_photos",
+      ...(debugEnabled ? { debug } : {}),
+    });
   }
   const photoRef = result?.photoRef || null;
   const ttl = photoRef ? HOTEL_PHOTO_REF_TTL_MS : HOTEL_PHOTO_REF_NULL_TTL_MS;
+  const normalizedReason = normalizeHotelPhotoDebugReason(result?.reason, Boolean(photoRef));
   hotelPhotoRefCache.set(
     hotelIdKey,
     {
@@ -919,25 +965,29 @@ app.get("/v1/hotels/photo", async (req, res) => {
         triedQueries: Array.isArray(result?.triedQueries) ? result.triedQueries : [],
         chosenQuery: result?.query || null,
         googleSearchResultsCount: typeof result?.candidatesCount === "number" ? result.candidatesCount : 0,
-        detailsPhotosCount: typeof result?.photosCount === "number" ? result.photosCount : null,
-        reason: result?.reason || (photoRef ? "ok" : "no_photos_in_details"),
+        detailsPhotosCount: typeof result?.photosCount === "number" ? result.photosCount : 0,
+        reason: normalizedReason,
       },
     },
     ttl
   );
   const photoUrl = photoRef ? buildPlacesPhotoUrl(req, photoRef, maxWidth) : null;
-  const debug = debugEnabled
-    ? {
-        triedQueries: Array.isArray(result?.triedQueries) ? result.triedQueries : [],
-        chosenQuery: result?.query || null,
-        googleSearchResultsCount: typeof result?.candidatesCount === "number" ? result.candidatesCount : 0,
-        chosenPlaceId: result?.placeId || null,
-        detailsPhotosCount: typeof result?.photosCount === "number" ? result.photosCount : null,
-        reason: result?.reason || (photoUrl ? "ok" : "no_photos_in_details"),
-      }
-    : undefined;
-  if (debugLogEnabled) {
-    console.log("[Hotels PHOTO]", JSON.stringify({ ...debug, returned: photoUrl ? "photoUrl" : "null" }));
+  if (debugEnabled) {
+    debug.triedQueries = Array.isArray(result?.triedQueries) ? result.triedQueries : [];
+    debug.chosenQuery = result?.query || null;
+    debug.googleSearchResultsCount = typeof result?.candidatesCount === "number" ? result.candidatesCount : 0;
+    debug.chosenPlaceId = result?.placeId || null;
+    debug.detailsPhotosCount = typeof result?.photosCount === "number" ? result.photosCount : 0;
+    debug.reason = normalizedReason;
+    debug.step = debug.reason === "ok" ? "done" : getHotelPhotoDebugStep(debug.reason);
+    logStep("done", {
+      ms: Date.now() - requestStart,
+      reason: debug.reason,
+      query: debug.chosenQuery,
+      resultsCount: debug.googleSearchResultsCount,
+      placeId: debug.chosenPlaceId,
+      photosCount: debug.detailsPhotosCount,
+    });
   }
   return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl, ...(debugEnabled ? { debug } : {}) });
 });
@@ -1754,6 +1804,28 @@ function isHotelsDebugLoggingEnabled() {
   return debug === "true";
 }
 
+function normalizeHotelPhotoDebugReason(reason, hasPhoto) {
+  const value = String(reason || "").trim();
+  if (value === "ok") return "ok";
+  if (value === "no_hotel_context") return "no_hotel_context";
+  if (value === "amadeus_failed") return "amadeus_failed";
+  if (value === "no_search_results") return "no_search_results";
+  if (value === "no_photos") return "no_photos";
+  if (value === "exception") return "exception";
+  if (value === "no_google_results" || value === "no_place_id") return "no_search_results";
+  if (value === "no_photos_in_details") return "no_photos";
+  if (value === "unexpected") return "exception";
+  return hasPhoto ? "ok" : "no_photos";
+}
+
+function getHotelPhotoDebugStep(reason) {
+  if (reason === "no_hotel_context" || reason === "amadeus_failed") return "amadeus_lookup";
+  if (reason === "no_search_results") return "google_search";
+  if (reason === "no_photos") return "details_photos";
+  if (reason === "exception") return "details_photos";
+  return "done";
+}
+
 function splitAddressParts(address) {
   if (!address) return [];
   return String(address)
@@ -1789,10 +1861,10 @@ function cacheHotelDetails(hotelId, name, address, city) {
   hotelDetailsCache.set(id, record, HOTEL_DETAILS_TTL_MS);
 }
 
-async function fetchHotelPhotoReferenceByDetails(hotelId, details) {
+async function fetchHotelPhotoReferenceByDetails(hotelId, details, options = {}) {
   if (!details) return null;
   if (!GOOGLE_PLACES_API_KEY) return null;
-  return await fetchHotelPhotoReferenceWithFallback(details);
+  return await fetchHotelPhotoReferenceWithFallback(details, options);
 }
 
 function buildHotelPhotoQueries(details) {
@@ -1820,7 +1892,8 @@ function buildHotelPhotoQueries(details) {
   return out;
 }
 
-async function fetchHotelPhotoReferenceWithFallback(details) {
+async function fetchHotelPhotoReferenceWithFallback(details, options = {}) {
+  const onStep = typeof options.onStep === "function" ? options.onStep : null;
   const queries = buildHotelPhotoQueries(details);
   if (queries.length === 0) {
     return {
@@ -1834,9 +1907,18 @@ async function fetchHotelPhotoReferenceWithFallback(details) {
       reason: "no_hotel_context",
     };
   }
-  let lastResult = null;
+  let lastResult = {
+    photoRef: null,
+    placeId: null,
+    placeName: null,
+    photosCount: 0,
+    candidatesCount: 0,
+    query: null,
+    triedQueries: queries,
+    reason: "no_search_results",
+  };
   for (const query of queries) {
-    const result = await fetchPlacesFindPlacePhotoReference(query);
+    const result = await fetchPlacesFindPlacePhotoReference(query, { onStep });
     lastResult = { ...result, query };
     if (result.photoRef) {
       return {
@@ -1847,7 +1929,7 @@ async function fetchHotelPhotoReferenceWithFallback(details) {
         candidatesCount: result.candidatesCount,
         query,
         triedQueries: queries,
-        reason: null,
+        reason: "ok",
       };
     }
   }
@@ -1859,7 +1941,9 @@ async function fetchHotelPhotoReferenceWithFallback(details) {
 
 async function fetchPlacesDetailsPhotoReference(placeId) {
   if (!GOOGLE_PLACES_API_KEY) {
-    return { photoRef: null, photosCount: 0 };
+    const err = new Error("Google Places API key missing");
+    err.step = "details_photos";
+    throw err;
   }
   const url =
     "https://maps.googleapis.com/maps/api/place/details/json" +
@@ -1867,23 +1951,31 @@ async function fetchPlacesDetailsPhotoReference(placeId) {
     "&fields=" + encodeURIComponent("photos") +
     "&key=" + encodeURIComponent(GOOGLE_PLACES_API_KEY);
 
+  let r;
+  let json = {};
   try {
-    const r = await fetchWithTimeout(url);
-    const json = await r.json().catch(() => ({}));
-    if (!r.ok || json.status !== "OK") {
-      return { photoRef: null, photosCount: 0 };
-    }
-    const photos = Array.isArray(json.result?.photos) ? json.result.photos : [];
-    const photoRef = String(photos[0]?.photo_reference || "").trim() || null;
-    return { photoRef, photosCount: photos.length };
-  } catch (_) {
-    return { photoRef: null, photosCount: 0 };
+    r = await fetchWithTimeout(url);
+    json = await r.json().catch(() => ({}));
+  } catch (err) {
+    err.step = "details_photos";
+    throw err;
   }
+  if (!r.ok || json.status !== "OK") {
+    const err = new Error("Google details photos failed");
+    err.step = "details_photos";
+    throw err;
+  }
+  const photos = Array.isArray(json.result?.photos) ? json.result.photos : [];
+  const photoRef = String(photos[0]?.photo_reference || "").trim() || null;
+  return { photoRef, photosCount: photos.length };
 }
 
-async function fetchPlacesFindPlacePhotoReference(query) {
+async function fetchPlacesFindPlacePhotoReference(query, options = {}) {
+  const onStep = typeof options.onStep === "function" ? options.onStep : null;
   if (!GOOGLE_PLACES_API_KEY) {
-    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0, reason: "no_google_results" };
+    const err = new Error("Google Places API key missing");
+    err.step = "google_search";
+    throw err;
   }
   const url =
     "https://maps.googleapis.com/maps/api/place/findplacefromtext/json" +
@@ -1894,29 +1986,59 @@ async function fetchPlacesFindPlacePhotoReference(query) {
 
   let r;
   let json = {};
+  const searchStart = Date.now();
   try {
     r = await fetchWithTimeout(url);
     json = await r.json().catch(() => ({}));
-  } catch (_) {
-    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount: 0, reason: "unexpected" };
+  } catch (err) {
+    if (onStep) {
+      onStep("google_search", { ms: Date.now() - searchStart, query, resultsCount: 0, reason: "exception" });
+    }
+    err.step = "google_search";
+    throw err;
+  }
+  const status = String(json?.status || "").trim();
+  if (!r.ok || (status && status !== "OK" && status !== "ZERO_RESULTS")) {
+    if (onStep) {
+      onStep("google_search", { ms: Date.now() - searchStart, query, resultsCount: 0, reason: "exception" });
+    }
+    const err = new Error("Google find place failed");
+    err.step = "google_search";
+    throw err;
   }
   const candidates = Array.isArray(json?.candidates) ? json.candidates : [];
   const candidatesCount = candidates.length;
+  if (onStep) {
+    onStep("google_search", { ms: Date.now() - searchStart, query, resultsCount: candidatesCount });
+  }
   if (candidatesCount === 0) {
-    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount, reason: "no_google_results" };
+    return { photoRef: null, placeId: null, placeName: null, photosCount: 0, candidatesCount, reason: "no_search_results" };
   }
   for (const candidate of candidates) {
     const placeId = String(candidate?.place_id || "").trim();
     if (!placeId) continue;
     const placeName = String(candidate?.name || "").trim() || null;
-    const details = await fetchPlacesDetailsPhotoReference(placeId);
+    const detailsStart = Date.now();
+    let details;
+    try {
+      details = await fetchPlacesDetailsPhotoReference(placeId);
+    } catch (err) {
+      if (onStep) {
+        onStep("details_photos", { ms: Date.now() - detailsStart, placeId, photosCount: 0, reason: "exception" });
+      }
+      err.step = err.step || "details_photos";
+      throw err;
+    }
+    if (onStep) {
+      onStep("details_photos", { ms: Date.now() - detailsStart, placeId, photosCount: details.photosCount });
+    }
     return {
       photoRef: details.photoRef,
       placeId,
       placeName,
       photosCount: details.photosCount,
       candidatesCount,
-      reason: details.photoRef ? null : "no_photos_in_details",
+      reason: details.photoRef ? "ok" : "no_photos",
     };
   }
   return {
@@ -1925,7 +2047,7 @@ async function fetchPlacesFindPlacePhotoReference(query) {
     placeName: null,
     photosCount: 0,
     candidatesCount,
-    reason: "no_place_id",
+    reason: "no_search_results",
   };
 }
 
