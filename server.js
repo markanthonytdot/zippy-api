@@ -190,7 +190,7 @@ const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 // Duffel key (server-only)
 const DUFFEL_API_KEY = process.env.DUFFEL_API_KEY || "";
-const DUFFEL_API_VERSION = process.env.DUFFEL_API_VERSION || "2020-09-18";
+const DUFFEL_API_VERSION = process.env.DUFFEL_API_VERSION || "2024-01-10";
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
 const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
@@ -1464,6 +1464,11 @@ app.post("/v1/flights/search", async (req, res) => {
 
   if (!req.body || typeof req.body !== "object") {
     return res.status(400).json({ ok: false, error: "Invalid JSON body" });
+  }
+
+  const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  if (env !== "production") {
+    console.log("[Duffel]", "version=" + DUFFEL_API_VERSION);
   }
 
   const url = "https://api.duffel.com/air/offer_requests";
