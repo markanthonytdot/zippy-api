@@ -1471,6 +1471,36 @@ app.post("/v1/flights/search", async (req, res) => {
     console.log("[Duffel]", "version=" + DUFFEL_API_VERSION);
   }
 
+  const payload = req.body || {};
+  const data = {};
+  if (Array.isArray(payload.slices)) {
+    data.slices = payload.slices;
+  } else {
+    const origin = String(payload.origin || "").trim();
+    const destination = String(payload.dest || payload.destination || "").trim();
+    const departureDate = String(payload.date || payload.departure_date || "").trim();
+    if (origin && destination && departureDate) {
+      data.slices = [{ origin, destination, departure_date: departureDate }];
+    }
+  }
+  if (Array.isArray(payload.passengers)) {
+    data.passengers = payload.passengers;
+  } else {
+    const adults = Number.parseInt(String(payload.adults || ""), 10);
+    if (Number.isFinite(adults) && adults > 0) {
+      data.passengers = Array.from({ length: adults }, () => ({ type: "adult" }));
+    }
+  }
+  const cabinClass = String(payload.cabin_class || payload.cabinClass || "").trim();
+  if (cabinClass) {
+    data.cabin_class = cabinClass;
+  }
+  if (env !== "production") {
+    const slicesCount = Array.isArray(data.slices) ? data.slices.length : 0;
+    const passengersCount = Array.isArray(data.passengers) ? data.passengers.length : 0;
+    console.log("[Duffel]", "data_key=true", "slices=" + slicesCount, "passengers=" + passengersCount);
+  }
+
   const url = "https://api.duffel.com/air/offer_requests";
   let r;
   try {
@@ -1483,7 +1513,7 @@ app.post("/v1/flights/search", async (req, res) => {
           Authorization: `Bearer ${DUFFEL_API_KEY}`,
           "Duffel-Version": DUFFEL_API_VERSION,
         },
-        body: JSON.stringify(req.body),
+        body: JSON.stringify({ data }),
       },
       15000
     );
