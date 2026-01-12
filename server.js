@@ -2900,7 +2900,7 @@ function requireDb(req, res) {
 // Dev auth (dev mode only)
 // ---------------------------------------------
 app.post("/auth/dev", async (req, res) => {
-  if (AUTH_MODE === "prod") {
+  if (AUTH_MODE === "prod" && process.env.ALLOW_DEV_AUTH !== "true") {
     return res.status(404).json({ ok: false, error: "Dev auth disabled" });
   }
 
