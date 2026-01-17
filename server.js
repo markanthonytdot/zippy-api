@@ -1305,9 +1305,6 @@ app.get("/v1/places/details/photos", async (req, res) => {
 // GET /v1/places/photo?ref=...&maxWidth=...
 // ---------------------------------------------
 app.get("/v1/places/photo", async (req, res) => {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
-
   const apiKey = GOOGLE_PLACES_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ ok: false, error: "GOOGLE_PLACES_API_KEY not set" });
@@ -1345,12 +1342,12 @@ app.get("/v1/places/photo", async (req, res) => {
   const cached = getCachedPhoto(cacheKey);
   if (cached) {
     res.setHeader("Content-Type", cached.contentType || "image/jpeg");
-    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day client cache hint
+    res.setHeader("Cache-Control", "public, max-age=86400, s-maxage=86400"); // 1 day cache hint
     return res.send(cached.buf);
   }
 
   const plan = getPlanForNow(req);
-  const limiterId = getRateLimitKey(req, userId);
+  const limiterId = getRateLimitKey(req);
   const lim = enforcePhotoLimits(limiterId, plan);
   if (!lim.ok) {
     return res.status(lim.status).json({ ok: false, error: lim.error });
@@ -1387,7 +1384,7 @@ app.get("/v1/places/photo", async (req, res) => {
     });
 
     res.setHeader("Content-Type", contentType);
-    res.setHeader("Cache-Control", "public, max-age=86400"); // 1 day client cache hint
+    res.setHeader("Cache-Control", "public, max-age=86400, s-maxage=86400"); // 1 day cache hint
     return res.send(buf);
   } catch (e) {
     console.log("[PlacesPhoto] error:", e?.message || e);
