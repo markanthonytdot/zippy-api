@@ -7,6 +7,10 @@ const app = express();
 app.set("trust proxy", true);
 app.use(helmet());
 app.use(express.json({ limit: "256kb" }));
+app.use((req, res, next) => {
+  req.requestId = req.headers["x-request-id"] || randomUUID();
+  next();
+});
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 // ---------------------------------------------
 // Simple in-memory cache + rate limit helpers
@@ -204,9 +208,9 @@ const AUTH_MODE = String(process.env.AUTH_MODE || "dev").toLowerCase();
 const JWT_SECRET = process.env.JWT_SECRET || "";
 const JWT_ISSUER = process.env.JWT_ISSUER || "zippy-api";
 const JWT_AUDIENCE = process.env.JWT_AUDIENCE || "zippy-ios";
+const APPLE_CLIENT_ID = String(process.env.APPLE_CLIENT_ID || "").trim() || "com.heyzippi.zippi";
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
-const APPLE_AUDIENCE = "com.heyzippi.zippi";
 
 // jose lazy loader (works in CommonJS)
 let josePromise = null;
@@ -242,7 +246,6 @@ async function signZippyToken(subject) {
     .setExpirationTime("30d")
     .sign(encoder.encode(JWT_SECRET));
 }
-
 async function hydrateUserIdFromAuth(req) {
   if (req.userId) return;
 
@@ -412,7 +415,7 @@ app.get("/v1/hotels/ping", (req, res) => {
 // ---------------------------------------------
 app.post("/v1/hotels/search", async (req, res) => {
   const userId = String(req.userId || "unknown");
-  const requestId = randomUUID();
+  const requestId = String(req.requestId || randomUUID());
 
   if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
     return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
@@ -2858,6 +2861,7 @@ async function requireUserId(req, res) {
       const { payload } = await jwtVerify(token, encoder.encode(JWT_SECRET), {
         issuer: JWT_ISSUER,
         audience: JWT_AUDIENCE,
+        clockTolerance: 60,
       });
 
       const sub = String(payload?.sub || "").trim();
@@ -2870,7 +2874,29 @@ async function requireUserId(req, res) {
       res.status(401).json({ ok: false, error: "JWT missing sub" });
       return null;
     } catch (e) {
-      console.log("[Auth] jwt verify failed:", e?.message || e);
+      const nowEpochSec = Math.floor(Date.now() / 1000);
+      let decodedExpSec = null;
+      try {
+        const { decodeJwt } = await getJose();
+        const decoded = decodeJwt(token);
+        if (typeof decoded?.exp === "number") {
+          decodedExpSec = decoded.exp;
+        }
+      } catch (_) {
+        // ignore decode errors
+      }
+      const expMinusNowSec =
+        typeof decodedExpSec === "number" ? decodedExpSec - nowEpochSec : null;
+
+      console.log("[Auth] jwt verify failed:", {
+        requestId: req.requestId,
+        name: e?.name,
+        code: e?.code,
+        message: e?.message,
+        nowEpochSec,
+        decodedExpSec,
+        expMinusNowSec,
+      });
     }
   }
 
@@ -2948,8 +2974,8 @@ app.post("/auth/apple", async (req, res) => {
   }
 
   // PROD MODE
-  if (!JWT_SECRET) {
-    console.warn("Missing JWT_SECRET for prod auth");
+  if (!APPLE_CLIENT_ID || !JWT_SECRET) {
+    console.warn("Missing APPLE_CLIENT_ID or JWT_SECRET for prod auth");
     return res.status(500).json({ ok: false, error: "Server misconfigured" });
   }
 
@@ -2978,9 +3004,8 @@ app.post("/auth/apple", async (req, res) => {
 
     const { payload } = await jwtVerify(identityToken, jwks, {
       issuer: APPLE_ISSUER,
-      audience: APPLE_AUDIENCE,
+      audience: APPLE_CLIENT_ID,
     });
-
     if (nonceProvided) {
       const tokenNonce = String(payload?.nonce || "").trim();
       if (!tokenNonce || tokenNonce !== nonce) {
@@ -3123,3 +3148,9 @@ app.listen(port, "0.0.0.0", () => {
   console.log("zippy-api listening on port", port);
   console.log("boot ok");
 });
+// proof
+// merge notes:
+// - Kept HEAD: helmet/trust proxy/body limits, caches, prunable limiters, validations, and full route set.
+// - Kept other: requestId middleware and JWT failure logging with exp vs now (+ clock tolerance).
+// - Kept other: APPLE_CLIENT_ID env override with default bundle id audience.
+// - Hotel search timeout: no additional changes detected.
