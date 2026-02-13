@@ -418,8 +418,8 @@ app.post("/v1/hotels/search", async (req, res) => {
   const DISCOVERY_CAP = 30;
   const TARGET_PRICED = 10;
   const PRICE_CAP = 30;
-  const RESPONSE_BUDGET_MS = 9000;
-  const RETRY_BUDGET_MS = 6500;
+  const RESPONSE_BUDGET_MS = 12000;
+  const RETRY_BACKOFF_MS = 400;
 
   if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
     return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
@@ -698,8 +698,8 @@ app.post("/v1/hotels/search", async (req, res) => {
   let responseSent = false;
   let batchesAttempted = 0;
   let usedRetry = false;
-  let firstFailedBatch = null;
   const outputMax = Math.min(max, 50);
+  const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const sendResponse = async (options = {}) => {
     if (responseSent || res.headersSent) return;
     responseSent = true;
@@ -828,34 +828,14 @@ app.post("/v1/hotels/search", async (req, res) => {
     batchesAttempted += 1;
     let result = await fetchOffersBatch(batch, batchLabel);
     if (!result.ok) {
-      if (i === 0 && batches.length > 1) {
-        firstFailedBatch = batch;
-        continue;
-      }
       const elapsed = Date.now() - requestStartMs;
-      if (!usedRetry && offersByHotelId.size === 0 && elapsed < RETRY_BUDGET_MS) {
+      if (!usedRetry && elapsed + RETRY_BACKOFF_MS < RESPONSE_BUDGET_MS) {
         usedRetry = true;
+        await sleepMs(RETRY_BACKOFF_MS);
         batchesAttempted += 1;
         result = await fetchOffersBatch(batch, `${batchLabel}:retry`);
       }
     }
-    if (!result.ok) {
-      if (
-        firstFailedBatch &&
-        i === 1 &&
-        !usedRetry &&
-        offersByHotelId.size === 0 &&
-        Date.now() - requestStartMs < RETRY_BUDGET_MS
-      ) {
-        usedRetry = true;
-        batchesAttempted += 1;
-        result = await fetchOffersBatch(firstFailedBatch, "batch=1:retry");
-        if (!result.ok) continue;
-      } else {
-        continue;
-      }
-    }
-
     if (!result.ok) {
       continue;
     }
