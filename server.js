@@ -418,8 +418,9 @@ app.post("/v1/hotels/search", async (req, res) => {
   const DISCOVERY_CAP = 30;
   const TARGET_PRICED = 10;
   const PRICE_CAP = 30;
-  const RESPONSE_BUDGET_MS = 12000;
+  const RESPONSE_BUDGET_MS = 8500;
   const RETRY_BACKOFF_MS = 400;
+  const BATCH3_SOFT_MS = 6500;
 
   if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
     return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
@@ -822,6 +823,15 @@ app.post("/v1/hotels/search", async (req, res) => {
     if (elapsedBeforeBatch >= RESPONSE_BUDGET_MS) {
       const reason = offersByHotelId.size > 0 ? "budget" : "budget_empty";
       return await sendResponse({ allowPhotos: false, reason });
+    }
+    if (i === 2) {
+      const allowThirdBatch =
+        elapsedBeforeBatch < BATCH3_SOFT_MS ||
+        (offersByHotelId.size === 0 && elapsedBeforeBatch < RESPONSE_BUDGET_MS);
+      if (!allowThirdBatch) {
+        const reason = offersByHotelId.size > 0 ? "budget" : "budget_empty";
+        return await sendResponse({ allowPhotos: false, reason });
+      }
     }
     const batch = batches[i];
     const batchLabel = `batch=${i + 1}/${batches.length}`;
