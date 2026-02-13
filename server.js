@@ -419,6 +419,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   const TARGET_PRICED = 10;
   const PRICE_CAP = 30;
   const RESPONSE_BUDGET_MS = 9000;
+  const RETRY_BUDGET_MS = 6500;
 
   if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
     return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
@@ -542,7 +543,8 @@ app.post("/v1/hotels/search", async (req, res) => {
   }
 
   const hotelsData = Array.isArray(hotelsJson?.data) ? hotelsJson.data : [];
-  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, max);
+  const discoveryLimit = Math.max(DISCOVERY_CAP, PRICE_CAP, max);
+  const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, discoveryLimit);
   let hotelIds = [];
   const seenHotelIds = new Set();
   for (const item of hotelItems) {
@@ -556,6 +558,17 @@ app.post("/v1/hotels/search", async (req, res) => {
   hotelIds = hotelIds.slice(0, DISCOVERY_CAP);
   const pricingCandidates = hotelIds.slice(0, PRICE_CAP);
   const discoveryElapsedMs = Date.now() - requestStartMs;
+
+  console.log(
+    "[Hotels CAPS]",
+    "requestId=" + requestId,
+    "discovery_cap=" + DISCOVERY_CAP,
+    "price_cap=" + PRICE_CAP,
+    "target_priced=" + TARGET_PRICED,
+    "response_budget_ms=" + RESPONSE_BUDGET_MS,
+    "request_max=" + max,
+    "discovery_limit=" + discoveryLimit
+  );
 
   console.log(
     "[Hotels DISCOVERY]",
@@ -685,6 +698,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   let responseSent = false;
   let batchesAttempted = 0;
   let usedRetry = false;
+  let firstFailedBatch = null;
   const outputMax = Math.min(max, 50);
   const sendResponse = async (options = {}) => {
     if (responseSent || res.headersSent) return;
@@ -806,7 +820,8 @@ app.post("/v1/hotels/search", async (req, res) => {
   for (let i = 0; i < batches.length; i += 1) {
     const elapsedBeforeBatch = Date.now() - requestStartMs;
     if (elapsedBeforeBatch >= RESPONSE_BUDGET_MS) {
-      return await sendResponse({ allowPhotos: false, reason: "budget" });
+      const reason = offersByHotelId.size > 0 ? "budget" : "budget_empty";
+      return await sendResponse({ allowPhotos: false, reason });
     }
     const batch = batches[i];
     const batchLabel = `batch=${i + 1}/${batches.length}`;
@@ -814,15 +829,33 @@ app.post("/v1/hotels/search", async (req, res) => {
     let result = await fetchOffersBatch(batch, batchLabel);
     if (!result.ok) {
       if (i === 0 && batches.length > 1) {
+        firstFailedBatch = batch;
         continue;
       }
       const elapsed = Date.now() - requestStartMs;
-      if (!usedRetry && offersByHotelId.size === 0 && elapsed < RESPONSE_BUDGET_MS) {
+      if (!usedRetry && offersByHotelId.size === 0 && elapsed < RETRY_BUDGET_MS) {
         usedRetry = true;
         batchesAttempted += 1;
         result = await fetchOffersBatch(batch, `${batchLabel}:retry`);
       }
     }
+    if (!result.ok) {
+      if (
+        firstFailedBatch &&
+        i === 1 &&
+        !usedRetry &&
+        offersByHotelId.size === 0 &&
+        Date.now() - requestStartMs < RETRY_BUDGET_MS
+      ) {
+        usedRetry = true;
+        batchesAttempted += 1;
+        result = await fetchOffersBatch(firstFailedBatch, "batch=1:retry");
+        if (!result.ok) continue;
+      } else {
+        continue;
+      }
+    }
+
     if (!result.ok) {
       continue;
     }
@@ -872,7 +905,8 @@ app.post("/v1/hotels/search", async (req, res) => {
       return await sendResponse({ allowPhotos: false, reason: "target" });
     }
     if (elapsedAfterBatch >= RESPONSE_BUDGET_MS) {
-      return await sendResponse({ allowPhotos: false, reason: "budget" });
+      const reason = offersByHotelId.size > 0 ? "budget" : "budget_empty";
+      return await sendResponse({ allowPhotos: false, reason });
     }
   }
 
