@@ -412,7 +412,13 @@ app.get("/v1/hotels/ping", (req, res) => {
 // ---------------------------------------------
 app.post("/v1/hotels/search", async (req, res) => {
   const userId = String(req.userId || "unknown");
-  const requestId = randomUUID();
+  const requestStartMs = Date.now();
+  const requestId = String(req.requestId || randomUUID());
+  req.requestId = requestId;
+  const DISCOVERY_CAP = 20;
+  const TARGET_PRICED = 10;
+  const PRICE_CAP = 20;
+  const RESPONSE_BUDGET_MS = 8500;
 
   if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
     return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
@@ -537,7 +543,7 @@ app.post("/v1/hotels/search", async (req, res) => {
 
   const hotelsData = Array.isArray(hotelsJson?.data) ? hotelsJson.data : [];
   const hotelItems = hotelsData.filter((item) => item && item.hotelId).slice(0, max);
-  const hotelIds = [];
+  let hotelIds = [];
   const seenHotelIds = new Set();
   for (const item of hotelItems) {
     const id = String(item?.hotelId || "").trim();
@@ -546,13 +552,25 @@ app.post("/v1/hotels/search", async (req, res) => {
       hotelIds.push(id);
     }
   }
+  const discoveredCount = hotelIds.length;
+  hotelIds = hotelIds.slice(0, DISCOVERY_CAP);
+  const pricingCandidates = hotelIds.slice(0, PRICE_CAP);
+  const discoveryElapsedMs = Date.now() - requestStartMs;
+
+  console.log(
+    "[Hotels DISCOVERY]",
+    "requestId=" + requestId,
+    "discovered_count=" + discoveredCount,
+    "pricing_candidates_count=" + pricingCandidates.length,
+    "elapsed_ms=" + discoveryElapsedMs
+  );
 
   console.log(
     "[Hotels LIST]",
     "requestId=" + requestId,
     "userId=" + userId,
     "status=" + hotelsRes.status,
-    "count=" + hotelIds.length
+    "count=" + discoveredCount
   );
 
   if (!hotelsRes.ok) {
@@ -583,7 +601,7 @@ app.post("/v1/hotels/search", async (req, res) => {
     });
   }
 
-  if (hotelIds.length === 0) {
+  if (pricingCandidates.length === 0) {
     console.log("[Hotels OFFERS]", "requestId=" + requestId, "userId=" + userId, "status=SKIP", "count=0");
     return res.json({
       ok: true,
@@ -662,157 +680,190 @@ app.post("/v1/hotels/search", async (req, res) => {
     return { ok: true, offersData };
   }
 
-  let offersData = [];
-  let offersError = null;
-  const offersAttempt = await fetchOffersBatch(hotelIds, "all");
-  if (offersAttempt.ok) {
-    offersData = offersAttempt.offersData;
-  } else if (hotelIds.length > 10) {
-    console.log(
-      "[Hotels OFFERS]",
-      "requestId=" + requestId,
-      "userId=" + userId,
-      "status=RETRY",
-      "reason=batch",
-      "ids=" + hotelIds.length
-    );
-    const batches = chunkArray(hotelIds, 10);
-    for (let i = 0; i < batches.length; i += 1) {
-      const batch = batches[i];
-      const batchLabel = `batch=${i + 1}/${batches.length}`;
-      const result = await fetchOffersBatch(batch, batchLabel);
-      if (result.ok) {
-        offersData = offersData.concat(result.offersData);
-      } else if (!offersError) {
-        offersError = result;
-      }
-    }
-    if (offersData.length === 0) {
-      const error = offersError?.error || offersAttempt.error || "Amadeus offers fetch failed";
-      const hint = offersError?.hint || offersAttempt.hint;
-      return res.status(502).json({ ok: false, error, hint });
-    }
-  } else {
-    return res.status(502).json({
-      ok: false,
-      error: offersAttempt.error || "Amadeus offers fetch failed",
-      hint: offersAttempt.hint,
-    });
-  }
-
-  const offersReturnedCount = offersData.length;
   const offersByHotelId = new Map();
-  for (const entry of offersData) {
-    const hotel = entry?.hotel || {};
-    const hotelId = String(hotel.hotelId || entry?.hotelId || "").trim();
-    if (!hotelId) continue;
-    const bestOffer = pickBestOfferDetails(entry?.offers);
-    if (!bestOffer) continue;
-    const price = bestOffer.price;
-    const existing = offersByHotelId.get(hotelId);
-    if (!existing) {
-      offersByHotelId.set(hotelId, { entry, bestOffer, price });
+  let offersReturnedCount = 0;
+  let responseSent = false;
+  const outputMax = Math.min(max, 50);
+  const sendResponse = async (options = {}) => {
+    if (responseSent || res.headersSent) return;
+    responseSent = true;
+    const allowPhotos = options.allowPhotos === true;
+    const responseReason = options.reason || "complete";
+    const items = [];
+    for (const hotelId of pricingCandidates) {
+      const offer = offersByHotelId.get(hotelId);
+      if (!offer) continue;
+      const entry = offer.entry || {};
+      const hotel = entry?.hotel || {};
+      const bestOffer = offer.bestOffer?.offer || null;
+      const fallback = hotelsById.get(hotelId) || {};
+      const geo = hotel.geoCode || fallback.geoCode || {};
+      const lat = Number(geo.latitude ?? geo.lat);
+      const lng = Number(geo.longitude ?? geo.lng);
+      const name = String(hotel.name || fallback.name || "").trim();
+      const address = formatAmadeusAddress(hotel.address || fallback.address);
+      const rating = parseAmadeusRating(hotel.rating || hotel.hotelRating || fallback.rating);
+      const offerPrice = offer.price || null;
+      const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
+      const roomType = pickOfferRoomType(bestOffer);
+      const roomDescription = pickOfferRoomDescription(bestOffer);
+      const bedType = pickOfferBedType(bestOffer);
+      const offerCheckIn = pickOfferCheckInDate(bestOffer, checkIn);
+      const offerCheckOut = pickOfferCheckOutDate(bestOffer, checkOut, offerCheckIn, nights);
+      const offerPayload = bestOffer
+        ? {
+            id: pickOfferId(bestOffer),
+            checkInDate: offerCheckIn,
+            checkOutDate: offerCheckOut,
+            adults,
+            roomType,
+            roomDescription,
+            bedType,
+            boardType: null,
+            paymentType: null,
+            refundable: null,
+            cancellation: null,
+            price: offerPrice
+              ? {
+                  total: offerPrice.total,
+                  base: offerPrice.base,
+                  taxes: offerPrice.taxes,
+                  currency: offerPrice.currency,
+                }
+              : { total: null, base: null, taxes: null, currency: null },
+            raw: buildOfferRawDebug(bestOffer),
+          }
+        : null;
+
+      cacheHotelDetails(hotelId, name, address, city);
+
+      items.push({
+        hotelId,
+        name,
+        lat: Number.isFinite(lat) ? lat : null,
+        lng: Number.isFinite(lng) ? lng : null,
+        address,
+        rating,
+        price,
+        offer: offerPayload,
+        bookingUrl: null,
+      });
+    }
+
+    const itemsLimited = items.slice(0, outputMax);
+    let itemsWithPhotos = itemsLimited;
+    if (allowPhotos) {
+      itemsWithPhotos = await enrichHotelItemsWithPhotos(itemsLimited, city, req);
+    }
+    const elapsedMs = Date.now() - requestStartMs;
+    console.log(
+      "[Hotels RESPONSE]",
+      "requestId=" + requestId,
+      "phase=before",
+      "reason=" + responseReason,
+      "elapsed_ms=" + elapsedMs
+    );
+    console.log(
+      "[Hotels RESPONSE]",
+      "requestId=" + requestId,
+      "priced_count_returned=" + itemsWithPhotos.length,
+      "elapsed_ms=" + elapsedMs,
+      "reason=" + responseReason
+    );
+    console.log(
+      "[Hotels DEBUG]",
+      "requestId=" + requestId,
+      "hotelIdsFound=" + discoveredCount,
+      "hotelIdsPriced=" + offersByHotelId.size,
+      "offersCount=" + offersReturnedCount,
+      "finalItems=" + itemsWithPhotos.length
+    );
+    logOfferFieldDebug(itemsWithPhotos, requestId);
+
+    const payload = {
+      ok: true,
+      cached: false,
+      query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
+      items: itemsWithPhotos,
+    };
+    const resp = res.json(payload);
+    const afterElapsedMs = Date.now() - requestStartMs;
+    console.log(
+      "[Hotels RESPONSE]",
+      "requestId=" + requestId,
+      "phase=after",
+      "reason=" + responseReason,
+      "elapsed_ms=" + afterElapsedMs
+    );
+    return resp;
+  };
+
+  const batches = chunkArray(pricingCandidates, 10);
+  let firstBatchLogged = false;
+  for (let i = 0; i < batches.length; i += 1) {
+    const elapsedBeforeBatch = Date.now() - requestStartMs;
+    if (elapsedBeforeBatch >= RESPONSE_BUDGET_MS) {
+      return await sendResponse({ allowPhotos: false, reason: "budget" });
+    }
+    const batch = batches[i];
+    const batchLabel = `batch=${i + 1}/${batches.length}`;
+    let result = await fetchOffersBatch(batch, batchLabel);
+    if (!result.ok) {
       continue;
     }
-    if (price && !existing.price) {
-      offersByHotelId.set(hotelId, { entry, bestOffer, price });
-      continue;
+
+    const offersData = result.offersData || [];
+    offersReturnedCount += offersData.length;
+    if (!firstBatchLogged) {
+      firstBatchLogged = true;
+      const firstBatchElapsedMs = Date.now() - requestStartMs;
+      console.log(
+        "[Hotels OFFERS]",
+        "requestId=" + requestId,
+        "phase=first_batch_complete",
+        "elapsed_ms=" + firstBatchElapsedMs
+      );
     }
-    if (price && existing.price) {
-      const newTotal = price.totalNum;
-      const oldTotal = existing.price.totalNum;
-      const sameCurrency = !price.currency || !existing.price.currency || price.currency === existing.price.currency;
-      if (sameCurrency && Number.isFinite(newTotal) && Number.isFinite(oldTotal) && newTotal < oldTotal) {
+    for (const entry of offersData) {
+      const hotel = entry?.hotel || {};
+      const hotelId = String(hotel.hotelId || entry?.hotelId || "").trim();
+      if (!hotelId) continue;
+      const bestOffer = pickBestOfferDetails(entry?.offers);
+      if (!bestOffer) continue;
+      const price = bestOffer.price;
+      const existing = offersByHotelId.get(hotelId);
+      if (!existing) {
         offersByHotelId.set(hotelId, { entry, bestOffer, price });
-      } else if (!Number.isFinite(oldTotal) && Number.isFinite(newTotal)) {
+        continue;
+      }
+      if (price && !existing.price) {
         offersByHotelId.set(hotelId, { entry, bestOffer, price });
+        continue;
+      }
+      if (price && existing.price) {
+        const newTotal = price.totalNum;
+        const oldTotal = existing.price.totalNum;
+        const sameCurrency = !price.currency || !existing.price.currency || price.currency === existing.price.currency;
+        if (sameCurrency && Number.isFinite(newTotal) && Number.isFinite(oldTotal) && newTotal < oldTotal) {
+          offersByHotelId.set(hotelId, { entry, bestOffer, price });
+        } else if (!Number.isFinite(oldTotal) && Number.isFinite(newTotal)) {
+          offersByHotelId.set(hotelId, { entry, bestOffer, price });
+        }
       }
     }
+
+    const elapsedAfterBatch = Date.now() - requestStartMs;
+    if (offersByHotelId.size >= TARGET_PRICED) {
+      return await sendResponse({ allowPhotos: false, reason: "target" });
+    }
+    if (elapsedAfterBatch >= RESPONSE_BUDGET_MS) {
+      return await sendResponse({ allowPhotos: false, reason: "budget" });
+    }
   }
 
-  const outputMax = Math.min(max, 50);
-  const items = [];
-  for (const hotelId of hotelIds) {
-    const offer = offersByHotelId.get(hotelId);
-    if (!offer) continue;
-    const entry = offer.entry || {};
-    const hotel = entry?.hotel || {};
-    const bestOffer = offer.bestOffer?.offer || null;
-    const fallback = hotelsById.get(hotelId) || {};
-    const geo = hotel.geoCode || fallback.geoCode || {};
-    const lat = Number(geo.latitude ?? geo.lat);
-    const lng = Number(geo.longitude ?? geo.lng);
-    const name = String(hotel.name || fallback.name || "").trim();
-    const address = formatAmadeusAddress(hotel.address || fallback.address);
-    const rating = parseAmadeusRating(hotel.rating || hotel.hotelRating || fallback.rating);
-    const offerPrice = offer.price || null;
-    const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
-    const roomType = pickOfferRoomType(bestOffer);
-    const roomDescription = pickOfferRoomDescription(bestOffer);
-    const bedType = pickOfferBedType(bestOffer);
-    const boardType = pickOfferBoardType(bestOffer);
-    const paymentType = pickOfferPaymentType(bestOffer);
-    const cancellationInfo = pickOfferCancellation(bestOffer);
-    const offerCheckIn = pickOfferCheckInDate(bestOffer, checkIn);
-    const offerCheckOut = pickOfferCheckOutDate(bestOffer, checkOut, offerCheckIn, nights);
-    const offerPayload = bestOffer
-      ? {
-          id: pickOfferId(bestOffer),
-          checkInDate: offerCheckIn,
-          checkOutDate: offerCheckOut,
-          adults,
-          roomType,
-          roomDescription,
-          bedType,
-          boardType,
-          paymentType,
-          refundable: cancellationInfo.refundable,
-          cancellation: cancellationInfo.cancellation,
-          price: offerPrice
-            ? {
-                total: offerPrice.total,
-                base: offerPrice.base,
-                taxes: offerPrice.taxes,
-                currency: offerPrice.currency,
-              }
-            : { total: null, base: null, taxes: null, currency: null },
-          raw: buildOfferRawDebug(bestOffer),
-        }
-      : null;
-
-    cacheHotelDetails(hotelId, name, address, city);
-
-    items.push({
-      hotelId,
-      name,
-      lat: Number.isFinite(lat) ? lat : null,
-      lng: Number.isFinite(lng) ? lng : null,
-      address,
-      rating,
-      price,
-      offer: offerPayload,
-      bookingUrl: null,
-    });
-  }
-
-  const itemsLimited = items.slice(0, outputMax);
-  const itemsWithPhotos = await enrichHotelItemsWithPhotos(itemsLimited, city, req);
-  console.log(
-    "[Hotels DEBUG]",
-    "requestId=" + requestId,
-    "hotelIdsFound=" + hotelIds.length,
-    "hotelIdsPriced=" + offersByHotelId.size,
-    "offersCount=" + offersReturnedCount,
-    "finalItems=" + itemsWithPhotos.length
-  );
-  logOfferFieldDebug(itemsWithPhotos, requestId);
-
-  return res.json({
-    ok: true,
-    cached: false,
-    query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
-    items: itemsWithPhotos,
-  });
+  const elapsedEnd = Date.now() - requestStartMs;
+  const allowPhotos = elapsedEnd < 5000;
+  return await sendResponse({ allowPhotos, reason: "exhausted" });
 });
 
 // ---------------------------------------------
