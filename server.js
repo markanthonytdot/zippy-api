@@ -416,9 +416,9 @@ app.post("/v1/hotels/search", async (req, res) => {
   const requestId = String(req.requestId || randomUUID());
   req.requestId = requestId;
   const DISCOVERY_CAP = 30;
-  const TARGET_PRICED = 10;
-  const PRICE_CAP = 30;
-  const RESPONSE_BUDGET_MS = 12000;
+  const TARGET_PRICED = 8;
+  const PRICE_CAP = 20;
+  const RESPONSE_BUDGET_MS = 9500;
   const RETRY_BACKOFF_MS = 400;
   const BATCH3_SOFT_MS = 6500;
   const MIN_BATCHES_BEFORE_EMPTY = 2;
@@ -825,9 +825,11 @@ app.post("/v1/hotels/search", async (req, res) => {
   for (let i = 0; i < batches.length; i += 1) {
     const elapsedBeforeBatch = Date.now() - requestStartMs;
     if (elapsedBeforeBatch >= RESPONSE_BUDGET_MS) {
-      const reason =
-        offersByHotelId.size > 0 || batchesAttempted < MIN_BATCHES_BEFORE_EMPTY ? "budget" : "budget_empty";
+      const reason = offersByHotelId.size > 0 ? "budget" : "budget_empty";
       return await sendResponse({ allowPhotos: false, reason });
+    }
+    if (offersByHotelId.size === 0 && elapsedBeforeBatch >= RESPONSE_BUDGET_MS - 1500) {
+      return await sendResponse({ allowPhotos: false, reason: "budget_empty" });
     }
     if (i === 2) {
       const allowThirdBatch =
