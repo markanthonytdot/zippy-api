@@ -591,7 +591,7 @@ app.post("/v1/hotels/search", async (req, res) => {
       ? data.fast === true || String(data.fast || "").trim().toLowerCase() === "true"
       : false;
   const fastMode = fastFromQuery || fastFromBody;
-  const fastBudgetRaw = getEnvInt("HOTELS_FAST_BUDGET_MS", 4500);
+  const fastBudgetRaw = getEnvInt("HOTELS_FAST_BUDGET_MS", 6500);
   const fastBudgetMs = Math.max(1500, Math.min(8000, fastBudgetRaw));
   if (fastMode) {
     console.log(
@@ -975,13 +975,20 @@ app.post("/v1/hotels/search", async (req, res) => {
   const batches = chunkArray(pricingCandidates, 10);
   if (fastMode) {
     const elapsedBefore = Date.now() - requestStartMs;
-    if (elapsedBefore >= fastBudgetMs) {
+    const remainingMs = fastBudgetMs - elapsedBefore;
+    if (remainingMs <= 0) {
       return await sendFastResponse({ reason: "fast_budget" });
     }
     const batch = batches[0] || [];
     const batchLabel = `batch=1/${batches.length || 1}`;
-    const remainingMs = fastBudgetMs - elapsedBefore;
-    const timeoutMs = Math.max(1000, Math.min(6000, remainingMs));
+    const timeoutMs = Math.max(1000, Math.min(6000, remainingMs - 250));
+    console.log(
+      "[Hotels FAST]",
+      "requestId=" + requestId,
+      "remainingMs=" + remainingMs,
+      "timeoutMs=" + timeoutMs,
+      "elapsedBefore=" + elapsedBefore
+    );
     batchesAttempted += 1;
     const result = await fetchOffersBatch({
       token: tokenResult.token,
