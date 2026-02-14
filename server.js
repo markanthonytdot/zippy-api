@@ -1592,32 +1592,32 @@ app.post("/v1/flights/search", async (req, res) => {
   const rawPayload = req.body || {};
   const unwrapped = rawPayload && typeof rawPayload === "object" && rawPayload.data && typeof rawPayload.data === "object";
   const payload = unwrapped ? rawPayload.data : rawPayload;
-  const data = {};
+  const requestData = {};
   if (Array.isArray(payload.slices)) {
-    data.slices = payload.slices;
+    requestData.slices = payload.slices;
   } else {
     const origin = String(payload.origin || "").trim();
     const destination = String(payload.dest || payload.destination || "").trim();
     const departureDate = String(payload.date || payload.departure_date || "").trim();
     if (origin && destination && departureDate) {
-      data.slices = [{ origin, destination, departure_date: departureDate }];
+      requestData.slices = [{ origin, destination, departure_date: departureDate }];
     }
   }
   if (Array.isArray(payload.passengers)) {
-    data.passengers = payload.passengers;
+    requestData.passengers = payload.passengers;
   } else {
     const adults = Number.parseInt(String(payload.adults || ""), 10);
     if (Number.isFinite(adults) && adults > 0) {
-      data.passengers = Array.from({ length: adults }, () => ({ type: "adult" }));
+      requestData.passengers = Array.from({ length: adults }, () => ({ type: "adult" }));
     }
   }
   const cabinClass = String(payload.cabin_class || payload.cabinClass || "").trim();
   if (cabinClass) {
-    data.cabin_class = cabinClass;
+    requestData.cabin_class = cabinClass;
   }
   if (env !== "production") {
-    const slicesCount = Array.isArray(data.slices) ? data.slices.length : 0;
-    const passengersCount = Array.isArray(data.passengers) ? data.passengers.length : 0;
+    const slicesCount = Array.isArray(requestData.slices) ? requestData.slices.length : 0;
+    const passengersCount = Array.isArray(requestData.passengers) ? requestData.passengers.length : 0;
     console.log(
       "[Duffel]",
       "data_key=true",
@@ -1639,7 +1639,7 @@ app.post("/v1/flights/search", async (req, res) => {
           Authorization: `Bearer ${DUFFEL_API_KEY}`,
           "Duffel-Version": DUFFEL_API_VERSION,
         },
-        body: JSON.stringify({ data }),
+        body: JSON.stringify({ data: requestData }),
       },
       15000
     );
@@ -1656,13 +1656,33 @@ app.post("/v1/flights/search", async (req, res) => {
     return res.status(502).json({ ok: false, error: "Duffel response invalid", hint: "offer_requests" });
   }
 
-  const offerRequest = json?.data;
-  const offersLen = Array.isArray(offerRequest?.offers) ? offerRequest.offers.length : 0;
+  const data = json?.data;
+
+  // Duffel responses can vary by version.
+  // Sometimes `data` IS the offer_request.
+  // Sometimes it's wrapped like `data.offer_request`.
+  const offerRequest = data?.offer_request || data;
+
+  const offersLen = Array.isArray(offerRequest?.offers)
+    ? offerRequest.offers.length
+    : 0;
+
   console.log(
     "[Duffel]",
     "offer_request_id=" + String(offerRequest?.id || "nil"),
     "status=" + String(offerRequest?.status || "nil"),
     "offers=" + String(offersLen)
+  );
+
+  // Log keys so we can see where fields actually live
+  console.log(
+    "[Duffel]",
+    "data_keys=" + JSON.stringify(Object.keys(data || {}))
+  );
+
+  console.log(
+    "[Duffel]",
+    "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {}))
   );
 
   if (json?.meta) {
