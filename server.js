@@ -1205,7 +1205,7 @@ app.post("/v1/hotels/prices", async (req, res) => {
       continue;
     }
     const err = errorsByHotelId.get(hotelId) || "no_offers";
-    items.push({ hotelId, ok: false, error: err });
+    items.push({ hotelId, ok: false, price: null, offer: null, error: err });
   }
 
   const elapsedMs = Date.now() - requestStartMs;
