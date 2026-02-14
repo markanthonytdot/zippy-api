@@ -204,6 +204,7 @@ const AUTH_MODE = String(process.env.AUTH_MODE || "dev").toLowerCase();
 const JWT_SECRET = process.env.JWT_SECRET || "";
 const JWT_ISSUER = process.env.JWT_ISSUER || "zippy-api";
 const JWT_AUDIENCE = process.env.JWT_AUDIENCE || "zippy-ios";
+const DEV_AUTH_SECRET = String(process.env.DEV_AUTH_SECRET || "").trim();
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
 const APPLE_AUDIENCE = "com.heyzippi.zippi";
@@ -285,6 +286,15 @@ function rateLimitMiddleware(limiter, label) {
     }
     return next();
   };
+}
+
+function requireDevAuthSecret(req, res) {
+  const provided = String(req.headers["x-dev-auth"] || "").trim();
+  if (!DEV_AUTH_SECRET || !provided || provided !== DEV_AUTH_SECRET) {
+    res.status(401).json({ ok: false, error: "Invalid dev auth secret" });
+    return false;
+  }
+  return true;
 }
 
 app.use(async (req, res, next) => {
@@ -3007,7 +3017,7 @@ function requireDb(req, res) {
 // ---------------------------------------------
 app.post("/auth/dev", async (req, res) => {
   if (AUTH_MODE === "prod" && process.env.ALLOW_DEV_AUTH !== "true") {
-    return res.status(404).json({ ok: false, error: "Dev auth disabled" });
+    return res.status(403).json({ ok: false, error: "Dev auth disabled" });
   }
 
   const devSub = String(req.body?.devSub || "").trim();
@@ -3023,6 +3033,7 @@ app.post("/auth/dev", async (req, res) => {
 
   try {
     const token = await signZippyToken(devSub);
+    console.log("[Auth] dev token minted for sub=" + devSub + " route=/auth/dev");
     return res.json({ ok: true, token, mode: "dev" });
   } catch (e) {
     console.warn("Failed to mint dev token:", e?.message || e);
@@ -3049,6 +3060,7 @@ app.post("/auth/apple", async (req, res) => {
 
     try {
       const token = await signZippyToken(devSub);
+      console.log("[Auth] dev token minted for sub=" + devSub + " route=/auth/apple");
       return res.json({ ok: true, token, mode: "dev" });
     } catch (e) {
       console.warn("Failed to mint dev token:", e?.message || e);
@@ -3060,6 +3072,22 @@ app.post("/auth/apple", async (req, res) => {
   if (!JWT_SECRET) {
     console.warn("Missing JWT_SECRET for prod auth");
     return res.status(500).json({ ok: false, error: "Server misconfigured" });
+  }
+
+  const devSub = String(req.body?.devSub || "").trim();
+  if (devSub && process.env.ALLOW_DEV_AUTH === "true") {
+    if (devSub.length > 4000) {
+      return res.status(400).json({ ok: false, error: "Invalid devSub" });
+    }
+    if (!requireDevAuthSecret(req, res)) return;
+    try {
+      const token = await signZippyToken(devSub);
+      console.log("[Auth] dev token minted for sub=" + devSub + " route=/auth/apple");
+      return res.json({ ok: true, token, mode: "dev" });
+    } catch (e) {
+      console.warn("Failed to mint dev token:", e?.message || e);
+      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
   }
 
   const identityToken = String(req.body?.identityToken || "").trim();
