@@ -1665,11 +1665,9 @@ app.post("/v1/flights/search", async (req, res) => {
   const offerRequest = data?.offer_request || data;
   const offerRequestWasWrapped = Boolean(data?.offer_request);
 
-  if (!isProd) {
-    const offersLen = Array.isArray(offerRequest?.offers)
-      ? offerRequest.offers.length
-      : 0;
+  const offersLen = Array.isArray(offerRequest?.offers) ? offerRequest.offers.length : 0;
 
+  if (!isProd) {
     console.log(
       "[Duffel]",
       "offer_request_id=" + String(offerRequest?.id || "nil"),
@@ -1677,16 +1675,9 @@ app.post("/v1/flights/search", async (req, res) => {
       "offers=" + String(offersLen)
     );
 
-    // Log keys so we can see where fields actually live
-    console.log(
-      "[Duffel]",
-      "data_keys=" + JSON.stringify(Object.keys(data || {}))
-    );
-
-    console.log(
-      "[Duffel]",
-      "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {}))
-    );
+    // log keys so we can see where fields actually live
+    console.log("[Duffel]", "data_keys=" + JSON.stringify(Object.keys(data || {})));
+    console.log("[Duffel]", "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {})));
 
     if (json?.meta) {
       console.log("[Duffel]", "meta=" + JSON.stringify(json.meta));
