@@ -1585,9 +1585,7 @@ app.post("/v1/flights/search", async (req, res) => {
   }
 
   const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
-  const isProd = env === "production";
-  const requestStartMs = Date.now();
-  if (!isProd) {
+  if (env !== "production") {
     console.log("[Duffel]", "version=" + DUFFEL_API_VERSION);
   }
 
@@ -1658,222 +1656,24 @@ app.post("/v1/flights/search", async (req, res) => {
     return res.status(502).json({ ok: false, error: "Duffel response invalid", hint: "offer_requests" });
   }
 
-  const safeJson = json && typeof json === "object" ? json : {};
-  const safeData = safeJson.data && typeof safeJson.data === "object" ? safeJson.data : {};
-  const offerRequestObj =
-    safeData.offer_request && typeof safeData.offer_request === "object" ? safeData.offer_request : safeData;
-  const offerRequestId = String(offerRequestObj?.id || "").trim();
-  let offerRequestStatus = String(offerRequestObj?.status || "").trim().toLowerCase();
-  const createOffers = Array.isArray(offerRequestObj?.offers)
-    ? offerRequestObj.offers
-    : Array.isArray(safeData.offers)
-    ? safeData.offers
-    : [];
+  const offerRequest = json?.data;
+  const offersLen = Array.isArray(offerRequest?.offers) ? offerRequest.offers.length : 0;
+  console.log(
+    "[Duffel]",
+    "offer_request_id=" + String(offerRequest?.id || "nil"),
+    "status=" + String(offerRequest?.status || "nil"),
+    "offers=" + String(offersLen)
+  );
 
-  if (!isProd) {
-    const metaSnippet = safeJson.meta ? truncateText(JSON.stringify(safeJson.meta), 500) : "";
-    console.log(
-      "[Duffel]",
-      "offer_request_id=" + (offerRequestId || "unknown"),
-      "status=" + (offerRequestStatus || "unknown"),
-      "offers_in_create=" + createOffers.length,
-      "meta=" + (metaSnippet || "none")
-    );
+  if (json?.meta) {
+    console.log("[Duffel]", "meta=" + JSON.stringify(json.meta));
   }
 
   if (!r.ok) {
     console.log("[Duffel]", "step=offer_requests", "status=" + String(r.status));
-    return res.status(r.status).json(safeJson);
   }
 
-  const isCompleteStatus = (status) => status === "complete" || status === "completed";
-  const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const TOTAL_BUDGET_MS = 15000;
-  const POLL_INTERVAL_MS = 400;
-  const MAX_POLL_ATTEMPTS = 12;
-  const MAX_POLL_MS = 8000;
-  const POLL_TIMEOUT_MS = 5000;
-  const MIN_OFFERS_TIME_MS = 2500;
-  const MAX_PAGES = 6;
-  const MAX_OFFERS = 200;
-  const OFFERS_TIMEOUT_MS = 8000;
-
-  let pollTimedOut = false;
-  let pollsAttempted = 0;
-  if (offerRequestId && !isCompleteStatus(offerRequestStatus)) {
-    const pollStartMs = Date.now();
-    const maxPollAttempts = offerRequestStatus ? MAX_POLL_ATTEMPTS : 3;
-    while (pollsAttempted < maxPollAttempts) {
-      const elapsedPollMs = Date.now() - pollStartMs;
-      const elapsedTotalMs = Date.now() - requestStartMs;
-      if (elapsedPollMs >= MAX_POLL_MS || elapsedTotalMs >= TOTAL_BUDGET_MS - MIN_OFFERS_TIME_MS) {
-        pollTimedOut = true;
-        break;
-      }
-      pollsAttempted += 1;
-      await sleepMs(POLL_INTERVAL_MS);
-      let pollRes;
-      let pollJson;
-      try {
-        pollRes = await fetchWithTimeout(
-          `https://api.duffel.com/air/offer_requests/${encodeURIComponent(offerRequestId)}`,
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${DUFFEL_API_KEY}`,
-              "Duffel-Version": DUFFEL_API_VERSION,
-            },
-          },
-          POLL_TIMEOUT_MS
-        );
-        pollJson = await pollRes.json().catch(() => ({}));
-      } catch (e) {
-        pollTimedOut = true;
-        if (!isProd) {
-          console.log("[Duffel]", "poll_attempt=" + pollsAttempted, "status=error");
-        }
-        break;
-      }
-
-      if (!pollRes.ok) {
-        pollTimedOut = true;
-        if (!isProd) {
-          console.log(
-            "[Duffel]",
-            "poll_attempt=" + pollsAttempted,
-            "status=" + String(pollRes.status || "unknown")
-          );
-        }
-        break;
-      }
-
-      const pollData = pollJson?.data && typeof pollJson.data === "object" ? pollJson.data : {};
-      const polledStatus = String(pollData?.status || "").trim().toLowerCase();
-      if (polledStatus) {
-        offerRequestStatus = polledStatus;
-      }
-      if (!isProd) {
-        console.log(
-          "[Duffel]",
-          "poll_attempt=" + pollsAttempted,
-          "status=" + (offerRequestStatus || "unknown"),
-          "elapsed_ms=" + (Date.now() - requestStartMs)
-        );
-      }
-      if (isCompleteStatus(offerRequestStatus)) break;
-    }
-    if (!isCompleteStatus(offerRequestStatus)) {
-      pollTimedOut = true;
-    }
-  }
-
-  const collectedOffers = [];
-  const seenOfferIds = new Set();
-  const addOffers = (offers) => {
-    if (!Array.isArray(offers) || offers.length === 0) return;
-    for (const offer of offers) {
-      const id = String(offer?.id || "").trim();
-      if (id) {
-        if (seenOfferIds.has(id)) continue;
-        seenOfferIds.add(id);
-      }
-      collectedOffers.push(offer);
-      if (collectedOffers.length >= MAX_OFFERS) break;
-    }
-  };
-
-  addOffers(createOffers);
-
-  let offersTimedOut = false;
-  let pagesFetched = 0;
-  if (offerRequestId) {
-    let after = "";
-    while (pagesFetched < MAX_PAGES && collectedOffers.length < MAX_OFFERS) {
-      const elapsedTotalMs = Date.now() - requestStartMs;
-      if (elapsedTotalMs >= TOTAL_BUDGET_MS - 1000) {
-        offersTimedOut = true;
-        break;
-      }
-      const offersUrl = new URL("https://api.duffel.com/air/offers");
-      offersUrl.searchParams.set("offer_request_id", offerRequestId);
-      if (after) {
-        offersUrl.searchParams.set("after", after);
-      }
-      let offersRes;
-      let offersJson;
-      try {
-        offersRes = await fetchWithTimeout(
-          offersUrl.toString(),
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${DUFFEL_API_KEY}`,
-              "Duffel-Version": DUFFEL_API_VERSION,
-            },
-          },
-          OFFERS_TIMEOUT_MS
-        );
-        offersJson = await offersRes.json().catch(() => ({}));
-      } catch (e) {
-        if (!isProd) {
-          console.log("[Duffel]", "offers_page=" + (pagesFetched + 1), "status=error");
-        }
-        break;
-      }
-
-      if (!offersRes.ok) {
-        if (!isProd) {
-          console.log(
-            "[Duffel]",
-            "offers_page=" + (pagesFetched + 1),
-            "status=" + String(offersRes.status || "unknown")
-          );
-        }
-        break;
-      }
-
-      pagesFetched += 1;
-      const offersPage = Array.isArray(offersJson?.data) ? offersJson.data : [];
-      const nextAfter = String(offersJson?.meta?.after || "").trim();
-      if (!isProd) {
-        console.log(
-          "[Duffel]",
-          "offers_page=" + pagesFetched,
-          "count=" + offersPage.length,
-          "after=" + (nextAfter || "none")
-        );
-      }
-      addOffers(offersPage);
-      if (!nextAfter) break;
-      after = nextAfter;
-    }
-  }
-
-  if (offerRequestStatus) {
-    if (safeData.offer_request && typeof safeData.offer_request === "object") {
-      safeData.offer_request.status = offerRequestStatus;
-    } else {
-      safeData.status = offerRequestStatus;
-    }
-  }
-  safeData.offers = collectedOffers;
-  if (safeData.offer_request && typeof safeData.offer_request === "object") {
-    safeData.offer_request.offers = collectedOffers;
-  }
-  safeJson.data = safeData;
-
-  if (!isProd) {
-    const elapsedMs = Date.now() - requestStartMs;
-    console.log(
-      "[Duffel]",
-      "offers_returned=" + collectedOffers.length,
-      "elapsed_ms=" + elapsedMs,
-      "poll_timed_out=" + String(pollTimedOut),
-      "offers_timed_out=" + String(offersTimedOut)
-    );
-  }
-
-  return res.status(r.status).json(safeJson);
+  return res.status(r.status).json(json);
 });
 
 
