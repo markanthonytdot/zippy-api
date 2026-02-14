@@ -1586,9 +1586,7 @@ app.post("/v1/flights/search", async (req, res) => {
 
   const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
   const isProd = env === "production";
-  if (!isProd) {
-    console.log("[Duffel]", "version=" + DUFFEL_API_VERSION);
-  }
+  console.log("[Duffel]", "version=" + String(DUFFEL_API_VERSION));
 
   const rawPayload = req.body || {};
   const unwrapped = rawPayload && typeof rawPayload === "object" && rawPayload.data && typeof rawPayload.data === "object";
@@ -1667,21 +1665,20 @@ app.post("/v1/flights/search", async (req, res) => {
 
   const offersLen = Array.isArray(offerRequest?.offers) ? offerRequest.offers.length : 0;
 
-  if (!isProd) {
-    console.log(
-      "[Duffel]",
-      "offer_request_id=" + String(offerRequest?.id || "nil"),
-      "status=" + String(offerRequest?.status || "nil"),
-      "offers=" + String(offersLen)
-    );
+  console.log(
+    "[Duffel]",
+    "offer_request_id=" + String(offerRequest?.id || "nil"),
+    "live_mode=" + String(offerRequest?.live_mode ?? "nil"),
+    "status=" + String(offerRequest?.status || "nil"),
+    "offers=" + String(offersLen),
+    "wrapped=" + String(offerRequestWasWrapped)
+  );
 
-    // log keys so we can see where fields actually live
-    console.log("[Duffel]", "data_keys=" + JSON.stringify(Object.keys(data || {})));
-    console.log("[Duffel]", "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {})));
+  console.log("[Duffel]", "data_keys=" + JSON.stringify(Object.keys(data || {})));
+  console.log("[Duffel]", "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {})));
 
-    if (json?.meta) {
-      console.log("[Duffel]", "meta=" + JSON.stringify(json.meta));
-    }
+  if (json?.meta) {
+    console.log("[Duffel]", "meta=" + JSON.stringify(json.meta));
   }
 
   if (!r.ok) {
@@ -1757,6 +1754,14 @@ app.post("/v1/flights/search", async (req, res) => {
     }
 
     const nextAfter = String(offersJson?.meta?.after || "").trim();
+    console.log(
+      "[Duffel]",
+      "offers_list_page=" + String(pagesFetched),
+      "after=" + String(after || "nil"),
+      "got=" + String(pageOffers.length),
+      "nextAfter=" + String(nextAfter || "nil"),
+      "total=" + String(fetchedOffers.length)
+    );
     pagesFetched += 1;
     if (!nextAfter || pageOffers.length === 0) break;
     after = nextAfter;
