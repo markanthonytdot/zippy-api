@@ -420,6 +420,150 @@ app.get("/v1/hotels/ping", (req, res) => {
 // Hotels Search (Amadeus)
 // POST /v1/hotels/search
 // ---------------------------------------------
+function mergeOffersByHotelId(offersByHotelId, offersData) {
+  if (!Array.isArray(offersData)) return 0;
+  let merged = 0;
+  for (const entry of offersData) {
+    const hotel = entry?.hotel || {};
+    const hotelId = String(hotel.hotelId || entry?.hotelId || "").trim();
+    if (!hotelId) continue;
+    const bestOffer = pickBestOfferDetails(entry?.offers);
+    if (!bestOffer) continue;
+    const price = bestOffer.price;
+    const existing = offersByHotelId.get(hotelId);
+    if (!existing) {
+      offersByHotelId.set(hotelId, { entry, bestOffer, price });
+      merged += 1;
+      continue;
+    }
+    if (price && !existing.price) {
+      offersByHotelId.set(hotelId, { entry, bestOffer, price });
+      merged += 1;
+      continue;
+    }
+    if (price && existing.price) {
+      const newTotal = price.totalNum;
+      const oldTotal = existing.price.totalNum;
+      const sameCurrency = !price.currency || !existing.price.currency || price.currency === existing.price.currency;
+      if (sameCurrency && Number.isFinite(newTotal) && Number.isFinite(oldTotal) && newTotal < oldTotal) {
+        offersByHotelId.set(hotelId, { entry, bestOffer, price });
+        merged += 1;
+      } else if (!Number.isFinite(oldTotal) && Number.isFinite(newTotal)) {
+        offersByHotelId.set(hotelId, { entry, bestOffer, price });
+        merged += 1;
+      }
+    }
+  }
+  return merged;
+}
+
+function buildOfferPayload(bestOffer, offerPrice, adults, checkIn, checkOut, nights) {
+  if (!bestOffer) return null;
+  const offerCheckIn = pickOfferCheckInDate(bestOffer, checkIn);
+  const offerCheckOut = pickOfferCheckOutDate(bestOffer, checkOut, offerCheckIn, nights);
+  return {
+    id: pickOfferId(bestOffer),
+    checkInDate: offerCheckIn,
+    checkOutDate: offerCheckOut,
+    adults,
+    roomType: pickOfferRoomType(bestOffer),
+    roomDescription: pickOfferRoomDescription(bestOffer),
+    bedType: pickOfferBedType(bestOffer),
+    boardType: null,
+    paymentType: null,
+    refundable: null,
+    cancellation: null,
+    price: offerPrice
+      ? {
+          total: offerPrice.total,
+          base: offerPrice.base,
+          taxes: offerPrice.taxes,
+          currency: offerPrice.currency,
+        }
+      : { total: null, base: null, taxes: null, currency: null },
+    raw: buildOfferRawDebug(bestOffer),
+  };
+}
+
+async function fetchOffersBatch({
+  token,
+  requestId,
+  userId,
+  checkIn,
+  checkOut,
+  adults,
+  batchIds,
+  batchLabel,
+  timeoutMs,
+}) {
+  const offersUrl = new URL(`${AMADEUS_BASE_URL}/v3/shopping/hotel-offers`);
+  offersUrl.searchParams.set("hotelIds", batchIds.join(","));
+  offersUrl.searchParams.set("checkInDate", checkIn);
+  offersUrl.searchParams.set("checkOutDate", checkOut);
+  offersUrl.searchParams.set("adults", String(adults));
+  offersUrl.searchParams.set("roomQuantity", "1");
+  offersUrl.searchParams.set("paymentPolicy", "NONE");
+  offersUrl.searchParams.set("bestRateOnly", "true");
+
+  let offersRes;
+  let offersJson = {};
+  let offersText = "";
+  const timeout = Number.isFinite(timeoutMs) ? timeoutMs : 8000;
+  try {
+    offersRes = await fetchWithTimeout(
+      offersUrl.toString(),
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      },
+      timeout
+    );
+    offersText = await offersRes.text().catch(() => "");
+    offersJson = safeJsonParse(offersText);
+  } catch (e) {
+    console.log(
+      "[Hotels OFFERS]",
+      "requestId=" + requestId,
+      "userId=" + userId,
+      "status=ERR",
+      "count=0",
+      "batch=" + batchLabel
+    );
+    return { ok: false, status: 502, error: "Amadeus offers fetch failed" };
+  }
+
+  const offersData = Array.isArray(offersJson?.data) ? offersJson.data : [];
+  console.log(
+    "[Hotels OFFERS]",
+    "requestId=" + requestId,
+    "userId=" + userId,
+    "status=" + offersRes.status,
+    "count=" + offersData.length,
+    "batch=" + batchLabel,
+    "ids=" + batchIds.length
+  );
+
+  if (!offersRes.ok) {
+    const hostPath = `${offersUrl.host}${offersUrl.pathname}`;
+    const bodySnippet = truncateText(offersText, 500);
+    console.log(
+      "[Hotels OFFERS]",
+      "requestId=" + requestId,
+      "hostPath=" + hostPath,
+      "status=" + offersRes.status,
+      "batch=" + batchLabel,
+      "body=" + bodySnippet
+    );
+    return {
+      ok: false,
+      status: 502,
+      error: "Amadeus offers fetch failed",
+      hint: `step=offers status=${offersRes.status} body=${bodySnippet}`,
+    };
+  }
+
+  return { ok: true, offersData };
+}
+
 app.post("/v1/hotels/search", async (req, res) => {
   const userId = String(req.userId || "unknown");
   const requestStartMs = Date.now();
@@ -429,6 +573,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   const TARGET_PRICED = 8;
   const PRICE_CAP = 20;
   const RESPONSE_BUDGET_MS = 9500;
+  const OFFERS_TIMEOUT_MS = 8000;
   const RETRY_BACKOFF_MS = 400;
   const BATCH3_SOFT_MS = 6500;
   const MIN_BATCHES_BEFORE_EMPTY = 2;
@@ -438,6 +583,24 @@ app.post("/v1/hotels/search", async (req, res) => {
   }
 
   const body = req.body || {};
+  const data = body && typeof body === "object" ? body.data : null;
+  const fastQuery = String(req.query.fast || "").trim().toLowerCase();
+  const fastFromQuery = fastQuery === "1" || fastQuery === "true";
+  const fastFromBody =
+    data && typeof data === "object"
+      ? data.fast === true || String(data.fast || "").trim().toLowerCase() === "true"
+      : false;
+  const fastMode = fastFromQuery || fastFromBody;
+  const fastBudgetRaw = getEnvInt("HOTELS_FAST_BUDGET_MS", 4500);
+  const fastBudgetMs = Math.max(1500, Math.min(8000, fastBudgetRaw));
+  if (fastMode) {
+    console.log(
+      "[Hotels FAST]",
+      "requestId=" + requestId,
+      "fast=true",
+      "fast_budget_ms=" + fastBudgetMs
+    );
+  }
   const city = String(body.city || "").trim();
   if (city && city.length > 200) {
     return res.status(400).json({ ok: false, error: "Invalid city" });
@@ -568,6 +731,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   }
   const discoveredCount = hotelIds.length;
   hotelIds = hotelIds.slice(0, DISCOVERY_CAP);
+  const discoveredCountLimited = hotelIds.length;
   const pricingCandidates = hotelIds.slice(0, PRICE_CAP);
   const discoveryElapsedMs = Date.now() - requestStartMs;
 
@@ -628,6 +792,18 @@ app.post("/v1/hotels/search", async (req, res) => {
 
   if (pricingCandidates.length === 0) {
     console.log("[Hotels OFFERS]", "requestId=" + requestId, "userId=" + userId, "status=SKIP", "count=0");
+    if (fastMode) {
+      return res.json({
+        ok: true,
+        cached: false,
+        query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
+        items: [],
+        partial: false,
+        priced_count: 0,
+        discovered_count: 0,
+        pending_count: 0,
+      });
+    }
     return res.json({
       ok: true,
       cached: false,
@@ -641,69 +817,6 @@ app.post("/v1/hotels/search", async (req, res) => {
     const id = String(item?.hotelId || "").trim();
     if (id) hotelsById.set(id, item);
   }
-  async function fetchOffersBatch(batchIds, batchLabel) {
-    const offersUrl = new URL(`${AMADEUS_BASE_URL}/v3/shopping/hotel-offers`);
-    offersUrl.searchParams.set("hotelIds", batchIds.join(","));
-    offersUrl.searchParams.set("checkInDate", checkIn);
-    offersUrl.searchParams.set("checkOutDate", checkOut);
-    offersUrl.searchParams.set("adults", String(adults));
-    offersUrl.searchParams.set("roomQuantity", "1");
-    offersUrl.searchParams.set("paymentPolicy", "NONE");
-    offersUrl.searchParams.set("bestRateOnly", "true");
-
-    let offersRes;
-    let offersJson = {};
-    let offersText = "";
-    try {
-      offersRes = await fetchWithTimeout(offersUrl.toString(), {
-        headers: { Authorization: `Bearer ${tokenResult.token}` },
-      });
-      offersText = await offersRes.text().catch(() => "");
-      offersJson = safeJsonParse(offersText);
-    } catch (e) {
-      console.log(
-        "[Hotels OFFERS]",
-        "requestId=" + requestId,
-        "userId=" + userId,
-        "status=ERR",
-        "count=0",
-        "batch=" + batchLabel
-      );
-      return { ok: false, status: 502, error: "Amadeus offers fetch failed" };
-    }
-
-    const offersData = Array.isArray(offersJson?.data) ? offersJson.data : [];
-    console.log(
-      "[Hotels OFFERS]",
-      "requestId=" + requestId,
-      "userId=" + userId,
-      "status=" + offersRes.status,
-      "count=" + offersData.length,
-      "batch=" + batchLabel,
-      "ids=" + batchIds.length
-    );
-
-    if (!offersRes.ok) {
-      const hostPath = `${offersUrl.host}${offersUrl.pathname}`;
-      const bodySnippet = truncateText(offersText, 500);
-      console.log(
-        "[Hotels OFFERS]",
-        "requestId=" + requestId,
-        "hostPath=" + hostPath,
-        "status=" + offersRes.status,
-        "batch=" + batchLabel,
-        "body=" + bodySnippet
-      );
-      return {
-        ok: false,
-        status: 502,
-        error: "Amadeus offers fetch failed",
-        hint: `step=offers status=${offersRes.status} body=${bodySnippet}`,
-      };
-    }
-
-    return { ok: true, offersData };
-  }
 
   const offersByHotelId = new Map();
   let offersReturnedCount = 0;
@@ -713,71 +826,58 @@ app.post("/v1/hotels/search", async (req, res) => {
   let lastBatchStatus = "init";
   const outputMax = Math.min(max, 50);
   const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const sendResponse = async (options = {}) => {
+
+  const buildHotelItem = (hotelId, offer, includePending, includePriceStatus) => {
+    if (!offer && !includePending) return null;
+    const entry = offer?.entry || {};
+    const hotel = entry?.hotel || {};
+    const fallback = hotelsById.get(hotelId) || {};
+    const geo = hotel.geoCode || fallback.geoCode || {};
+    const lat = Number(geo.latitude ?? geo.lat);
+    const lng = Number(geo.longitude ?? geo.lng);
+    const name = String(hotel.name || fallback.name || "").trim();
+    const address = formatAmadeusAddress(hotel.address || fallback.address);
+    const rating = parseAmadeusRating(hotel.rating || hotel.hotelRating || fallback.rating);
+    const offerPrice = offer?.price || null;
+    const bestOffer = offer?.bestOffer?.offer || null;
+    const offerPayload = buildOfferPayload(bestOffer, offerPrice, adults, checkIn, checkOut, nights);
+    const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
+
+    cacheHotelDetails(hotelId, name, address, city);
+
+    const item = {
+      hotelId,
+      name,
+      lat: Number.isFinite(lat) ? lat : null,
+      lng: Number.isFinite(lng) ? lng : null,
+      address,
+      rating,
+      price: offer ? price : null,
+      offer: offer ? offerPayload : null,
+      bookingUrl: null,
+    };
+    if (includePriceStatus) {
+      item.price_status = offer ? "priced" : "pending";
+    }
+    return item;
+  };
+
+  const buildItems = (ids, includePending, includePriceStatus) => {
+    const items = [];
+    for (const hotelId of ids) {
+      const offer = offersByHotelId.get(hotelId);
+      const item = buildHotelItem(hotelId, offer, includePending, includePriceStatus);
+      if (item) items.push(item);
+    }
+    return items;
+  };
+
+  const sendFullResponse = async (options = {}) => {
     if (responseSent || res.headersSent) return;
     responseSent = true;
     const allowPhotos = options.allowPhotos === true;
     const responseReason = options.reason || "complete";
-    const items = [];
-    for (const hotelId of pricingCandidates) {
-      const offer = offersByHotelId.get(hotelId);
-      if (!offer) continue;
-      const entry = offer.entry || {};
-      const hotel = entry?.hotel || {};
-      const bestOffer = offer.bestOffer?.offer || null;
-      const fallback = hotelsById.get(hotelId) || {};
-      const geo = hotel.geoCode || fallback.geoCode || {};
-      const lat = Number(geo.latitude ?? geo.lat);
-      const lng = Number(geo.longitude ?? geo.lng);
-      const name = String(hotel.name || fallback.name || "").trim();
-      const address = formatAmadeusAddress(hotel.address || fallback.address);
-      const rating = parseAmadeusRating(hotel.rating || hotel.hotelRating || fallback.rating);
-      const offerPrice = offer.price || null;
-      const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
-      const roomType = pickOfferRoomType(bestOffer);
-      const roomDescription = pickOfferRoomDescription(bestOffer);
-      const bedType = pickOfferBedType(bestOffer);
-      const offerCheckIn = pickOfferCheckInDate(bestOffer, checkIn);
-      const offerCheckOut = pickOfferCheckOutDate(bestOffer, checkOut, offerCheckIn, nights);
-      const offerPayload = bestOffer
-        ? {
-            id: pickOfferId(bestOffer),
-            checkInDate: offerCheckIn,
-            checkOutDate: offerCheckOut,
-            adults,
-            roomType,
-            roomDescription,
-            bedType,
-            boardType: null,
-            paymentType: null,
-            refundable: null,
-            cancellation: null,
-            price: offerPrice
-              ? {
-                  total: offerPrice.total,
-                  base: offerPrice.base,
-                  taxes: offerPrice.taxes,
-                  currency: offerPrice.currency,
-                }
-              : { total: null, base: null, taxes: null, currency: null },
-            raw: buildOfferRawDebug(bestOffer),
-          }
-        : null;
-
-      cacheHotelDetails(hotelId, name, address, city);
-
-      items.push({
-        hotelId,
-        name,
-        lat: Number.isFinite(lat) ? lat : null,
-        lng: Number.isFinite(lng) ? lng : null,
-        address,
-        rating,
-        price,
-        offer: offerPayload,
-        bookingUrl: null,
-      });
-    }
+    const items = buildItems(pricingCandidates, false, false);
 
     const itemsLimited = items.slice(0, outputMax);
     let itemsWithPhotos = itemsLimited;
@@ -830,16 +930,91 @@ app.post("/v1/hotels/search", async (req, res) => {
     return resp;
   };
 
+  const sendFastResponse = async (options = {}) => {
+    if (responseSent || res.headersSent) return;
+    responseSent = true;
+    const responseReason = options.reason || "fast_complete";
+    const items = buildItems(hotelIds, true, true);
+    const itemsLimited = items.slice(0, outputMax);
+    const pricedCount = itemsLimited.filter((item) => item.price_status === "priced").length;
+    const pendingCount = itemsLimited.length - pricedCount;
+    const partial = pendingCount > 0;
+    const pendingIds = itemsLimited.filter((item) => item.price_status === "pending").map((item) => item.hotelId);
+
+    const elapsedMs = Date.now() - requestStartMs;
+    console.log(
+      "[Hotels RESPONSE]",
+      "requestId=" + requestId,
+      "mode=fast",
+      "reason=" + responseReason,
+      "elapsed_ms=" + elapsedMs
+    );
+    if (partial) {
+      console.log("[Hotels FAST]", "requestId=" + requestId, "partial=true");
+    }
+
+    const payload = {
+      ok: true,
+      cached: false,
+      query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
+      items: itemsLimited,
+      partial,
+      priced_count: pricedCount,
+      discovered_count: discoveredCountLimited,
+      pending_count: pendingCount,
+    };
+    if (pendingIds.length > 0) {
+      payload.next = {
+        endpoint: "/v1/hotels/prices",
+        data: { hotelIds: pendingIds, checkIn, nights, adults },
+      };
+    }
+    return res.json(payload);
+  };
+
   const batches = chunkArray(pricingCandidates, 10);
+  if (fastMode) {
+    const elapsedBefore = Date.now() - requestStartMs;
+    if (elapsedBefore >= fastBudgetMs) {
+      return await sendFastResponse({ reason: "fast_budget" });
+    }
+    const batch = batches[0] || [];
+    const batchLabel = `batch=1/${batches.length || 1}`;
+    const remainingMs = fastBudgetMs - elapsedBefore;
+    const timeoutMs = Math.max(1000, Math.min(6000, remainingMs));
+    batchesAttempted += 1;
+    const result = await fetchOffersBatch({
+      token: tokenResult.token,
+      requestId,
+      userId,
+      checkIn,
+      checkOut,
+      adults,
+      batchIds: batch,
+      batchLabel,
+      timeoutMs,
+    });
+    const firstBatchElapsedMs = Date.now() - requestStartMs;
+    console.log("[Hotels FAST]", "requestId=" + requestId, "first_batch_done_ms=" + firstBatchElapsedMs);
+    if (!result.ok) {
+      return await sendFastResponse({ reason: "first_batch_error" });
+    }
+    const offersData = result.offersData || [];
+    offersReturnedCount += offersData.length;
+    mergeOffersByHotelId(offersByHotelId, offersData);
+    const reason = offersByHotelId.size > 0 ? "first_batch" : "first_batch_empty";
+    return await sendFastResponse({ reason });
+  }
+
   let firstBatchLogged = false;
   for (let i = 0; i < batches.length; i += 1) {
     const elapsedBeforeBatch = Date.now() - requestStartMs;
     if (elapsedBeforeBatch >= RESPONSE_BUDGET_MS) {
       const reason = offersByHotelId.size > 0 ? "budget" : "budget_empty";
-      return await sendResponse({ allowPhotos: false, reason });
+      return await sendFullResponse({ allowPhotos: false, reason });
     }
     if (offersByHotelId.size === 0 && elapsedBeforeBatch >= RESPONSE_BUDGET_MS - 1500) {
-      return await sendResponse({ allowPhotos: false, reason: "budget_empty" });
+      return await sendFullResponse({ allowPhotos: false, reason: "budget_empty" });
     }
     if (i === 2) {
       const allowThirdBatch =
@@ -847,13 +1022,23 @@ app.post("/v1/hotels/search", async (req, res) => {
         (offersByHotelId.size === 0 && elapsedBeforeBatch < RESPONSE_BUDGET_MS);
       if (!allowThirdBatch) {
         const reason = offersByHotelId.size > 0 ? "budget" : "budget_empty";
-        return await sendResponse({ allowPhotos: false, reason });
+        return await sendFullResponse({ allowPhotos: false, reason });
       }
     }
     const batch = batches[i];
     const batchLabel = `batch=${i + 1}/${batches.length}`;
     batchesAttempted += 1;
-    let result = await fetchOffersBatch(batch, batchLabel);
+    let result = await fetchOffersBatch({
+      token: tokenResult.token,
+      requestId,
+      userId,
+      checkIn,
+      checkOut,
+      adults,
+      batchIds: batch,
+      batchLabel,
+      timeoutMs: OFFERS_TIMEOUT_MS,
+    });
     lastBatchStatus = result.ok ? "ok" : "err";
     if (!result.ok) {
       const elapsed = Date.now() - requestStartMs;
@@ -861,7 +1046,17 @@ app.post("/v1/hotels/search", async (req, res) => {
         usedRetry = true;
         await sleepMs(RETRY_BACKOFF_MS);
         batchesAttempted += 1;
-        result = await fetchOffersBatch(batch, `${batchLabel}:retry`);
+        result = await fetchOffersBatch({
+          token: tokenResult.token,
+          requestId,
+          userId,
+          checkIn,
+          checkOut,
+          adults,
+          batchIds: batch,
+          batchLabel: `${batchLabel}:retry`,
+          timeoutMs: OFFERS_TIMEOUT_MS,
+        });
         lastBatchStatus = result.ok ? "ok" : "err";
       }
     }
@@ -890,48 +1085,135 @@ app.post("/v1/hotels/search", async (req, res) => {
         "elapsed_ms=" + firstBatchElapsedMs
       );
     }
-    for (const entry of offersData) {
-      const hotel = entry?.hotel || {};
-      const hotelId = String(hotel.hotelId || entry?.hotelId || "").trim();
-      if (!hotelId) continue;
-      const bestOffer = pickBestOfferDetails(entry?.offers);
-      if (!bestOffer) continue;
-      const price = bestOffer.price;
-      const existing = offersByHotelId.get(hotelId);
-      if (!existing) {
-        offersByHotelId.set(hotelId, { entry, bestOffer, price });
-        continue;
-      }
-      if (price && !existing.price) {
-        offersByHotelId.set(hotelId, { entry, bestOffer, price });
-        continue;
-      }
-      if (price && existing.price) {
-        const newTotal = price.totalNum;
-        const oldTotal = existing.price.totalNum;
-        const sameCurrency = !price.currency || !existing.price.currency || price.currency === existing.price.currency;
-        if (sameCurrency && Number.isFinite(newTotal) && Number.isFinite(oldTotal) && newTotal < oldTotal) {
-          offersByHotelId.set(hotelId, { entry, bestOffer, price });
-        } else if (!Number.isFinite(oldTotal) && Number.isFinite(newTotal)) {
-          offersByHotelId.set(hotelId, { entry, bestOffer, price });
-        }
-      }
-    }
+    mergeOffersByHotelId(offersByHotelId, offersData);
 
     const elapsedAfterBatch = Date.now() - requestStartMs;
     if (offersByHotelId.size >= TARGET_PRICED) {
-      return await sendResponse({ allowPhotos: false, reason: "target" });
+      return await sendFullResponse({ allowPhotos: false, reason: "target" });
     }
     if (elapsedAfterBatch >= RESPONSE_BUDGET_MS) {
       const reason =
         offersByHotelId.size > 0 || batchesAttempted < MIN_BATCHES_BEFORE_EMPTY ? "budget" : "budget_empty";
-      return await sendResponse({ allowPhotos: false, reason });
+      return await sendFullResponse({ allowPhotos: false, reason });
     }
   }
 
   const elapsedEnd = Date.now() - requestStartMs;
   const allowPhotos = elapsedEnd < 5000;
-  return await sendResponse({ allowPhotos, reason: "exhausted" });
+  return await sendFullResponse({ allowPhotos, reason: "exhausted" });
+});
+
+// ---------------------------------------------
+// Hotels Prices (Amadeus)
+// POST /v1/hotels/prices
+// ---------------------------------------------
+app.post("/v1/hotels/prices", async (req, res) => {
+  const userId = String(req.userId || "unknown");
+  const requestStartMs = Date.now();
+  const requestId = String(req.requestId || randomUUID());
+  req.requestId = requestId;
+  const OFFERS_TIMEOUT_MS = 8000;
+
+  if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
+    return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
+  }
+
+  const body = req.body || {};
+  const payload = body && typeof body === "object" && body.data && typeof body.data === "object" ? body.data : body;
+  const hotelIdsRaw = Array.isArray(payload?.hotelIds) ? payload.hotelIds : [];
+  const hotelIds = [];
+  const seen = new Set();
+  for (const raw of hotelIdsRaw) {
+    const id = String(raw || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    hotelIds.push(id);
+    if (hotelIds.length >= 50) break;
+  }
+  if (hotelIds.length === 0) {
+    return res.status(400).json({ ok: false, error: "Missing hotelIds" });
+  }
+
+  const checkIn = String(payload?.checkIn || "").trim();
+  if (!checkIn) {
+    return res.status(400).json({ ok: false, error: "Missing checkIn" });
+  }
+
+  const nightsRaw = Number(payload?.nights);
+  if (!Number.isFinite(nightsRaw)) {
+    return res.status(400).json({ ok: false, error: "Missing nights" });
+  }
+  const nights = Math.round(nightsRaw);
+  if (nights <= 0 || nights > 30) {
+    return res.status(400).json({ ok: false, error: "Invalid nights" });
+  }
+  const checkOut = addNightsToDate(checkIn, nights);
+  if (!checkOut) {
+    return res.status(400).json({ ok: false, error: "Invalid checkIn" });
+  }
+
+  let adults = Number(payload?.adults);
+  if (!Number.isFinite(adults)) adults = 1;
+  adults = Math.round(adults);
+  if (adults <= 0) adults = 1;
+  if (adults > 9) adults = 9;
+
+  const tokenResult = await fetchAmadeusToken(requestId);
+  if (!tokenResult.ok) {
+    return res.status(tokenResult.status).json({ ok: false, error: tokenResult.error });
+  }
+
+  const offersByHotelId = new Map();
+  const errorsByHotelId = new Map();
+  const batches = chunkArray(hotelIds, 10);
+
+  for (let i = 0; i < batches.length; i += 1) {
+    const batch = batches[i];
+    const batchLabel = `batch=${i + 1}/${batches.length}`;
+    const result = await fetchOffersBatch({
+      token: tokenResult.token,
+      requestId,
+      userId,
+      checkIn,
+      checkOut,
+      adults,
+      batchIds: batch,
+      batchLabel,
+      timeoutMs: OFFERS_TIMEOUT_MS,
+    });
+    if (!result.ok) {
+      for (const id of batch) {
+        if (!errorsByHotelId.has(id)) {
+          errorsByHotelId.set(id, result.error || "offers_failed");
+        }
+      }
+      continue;
+    }
+    const offersData = result.offersData || [];
+    mergeOffersByHotelId(offersByHotelId, offersData);
+  }
+
+  const items = [];
+  for (const hotelId of hotelIds) {
+    const offer = offersByHotelId.get(hotelId);
+    if (offer) {
+      const bestOffer = offer.bestOffer?.offer || null;
+      const offerPrice = offer.price || null;
+      const offerPayload = buildOfferPayload(bestOffer, offerPrice, adults, checkIn, checkOut, nights);
+      const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
+      items.push({ hotelId, ok: true, price, offer: offerPayload });
+      continue;
+    }
+    const err = errorsByHotelId.get(hotelId) || "no_offers";
+    items.push({ hotelId, ok: false, error: err });
+  }
+
+  const elapsedMs = Date.now() - requestStartMs;
+  return res.json({
+    ok: true,
+    elapsed_ms: elapsedMs,
+    items,
+  });
 });
 
 // ---------------------------------------------
