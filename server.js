@@ -1626,11 +1626,14 @@ app.post("/v1/flights/search", async (req, res) => {
     );
   }
 
-  const url = "https://api.duffel.com/air/offer_requests";
+  const offerRequestsUrl = new URL("https://api.duffel.com/air/offer_requests");
+  offerRequestsUrl.searchParams.set("return_offers", "true");
+  offerRequestsUrl.searchParams.set("supplier_timeout", "20000");
+  console.log("[Duffel]", "offer_requests_url=" + offerRequestsUrl.toString());
   let r;
   try {
     r = await fetchWithTimeout(
-      url,
+      offerRequestsUrl.toString(),
       {
         method: "POST",
         headers: {
@@ -1640,7 +1643,7 @@ app.post("/v1/flights/search", async (req, res) => {
         },
         body: JSON.stringify({ data: requestData }),
       },
-      15000
+      25000
     );
   } catch (e) {
     console.log("[Duffel]", "step=offer_requests", "status=error");
