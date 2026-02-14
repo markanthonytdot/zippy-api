@@ -1585,7 +1585,8 @@ app.post("/v1/flights/search", async (req, res) => {
   }
 
   const env = String(process.env.NODE_ENV || "").trim().toLowerCase();
-  if (env !== "production") {
+  const isProd = env === "production";
+  if (!isProd) {
     console.log("[Duffel]", "version=" + DUFFEL_API_VERSION);
   }
 
@@ -1615,7 +1616,7 @@ app.post("/v1/flights/search", async (req, res) => {
   if (cabinClass) {
     requestData.cabin_class = cabinClass;
   }
-  if (env !== "production") {
+  if (!isProd) {
     const slicesCount = Array.isArray(requestData.slices) ? requestData.slices.length : 0;
     const passengersCount = Array.isArray(requestData.passengers) ? requestData.passengers.length : 0;
     console.log(
@@ -1662,35 +1663,127 @@ app.post("/v1/flights/search", async (req, res) => {
   // Sometimes `data` IS the offer_request.
   // Sometimes it's wrapped like `data.offer_request`.
   const offerRequest = data?.offer_request || data;
+  const offerRequestWasWrapped = Boolean(data?.offer_request);
 
-  const offersLen = Array.isArray(offerRequest?.offers)
-    ? offerRequest.offers.length
-    : 0;
+  if (!isProd) {
+    const offersLen = Array.isArray(offerRequest?.offers)
+      ? offerRequest.offers.length
+      : 0;
 
-  console.log(
-    "[Duffel]",
-    "offer_request_id=" + String(offerRequest?.id || "nil"),
-    "status=" + String(offerRequest?.status || "nil"),
-    "offers=" + String(offersLen)
-  );
+    console.log(
+      "[Duffel]",
+      "offer_request_id=" + String(offerRequest?.id || "nil"),
+      "status=" + String(offerRequest?.status || "nil"),
+      "offers=" + String(offersLen)
+    );
 
-  // Log keys so we can see where fields actually live
-  console.log(
-    "[Duffel]",
-    "data_keys=" + JSON.stringify(Object.keys(data || {}))
-  );
+    // Log keys so we can see where fields actually live
+    console.log(
+      "[Duffel]",
+      "data_keys=" + JSON.stringify(Object.keys(data || {}))
+    );
 
-  console.log(
-    "[Duffel]",
-    "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {}))
-  );
+    console.log(
+      "[Duffel]",
+      "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {}))
+    );
 
-  if (json?.meta) {
-    console.log("[Duffel]", "meta=" + JSON.stringify(json.meta));
+    if (json?.meta) {
+      console.log("[Duffel]", "meta=" + JSON.stringify(json.meta));
+    }
   }
 
   if (!r.ok) {
     console.log("[Duffel]", "step=offer_requests", "status=" + String(r.status));
+    return res.status(r.status).json(json);
+  }
+
+  const offerRequestId = String(offerRequest?.id || "").trim();
+  if (!offerRequestId) {
+    return res.status(r.status).json(json);
+  }
+
+  const MAX_PAGES = 5;
+  const MAX_OFFERS = 200;
+  const MAX_PAGINATION_MS = 8000;
+  const PAGE_LIMIT = 50;
+
+  const paginationStartMs = Date.now();
+  const fetchedOffers = [];
+  let after = "";
+  let pagesFetched = 0;
+  let listFailed = false;
+
+  while (pagesFetched < MAX_PAGES && fetchedOffers.length < MAX_OFFERS) {
+    const elapsedMs = Date.now() - paginationStartMs;
+    if (elapsedMs >= MAX_PAGINATION_MS) break;
+
+    const remainingMs = MAX_PAGINATION_MS - elapsedMs;
+    const timeoutMs = Math.max(1000, Math.min(6000, remainingMs));
+    const offersUrl = new URL("https://api.duffel.com/air/offers");
+    offersUrl.searchParams.set("offer_request_id", offerRequestId);
+    offersUrl.searchParams.set("limit", String(PAGE_LIMIT));
+    if (after) {
+      offersUrl.searchParams.set("after", after);
+    }
+
+    let offersRes;
+    let offersJson;
+    try {
+      offersRes = await fetchWithTimeout(
+        offersUrl.toString(),
+        {
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${DUFFEL_API_KEY}`,
+            "Duffel-Version": DUFFEL_API_VERSION,
+          },
+        },
+        timeoutMs
+      );
+      offersJson = await offersRes.json().catch(() => ({}));
+    } catch (e) {
+      listFailed = true;
+      if (!isProd) {
+        console.log("[Duffel]", "offers_list_error=exception");
+      }
+      break;
+    }
+
+    if (!offersRes.ok) {
+      listFailed = true;
+      if (!isProd) {
+        console.log("[Duffel]", "offers_list_error=status_" + String(offersRes.status || "unknown"));
+      }
+      break;
+    }
+
+    const pageOffers = Array.isArray(offersJson?.data) ? offersJson.data : [];
+    fetchedOffers.push(...pageOffers);
+    if (fetchedOffers.length >= MAX_OFFERS) {
+      fetchedOffers.length = MAX_OFFERS;
+      break;
+    }
+
+    const nextAfter = String(offersJson?.meta?.after || "").trim();
+    pagesFetched += 1;
+    if (!nextAfter || pageOffers.length === 0) break;
+    after = nextAfter;
+  }
+
+  if (listFailed) {
+    return res.status(r.status).json(json);
+  }
+
+  if (offerRequestWasWrapped) {
+    if (data && typeof data === "object") {
+      if (!data.offer_request || typeof data.offer_request !== "object") {
+        data.offer_request = {};
+      }
+      data.offer_request.offers = fetchedOffers;
+    }
+  } else if (data && typeof data === "object") {
+    data.offers = fetchedOffers;
   }
 
   return res.status(r.status).json(json);
