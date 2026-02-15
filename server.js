@@ -495,6 +495,7 @@ async function fetchOffersBatch({
   batchIds,
   batchLabel,
   timeoutMs,
+  mode,
 }) {
   const offersUrl = new URL(`${AMADEUS_BASE_URL}/v3/shopping/hotel-offers`);
   offersUrl.searchParams.set("hotelIds", batchIds.join(","));
@@ -509,6 +510,11 @@ async function fetchOffersBatch({
   let offersJson = {};
   let offersText = "";
   const timeout = Number.isFinite(timeoutMs) ? timeoutMs : 8000;
+  const offersStartMs = Date.now();
+  const modeLabel = mode ? String(mode) : "unknown";
+  const amadeusHost = offersUrl.host;
+  const urlPath = offersUrl.pathname;
+  const hotelIdsCount = Array.isArray(batchIds) ? batchIds.length : 0;
   try {
     offersRes = await fetchWithTimeout(
       offersUrl.toString(),
@@ -520,6 +526,34 @@ async function fetchOffersBatch({
     offersText = await offersRes.text().catch(() => "");
     offersJson = safeJsonParse(offersText);
   } catch (e) {
+    const elapsedMs = Date.now() - offersStartMs;
+    if (e?.name === "AbortError") {
+      console.log(
+        "[Hotels OFFERS]",
+        "requestId=" + requestId,
+        "mode=" + modeLabel,
+        "hotelIdsCount=" + hotelIdsCount,
+        "timeoutMs=" + timeout,
+        "amadeusHost=" + amadeusHost,
+        "path=" + urlPath,
+        "error=timeout",
+        "elapsed_ms=" + elapsedMs
+      );
+    } else {
+      const errCode = e?.code ? String(e.code) : "unknown";
+      const errMsg = e?.message ? String(e.message) : String(e || "error");
+      console.log(
+        "[Hotels OFFERS]",
+        "requestId=" + requestId,
+        "mode=" + modeLabel,
+        "hotelIdsCount=" + hotelIdsCount,
+        "timeoutMs=" + timeout,
+        "amadeusHost=" + amadeusHost,
+        "path=" + urlPath,
+        "error_code=" + errCode,
+        "error_message=" + truncateText(errMsg, 300)
+      );
+    }
     console.log(
       "[Hotels OFFERS]",
       "requestId=" + requestId,
@@ -543,8 +577,29 @@ async function fetchOffersBatch({
   );
 
   if (!offersRes.ok) {
+    const rateLimit = offersRes.headers.get("x-ratelimit-limit") || "";
+    const rateRemaining = offersRes.headers.get("x-ratelimit-remaining") || "";
+    const rateReset = offersRes.headers.get("x-ratelimit-reset") || "";
     const hostPath = `${offersUrl.host}${offersUrl.pathname}`;
     const bodySnippet = truncateText(offersText, 500);
+    console.log(
+      "[Hotels OFFERS]",
+      "requestId=" + requestId,
+      "mode=" + modeLabel,
+      "hotelIdsCount=" + hotelIdsCount,
+      "timeoutMs=" + timeout,
+      "amadeusHost=" + amadeusHost,
+      "path=" + urlPath
+    );
+    console.log(
+      "[Hotels OFFERS]",
+      "requestId=" + requestId,
+      "status=" + offersRes.status,
+      "x-ratelimit-limit=" + rateLimit,
+      "x-ratelimit-remaining=" + rateRemaining,
+      "x-ratelimit-reset=" + rateReset,
+      "body=" + bodySnippet
+    );
     console.log(
       "[Hotels OFFERS]",
       "requestId=" + requestId,
@@ -1005,6 +1060,7 @@ app.post("/v1/hotels/search", async (req, res) => {
         batchIds: batch,
         batchLabel,
         timeoutMs: offersTimeoutMs,
+        mode: "fast",
       });
       if (result.ok) {
         console.log("[Hotels FAST]", "requestId=" + requestId, "first batch succeeded");
@@ -1014,6 +1070,37 @@ app.post("/v1/hotels/search", async (req, res) => {
         return await sendFastResponse({ reason: "first_batch" });
       }
       console.log("[Hotels FAST]", "requestId=" + requestId, "first batch failed");
+      const remainingAfterMs = fastBudgetMs - (Date.now() - requestStartMs);
+      const retryIds = batch.slice(0, 6);
+      if (retryIds.length > 0 && remainingAfterMs > 0) {
+        const retryTimeoutMs = Math.max(800, Math.min(2500, remainingAfterMs - 100));
+        console.log(
+          "[Hotels FAST]",
+          "requestId=" + requestId,
+          "retry_ids=" + retryIds.length,
+          "retry_timeout_ms=" + retryTimeoutMs
+        );
+        const retryResult = await fetchOffersBatch({
+          token: tokenResult.token,
+          requestId,
+          userId,
+          checkIn,
+          checkOut,
+          adults,
+          batchIds: retryIds,
+          batchLabel: "batch=retry",
+          timeoutMs: retryTimeoutMs,
+          mode: "fast",
+        });
+        if (retryResult.ok) {
+          console.log("[Hotels FAST]", "requestId=" + requestId, "first batch retry succeeded");
+          const offersData = retryResult.offersData || [];
+          offersReturnedCount += offersData.length;
+          mergeOffersByHotelId(offersByHotelId, offersData);
+          return await sendFastResponse({ reason: "first_batch_retry" });
+        }
+        console.log("[Hotels FAST]", "requestId=" + requestId, "first batch retry failed");
+      }
       return await sendFastResponse({ reason: "first_batch_error" });
     }
 
@@ -1053,6 +1140,7 @@ app.post("/v1/hotels/search", async (req, res) => {
       batchIds: batch,
       batchLabel,
       timeoutMs: OFFERS_TIMEOUT_MS,
+      mode: "full",
     });
     lastBatchStatus = result.ok ? "ok" : "err";
     if (!result.ok) {
@@ -1071,6 +1159,7 @@ app.post("/v1/hotels/search", async (req, res) => {
           batchIds: batch,
           batchLabel: `${batchLabel}:retry`,
           timeoutMs: OFFERS_TIMEOUT_MS,
+          mode: "full",
         });
         lastBatchStatus = result.ok ? "ok" : "err";
       }
