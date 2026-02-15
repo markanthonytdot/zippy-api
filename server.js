@@ -539,6 +539,7 @@ async function fetchOffersBatch({
         "error=timeout",
         "elapsed_ms=" + elapsedMs
       );
+      return { ok: false, status: 504, error: "Amadeus offers fetch failed", errorCode: "timeout" };
     } else {
       const errCode = e?.code ? String(e.code) : "unknown";
       const errMsg = e?.message ? String(e.message) : String(e || "error");
@@ -553,6 +554,7 @@ async function fetchOffersBatch({
         "error_code=" + errCode,
         "error_message=" + truncateText(errMsg, 300)
       );
+      return { ok: false, status: 502, error: "Amadeus offers fetch failed", errorCode: "upstream_error" };
     }
     console.log(
       "[Hotels OFFERS]",
@@ -562,7 +564,7 @@ async function fetchOffersBatch({
       "count=0",
       "batch=" + batchLabel
     );
-    return { ok: false, status: 502, error: "Amadeus offers fetch failed" };
+    return { ok: false, status: 502, error: "Amadeus offers fetch failed", errorCode: "upstream_error" };
   }
 
   const offersData = Array.isArray(offersJson?.data) ? offersJson.data : [];
@@ -613,6 +615,7 @@ async function fetchOffersBatch({
       status: 502,
       error: "Amadeus offers fetch failed",
       hint: `step=offers status=${offersRes.status} body=${bodySnippet}`,
+      errorCode: "upstream_error",
     };
   }
 
@@ -882,7 +885,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   const outputMax = Math.min(max, 50);
   const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const buildHotelItem = (hotelId, offer, includePending, includePriceStatus) => {
+  const buildHotelItem = (hotelId, offer, includePending, includePriceStatus, priceStatusById) => {
     if (!offer && !includePending) return null;
     const entry = offer?.entry || {};
     const hotel = entry?.hotel || {};
@@ -897,6 +900,7 @@ app.post("/v1/hotels/search", async (req, res) => {
     const bestOffer = offer?.bestOffer?.offer || null;
     const offerPayload = buildOfferPayload(bestOffer, offerPrice, adults, checkIn, checkOut, nights);
     const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
+    const resolvedStatus = priceStatusById?.get(hotelId) || (offer ? "priced" : "pending");
 
     cacheHotelDetails(hotelId, name, address, city);
 
@@ -907,21 +911,21 @@ app.post("/v1/hotels/search", async (req, res) => {
       lng: Number.isFinite(lng) ? lng : null,
       address,
       rating,
-      price: offer ? price : null,
-      offer: offer ? offerPayload : null,
+      price: resolvedStatus === "priced" && offer ? price : null,
+      offer: resolvedStatus === "priced" && offer ? offerPayload : null,
       bookingUrl: null,
     };
     if (includePriceStatus) {
-      item.price_status = offer ? "priced" : "pending";
+      item.price_status = resolvedStatus;
     }
     return item;
   };
 
-  const buildItems = (ids, includePending, includePriceStatus) => {
+  const buildItems = (ids, includePending, includePriceStatus, priceStatusById) => {
     const items = [];
     for (const hotelId of ids) {
       const offer = offersByHotelId.get(hotelId);
-      const item = buildHotelItem(hotelId, offer, includePending, includePriceStatus);
+      const item = buildHotelItem(hotelId, offer, includePending, includePriceStatus, priceStatusById);
       if (item) items.push(item);
     }
     return items;
@@ -989,12 +993,16 @@ app.post("/v1/hotels/search", async (req, res) => {
     if (responseSent || res.headersSent) return;
     responseSent = true;
     const responseReason = options.reason || "fast_complete";
-    const items = buildItems(hotelIds, true, true);
+    const items = buildItems(hotelIds, true, true, options.priceStatusById);
     const itemsLimited = items.slice(0, outputMax);
     const pricedCount = itemsLimited.filter((item) => item.price_status === "priced").length;
-    const pendingCount = itemsLimited.length - pricedCount;
-    const partial = pendingCount > 0;
-    const pendingIds = itemsLimited.filter((item) => item.price_status === "pending").map((item) => item.hotelId);
+    const pendingCount = itemsLimited.filter((item) => item.price_status === "pending").length;
+    const unavailableCount = itemsLimited.filter((item) => item.price_status === "unavailable").length;
+    const failedCount = itemsLimited.filter((item) => item.price_status === "failed").length;
+    const partial = pendingCount > 0 || failedCount > 0;
+    const retryableIds = itemsLimited
+      .filter((item) => item.price_status === "pending" || item.price_status === "failed")
+      .map((item) => item.hotelId);
 
     const elapsedMs = Date.now() - requestStartMs;
     console.log(
@@ -1004,9 +1012,14 @@ app.post("/v1/hotels/search", async (req, res) => {
       "reason=" + responseReason,
       "elapsed_ms=" + elapsedMs
     );
-    if (partial) {
-      console.log("[Hotels FAST]", "requestId=" + requestId, "partial=true");
-    }
+    console.log(
+      "[Hotels FAST]",
+      "requestId=" + requestId,
+      "priced=" + pricedCount,
+      "pending=" + pendingCount,
+      "unavailable=" + unavailableCount,
+      "failed=" + failedCount
+    );
 
     const payload = {
       ok: true,
@@ -1017,11 +1030,13 @@ app.post("/v1/hotels/search", async (req, res) => {
       priced_count: pricedCount,
       discovered_count: discoveredCountLimited,
       pending_count: pendingCount,
+      unavailable_count: unavailableCount,
+      failed_count: failedCount,
     };
-    if (pendingIds.length > 0) {
+    if (retryableIds.length > 0) {
       payload.next = {
         endpoint: "/v1/hotels/prices",
-        data: { hotelIds: pendingIds, checkIn, nights, adults },
+        data: { hotelIds: retryableIds, checkIn, nights, adults },
       };
     }
     return res.json(payload);
@@ -1029,6 +1044,17 @@ app.post("/v1/hotels/search", async (req, res) => {
 
   const batches = chunkArray(pricingCandidates, 10);
   if (fastMode) {
+    const fastStatusByHotelId = new Map();
+    const markFastStatuses = (ids, status) => {
+      for (const id of ids) {
+        fastStatusByHotelId.set(id, status);
+      }
+    };
+    const markFastStatusesFromOffers = (ids) => {
+      for (const id of ids) {
+        fastStatusByHotelId.set(id, offersByHotelId.has(id) ? "priced" : "unavailable");
+      }
+    };
     const elapsedBefore = Date.now() - requestStartMs;
     const remainingMs = fastBudgetMs - elapsedBefore;
     const batch = batches[0] || [];
@@ -1045,7 +1071,7 @@ app.post("/v1/hotels/search", async (req, res) => {
 
     if (remainingMs <= 0) {
       console.log("[Hotels FAST]", "requestId=" + requestId, "first batch failed");
-      return await sendFastResponse({ reason: "discovery_only" });
+      return await sendFastResponse({ reason: "discovery_only", priceStatusById: fastStatusByHotelId });
     }
 
     if (batch.length > 0) {
@@ -1067,9 +1093,11 @@ app.post("/v1/hotels/search", async (req, res) => {
         const offersData = result.offersData || [];
         offersReturnedCount += offersData.length;
         mergeOffersByHotelId(offersByHotelId, offersData);
-        return await sendFastResponse({ reason: "first_batch" });
+        markFastStatusesFromOffers(batch);
+        return await sendFastResponse({ reason: "first_batch", priceStatusById: fastStatusByHotelId });
       }
       console.log("[Hotels FAST]", "requestId=" + requestId, "first batch failed");
+      markFastStatuses(batch, "failed");
       const remainingAfterMs = fastBudgetMs - (Date.now() - requestStartMs);
       const retryIds = batch.slice(0, 6);
       if (retryIds.length > 0 && remainingAfterMs > 0) {
@@ -1097,15 +1125,17 @@ app.post("/v1/hotels/search", async (req, res) => {
           const offersData = retryResult.offersData || [];
           offersReturnedCount += offersData.length;
           mergeOffersByHotelId(offersByHotelId, offersData);
-          return await sendFastResponse({ reason: "first_batch_retry" });
+          markFastStatusesFromOffers(retryIds);
+          return await sendFastResponse({ reason: "first_batch_retry", priceStatusById: fastStatusByHotelId });
         }
         console.log("[Hotels FAST]", "requestId=" + requestId, "first batch retry failed");
+        markFastStatuses(retryIds, "failed");
       }
-      return await sendFastResponse({ reason: "first_batch_error" });
+      return await sendFastResponse({ reason: "first_batch_error", priceStatusById: fastStatusByHotelId });
     }
 
     console.log("[Hotels FAST]", "requestId=" + requestId, "first batch failed");
-    return await sendFastResponse({ reason: "discovery_only" });
+    return await sendFastResponse({ reason: "discovery_only", priceStatusById: fastStatusByHotelId });
   }
 
   let firstBatchLogged = false;
@@ -1269,6 +1299,7 @@ app.post("/v1/hotels/prices", async (req, res) => {
 
   const offersByHotelId = new Map();
   const errorsByHotelId = new Map();
+  const failedByHotelId = new Map();
   const batches = chunkArray(hotelIds, 10);
 
   for (let i = 0; i < batches.length; i += 1) {
@@ -1284,12 +1315,13 @@ app.post("/v1/hotels/prices", async (req, res) => {
       batchIds: batch,
       batchLabel,
       timeoutMs: OFFERS_TIMEOUT_MS,
+      mode: "prices",
     });
     if (!result.ok) {
+      const errorCode = result.errorCode || "upstream_error";
       for (const id of batch) {
-        if (!errorsByHotelId.has(id)) {
-          errorsByHotelId.set(id, result.error || "offers_failed");
-        }
+        if (!errorsByHotelId.has(id)) errorsByHotelId.set(id, errorCode);
+        if (!failedByHotelId.has(id)) failedByHotelId.set(id, errorCode);
       }
       continue;
     }
@@ -1305,11 +1337,15 @@ app.post("/v1/hotels/prices", async (req, res) => {
       const offerPrice = offer.price || null;
       const offerPayload = buildOfferPayload(bestOffer, offerPrice, adults, checkIn, checkOut, nights);
       const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
-      items.push({ hotelId, ok: true, price, offer: offerPayload });
+      items.push({ hotelId, ok: true, price_status: "priced", price, offer: offerPayload });
       continue;
     }
-    const err = errorsByHotelId.get(hotelId) || "no_offers";
-    items.push({ hotelId, ok: false, price: null, offer: null, error: err });
+    if (failedByHotelId.has(hotelId)) {
+      const err = errorsByHotelId.get(hotelId) || "upstream_error";
+      items.push({ hotelId, ok: false, price_status: "failed", price: null, offer: null, error: err });
+    } else {
+      items.push({ hotelId, ok: false, price_status: "unavailable", price: null, offer: null, error: "no_offers" });
+    }
   }
 
   const elapsedMs = Date.now() - requestStartMs;
