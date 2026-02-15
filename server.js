@@ -974,14 +974,12 @@ app.post("/v1/hotels/search", async (req, res) => {
 
   const batches = chunkArray(pricingCandidates, 10);
   if (fastMode) {
+    const raceBudgetMs = 1000;
     const elapsedBefore = Date.now() - requestStartMs;
     const remainingMs = fastBudgetMs - elapsedBefore;
-    if (remainingMs <= 0) {
-      return await sendFastResponse({ reason: "fast_budget" });
-    }
     const batch = batches[0] || [];
-    const batchLabel = `batch=1/${batches.length || 1}`;
-    const timeoutMs = Math.max(1000, Math.min(6000, remainingMs - 250));
+    const batchLabel = batch.length > 0 ? "batch=1/1" : "batch=0/0";
+    const timeoutMs = raceBudgetMs;
     console.log(
       "[Hotels FAST]",
       "requestId=" + requestId,
@@ -989,28 +987,55 @@ app.post("/v1/hotels/search", async (req, res) => {
       "timeoutMs=" + timeoutMs,
       "elapsedBefore=" + elapsedBefore
     );
-    batchesAttempted += 1;
-    const result = await fetchOffersBatch({
-      token: tokenResult.token,
-      requestId,
-      userId,
-      checkIn,
-      checkOut,
-      adults,
-      batchIds: batch,
-      batchLabel,
-      timeoutMs,
-    });
-    const firstBatchElapsedMs = Date.now() - requestStartMs;
-    console.log("[Hotels FAST]", "requestId=" + requestId, "first_batch_done_ms=" + firstBatchElapsedMs);
-    if (!result.ok) {
-      return await sendFastResponse({ reason: "first_batch_error" });
+
+    if (remainingMs <= 0) {
+      console.log(
+        "[Hotels FAST]",
+        "requestId=" + requestId,
+        "fast_response_mode=discovery_only",
+        "offers_race_won=false",
+        "offers_race_ms=" + raceBudgetMs
+      );
+      return await sendFastResponse({ reason: "discovery_only" });
     }
-    const offersData = result.offersData || [];
-    offersReturnedCount += offersData.length;
-    mergeOffersByHotelId(offersByHotelId, offersData);
-    const reason = offersByHotelId.size > 0 ? "first_batch" : "first_batch_empty";
-    return await sendFastResponse({ reason });
+
+    let responseMode = "discovery_only";
+    let offersRaceWon = false;
+    if (batch.length > 0) {
+      responseMode = "offers_race";
+      batchesAttempted += 1;
+      const offersPromise = fetchOffersBatch({
+        token: tokenResult.token,
+        requestId,
+        userId,
+        checkIn,
+        checkOut,
+        adults,
+        batchIds: batch,
+        batchLabel,
+        timeoutMs,
+      });
+      const raceResult = await Promise.race([offersPromise, sleepMs(raceBudgetMs).then(() => null)]);
+      if (raceResult) {
+        const firstBatchElapsedMs = Date.now() - requestStartMs;
+        console.log("[Hotels FAST]", "requestId=" + requestId, "first_batch_done_ms=" + firstBatchElapsedMs);
+        if (raceResult.ok) {
+          offersRaceWon = true;
+          const offersData = raceResult.offersData || [];
+          offersReturnedCount += offersData.length;
+          mergeOffersByHotelId(offersByHotelId, offersData);
+        }
+      }
+    }
+
+    console.log(
+      "[Hotels FAST]",
+      "requestId=" + requestId,
+      "fast_response_mode=" + responseMode,
+      "offers_race_won=" + (offersRaceWon ? "true" : "false"),
+      "offers_race_ms=" + raceBudgetMs
+    );
+    return await sendFastResponse({ reason: offersRaceWon ? "offers_race" : responseMode });
   }
 
   let firstBatchLogged = false;
