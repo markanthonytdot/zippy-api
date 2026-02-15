@@ -989,22 +989,13 @@ app.post("/v1/hotels/search", async (req, res) => {
     );
 
     if (remainingMs <= 0) {
-      console.log(
-        "[Hotels FAST]",
-        "requestId=" + requestId,
-        "fast_response_mode=discovery_only",
-        "offers_race_won=false",
-        "offers_race_ms=" + offersTimeoutMs
-      );
+      console.log("[Hotels FAST]", "requestId=" + requestId, "first batch failed");
       return await sendFastResponse({ reason: "discovery_only" });
     }
 
-    let responseMode = "discovery_only";
-    let offersRaceWon = false;
     if (batch.length > 0) {
-      responseMode = "offers_race";
       batchesAttempted += 1;
-      const offersPromise = fetchOffersBatch({
+      const result = await fetchOffersBatch({
         token: tokenResult.token,
         requestId,
         userId,
@@ -1015,27 +1006,19 @@ app.post("/v1/hotels/search", async (req, res) => {
         batchLabel,
         timeoutMs: offersTimeoutMs,
       });
-      const raceResult = await Promise.race([offersPromise, sleepMs(offersTimeoutMs).then(() => null)]);
-      if (raceResult) {
-        const firstBatchElapsedMs = Date.now() - requestStartMs;
-        console.log("[Hotels FAST]", "requestId=" + requestId, "first_batch_done_ms=" + firstBatchElapsedMs);
-        if (raceResult.ok) {
-          offersRaceWon = true;
-          const offersData = raceResult.offersData || [];
-          offersReturnedCount += offersData.length;
-          mergeOffersByHotelId(offersByHotelId, offersData);
-        }
+      if (result.ok) {
+        console.log("[Hotels FAST]", "requestId=" + requestId, "first batch succeeded");
+        const offersData = result.offersData || [];
+        offersReturnedCount += offersData.length;
+        mergeOffersByHotelId(offersByHotelId, offersData);
+        return await sendFastResponse({ reason: "first_batch" });
       }
+      console.log("[Hotels FAST]", "requestId=" + requestId, "first batch failed");
+      return await sendFastResponse({ reason: "first_batch_error" });
     }
 
-    console.log(
-      "[Hotels FAST]",
-      "requestId=" + requestId,
-      "fast_response_mode=" + responseMode,
-      "offers_race_won=" + (offersRaceWon ? "true" : "false"),
-      "offers_race_ms=" + offersTimeoutMs
-    );
-    return await sendFastResponse({ reason: offersRaceWon ? "offers_race" : responseMode });
+    console.log("[Hotels FAST]", "requestId=" + requestId, "first batch failed");
+    return await sendFastResponse({ reason: "discovery_only" });
   }
 
   let firstBatchLogged = false;
