@@ -974,18 +974,18 @@ app.post("/v1/hotels/search", async (req, res) => {
 
   const batches = chunkArray(pricingCandidates, 10);
   if (fastMode) {
-    const raceBudgetMs = 1000;
     const elapsedBefore = Date.now() - requestStartMs;
     const remainingMs = fastBudgetMs - elapsedBefore;
     const batch = batches[0] || [];
     const batchLabel = batch.length > 0 ? "batch=1/1" : "batch=0/0";
-    const timeoutMs = raceBudgetMs;
+    const offersTimeoutMs = Math.max(1500, Math.min(6000, remainingMs - 250));
     console.log(
       "[Hotels FAST]",
       "requestId=" + requestId,
       "remainingMs=" + remainingMs,
-      "timeoutMs=" + timeoutMs,
-      "elapsedBefore=" + elapsedBefore
+      "offersTimeoutMs=" + offersTimeoutMs,
+      "elapsedBefore=" + elapsedBefore,
+      "fastBudgetMs=" + fastBudgetMs
     );
 
     if (remainingMs <= 0) {
@@ -994,7 +994,7 @@ app.post("/v1/hotels/search", async (req, res) => {
         "requestId=" + requestId,
         "fast_response_mode=discovery_only",
         "offers_race_won=false",
-        "offers_race_ms=" + raceBudgetMs
+        "offers_race_ms=" + offersTimeoutMs
       );
       return await sendFastResponse({ reason: "discovery_only" });
     }
@@ -1013,9 +1013,9 @@ app.post("/v1/hotels/search", async (req, res) => {
         adults,
         batchIds: batch,
         batchLabel,
-        timeoutMs,
+        timeoutMs: offersTimeoutMs,
       });
-      const raceResult = await Promise.race([offersPromise, sleepMs(raceBudgetMs).then(() => null)]);
+      const raceResult = await Promise.race([offersPromise, sleepMs(offersTimeoutMs).then(() => null)]);
       if (raceResult) {
         const firstBatchElapsedMs = Date.now() - requestStartMs;
         console.log("[Hotels FAST]", "requestId=" + requestId, "first_batch_done_ms=" + firstBatchElapsedMs);
@@ -1033,7 +1033,7 @@ app.post("/v1/hotels/search", async (req, res) => {
       "requestId=" + requestId,
       "fast_response_mode=" + responseMode,
       "offers_race_won=" + (offersRaceWon ? "true" : "false"),
-      "offers_race_ms=" + raceBudgetMs
+      "offers_race_ms=" + offersTimeoutMs
     );
     return await sendFastResponse({ reason: offersRaceWon ? "offers_race" : responseMode });
   }
