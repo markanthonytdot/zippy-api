@@ -98,7 +98,14 @@ function getRequestIp(req) {
 
 function getRateLimitKey(req, userId) {
   const uid = String(userId || req.userId || "").trim();
-  if (uid) return `uid:${uid}`;
+  if (uid) {
+    // If the identifier is coming from an unverified header (x-user-id), include IP to
+    // reduce the value of rotating user ids for abuse. Verified JWT users keep a stable key.
+    if (req && req.userIdVerified === false) {
+      return `uid:${uid}|ip:${getRequestIp(req)}`;
+    }
+    return `uid:${uid}`;
+  }
   return `ip:${getRequestIp(req)}`;
 }
 
@@ -1247,6 +1254,8 @@ app.post("/v1/hotels/prices", async (req, res) => {
   const requestId = String(req.requestId || randomUUID());
   req.requestId = requestId;
   const OFFERS_TIMEOUT_MS = 8000;
+  const HOTEL_ID_MAX_LEN = 120;
+  const HOTEL_ID_SAFE_RE = /^[A-Za-z0-9._:-]+$/;
 
   if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
     return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
@@ -1259,7 +1268,9 @@ app.post("/v1/hotels/prices", async (req, res) => {
   const seen = new Set();
   for (const raw of hotelIdsRaw) {
     const id = String(raw || "").trim();
-    if (!id || seen.has(id)) continue;
+    if (!id || id.length > HOTEL_ID_MAX_LEN) continue;
+    if (!HOTEL_ID_SAFE_RE.test(id)) continue;
+    if (seen.has(id)) continue;
     seen.add(id);
     hotelIds.push(id);
     if (hotelIds.length >= 50) break;
