@@ -150,6 +150,13 @@ const hotelsMinuteLimiter = makeFixedWindowLimiter({
 });
 const hotelsHourlyCounters = new Map(); // key: userId:YYYY-MM-DDTHH -> count
 const hotelsDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
+// FLIGHTS_RPM, FLIGHTS_HOURLY, FLIGHTS_DAILY
+const flightsMinuteLimiter = makeFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("FLIGHTS_RPM", 10), // per user per minute
+});
+const flightsHourlyCounters = new Map(); // key: userId:YYYY-MM-DDTHH -> count
+const flightsDailyCounters = new Map(); // key: userId:YYYY-MM-DD -> count
 const etaMinuteLimiterFree = makeFixedWindowLimiter({
   windowMs: 60 * 1000,
   max: getEnvInt("ETA_RPM_FREE", 1),
@@ -177,6 +184,10 @@ const etaRouteLimiter = makePrunableFixedWindowLimiter({
 const hotelsRouteLimiter = makePrunableFixedWindowLimiter({
   windowMs: 60 * 1000,
   max: getEnvInt("HOTELS_ROUTE_RPM", 20),
+});
+const flightsRouteLimiter = makePrunableFixedWindowLimiter({
+  windowMs: 60 * 1000,
+  max: getEnvInt("FLIGHTS_ROUTE_RPM", 20),
 });
 const authAppleLimiter = makePrunableFixedWindowLimiter({
   windowMs: 60 * 1000,
@@ -323,6 +334,7 @@ app.use("/v1/places/photo", rateLimitMiddleware(placesPhotoRouteLimiter, "places
 app.use("/v1/places/details/photos", rateLimitMiddleware(placesDetailsPhotosRouteLimiter, "placesDetailsPhotos"));
 app.use("/v1/places/eta", rateLimitMiddleware(etaRouteLimiter, "eta"));
 app.use("/v1/hotels", rateLimitMiddleware(hotelsRouteLimiter, "hotels"));
+app.use("/v1/flights", rateLimitMiddleware(flightsRouteLimiter, "flights"));
 app.use("/auth/apple", rateLimitMiddleware(authAppleLimiter, "authApple"));
 app.use("/auth/dev", rateLimitMiddleware(authAppleLimiter, "authDev"));
 app.use("/me/saved", rateLimitMiddleware(meSavedLimiter, "meSaved"));
@@ -408,6 +420,30 @@ app.use("/v1/hotels", async (req, res, next) => {
 
   console.log(
     "[Hotels LIMIT]",
+    "userId=" + userId,
+    "path=" + req.path,
+    "hour=" + q.hourCount + "/" + q.hourlyLimit,
+    "day=" + q.dayCount + "/" + q.dailyLimit
+  );
+  next();
+});
+
+// ---------------------------------------------
+// Flights abuse protection
+// ---------------------------------------------
+app.use("/v1/flights", async (req, res, next) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const limiterId = getRateLimitKey(req, userId);
+  const lim = flightsMinuteLimiter.allow(`flights:${limiterId}`);
+  if (!lim.ok) return res.status(429).json({ ok: false, error: "Flights rate limit exceeded. Try again shortly." });
+
+  const q = enforceFlightsHourlyDaily(limiterId);
+  if (!q.ok) return res.status(q.status).json({ ok: false, error: q.error });
+
+  console.log(
+    "[Flights LIMIT]",
     "userId=" + userId,
     "path=" + req.path,
     "hour=" + q.hourCount + "/" + q.hourlyLimit,
@@ -2016,6 +2052,10 @@ app.post("/v1/flights/search", async (req, res) => {
   const userId = await requireUserId(req, res);
   if (!userId) return;
 
+  const requestStartMs = Date.now();
+  const requestId = String(req.headers["x-request-id"] || req.requestId || randomUUID());
+  req.requestId = requestId;
+
   if (!DUFFEL_API_KEY) {
     return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
   }
@@ -2054,9 +2094,34 @@ app.post("/v1/flights/search", async (req, res) => {
   if (cabinClass) {
     requestData.cabin_class = cabinClass;
   }
+  const currency = String(payload.currency || "").trim();
+  if (currency) {
+    requestData.currency = currency;
+  }
+
+  const slicesCount = Array.isArray(requestData.slices) ? requestData.slices.length : 0;
+  const passengersCount = Array.isArray(requestData.passengers) ? requestData.passengers.length : 0;
+
+  // Light validation so we fail fast with a 4xx instead of a Duffel 4xx/5xx.
+  if (slicesCount === 0) {
+    return res.status(400).json({ ok: false, error: "Missing slices" });
+  }
+
+  // One centralized log line (similar spirit to Hotels) to confirm config in prod.
+  console.log(
+    "[Flights REQCFG]",
+    "requestId=" + requestId,
+    "signedIn=" + String(Boolean(req.userIdVerified)),
+    "uid=" + String(userId),
+    "unwrapped=" + String(unwrapped),
+    "slices=" + String(slicesCount),
+    "passengers=" + String(passengersCount),
+    "cabin=" + String(requestData.cabin_class || "nil"),
+    "currency=" + String(requestData.currency || "nil"),
+    "elapsed_ms=" + String(Date.now() - requestStartMs)
+  );
+
   if (!isProd) {
-    const slicesCount = Array.isArray(requestData.slices) ? requestData.slices.length : 0;
-    const passengersCount = Array.isArray(requestData.passengers) ? requestData.passengers.length : 0;
     console.log(
       "[Duffel]",
       "data_key=true",
@@ -2220,6 +2285,9 @@ app.post("/v1/flights/search", async (req, res) => {
         data.offer_request = {};
       }
       data.offer_request.offers = fetchedOffers;
+      // iOS expects `data.offers` (not `data.offer_request.offers`).
+      // Keep response schema backward-compatible by also projecting offers here.
+      data.offers = fetchedOffers;
     }
   } else if (data && typeof data === "object") {
     data.offers = fetchedOffers;
@@ -2575,6 +2643,32 @@ function enforceHotelsHourlyDaily(limiterId) {
 
   hotelsHourlyCounters.set(hourKey, hourCount);
   hotelsDailyCounters.set(dayKey, dayCount);
+
+  return { ok: true, hourCount, dayCount, hourlyLimit, dailyLimit };
+}
+
+function enforceFlightsHourlyDaily(limiterId) {
+  const hour = hourKeyUTC();
+  const day = todayKey();
+
+  const hourlyLimit = getEnvInt("FLIGHTS_HOURLY", 60);
+  const dailyLimit = getEnvInt("FLIGHTS_DAILY", 200);
+
+  const hourKey = `${limiterId}:${hour}`;
+  const dayKey = `${limiterId}:${day}`;
+
+  const hourCount = (flightsHourlyCounters.get(hourKey) || 0) + 1;
+  const dayCount = (flightsDailyCounters.get(dayKey) || 0) + 1;
+
+  if (hourlyLimit >= 0 && hourCount > hourlyLimit) {
+    return { ok: false, status: 429, error: "Flights hourly limit reached. Try again later." };
+  }
+  if (dailyLimit >= 0 && dayCount > dailyLimit) {
+    return { ok: false, status: 429, error: "Flights daily limit reached. Try again tomorrow." };
+  }
+
+  flightsHourlyCounters.set(hourKey, hourCount);
+  flightsDailyCounters.set(dayKey, dayCount);
 
   return { ok: true, hourCount, dayCount, hourlyLimit, dailyLimit };
 }
