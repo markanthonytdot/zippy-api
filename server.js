@@ -522,6 +522,13 @@ async function fetchOffersBatch({
   const amadeusHost = offersUrl.host;
   const urlPath = offersUrl.pathname;
   const hotelIdsCount = Array.isArray(batchIds) ? batchIds.length : 0;
+  console.log(
+    "[Hotels OFFERSCFG]",
+    "requestId=" + requestId,
+    "mode=" + modeLabel,
+    "hotelIdsCount=" + hotelIdsCount,
+    "timeoutMs=" + timeout
+  );
   try {
     offersRes = await fetchWithTimeout(
       offersUrl.toString(),
@@ -1049,7 +1056,7 @@ app.post("/v1/hotels/search", async (req, res) => {
     return res.json(payload);
   };
 
-  const batches = chunkArray(pricingCandidates, 10);
+  const batches = chunkArray(pricingCandidates, fastMode ? 6 : 10);
   if (fastMode) {
     const fastStatusByHotelId = new Map();
     const markFastStatuses = (ids, status) => {
@@ -1108,7 +1115,7 @@ app.post("/v1/hotels/search", async (req, res) => {
       const remainingAfterMs = fastBudgetMs - (Date.now() - requestStartMs);
       const retryIds = batch.slice(0, 6);
       if (retryIds.length > 0 && remainingAfterMs > 0) {
-        const retryTimeoutMs = Math.max(800, Math.min(2500, remainingAfterMs - 100));
+        const retryTimeoutMs = 3000;
         console.log(
           "[Hotels FAST]",
           "requestId=" + requestId,
@@ -1253,7 +1260,7 @@ app.post("/v1/hotels/prices", async (req, res) => {
   const requestStartMs = Date.now();
   const requestId = String(req.requestId || randomUUID());
   req.requestId = requestId;
-  const OFFERS_TIMEOUT_MS = 8000;
+  const OFFERS_TIMEOUT_MS = 15000;
   const HOTEL_ID_MAX_LEN = 120;
   const HOTEL_ID_SAFE_RE = /^[A-Za-z0-9._:-]+$/;
 
