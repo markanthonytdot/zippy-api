@@ -208,7 +208,12 @@ const GOOGLE_DIRECTIONS_API_KEY = process.env.GOOGLE_DIRECTIONS_API_KEY || "";
 // OpenAI key (server-only)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 // Duffel key (server-only)
-const DUFFEL_API_KEY = process.env.DUFFEL_API_KEY || "";
+const DUFFEL_LIVE_TOKEN_READONLY = String(process.env.DUFFEL_LIVE_TOKEN_READONLY || "").trim();
+const DUFFEL_API_KEY = String(process.env.DUFFEL_API_KEY || "").trim();
+const DUFFEL_TOKEN_SOURCE = DUFFEL_LIVE_TOKEN_READONLY ? "LIVE_READONLY" : "DUFFEL_API_KEY";
+const DUFFEL_TOKEN = DUFFEL_LIVE_TOKEN_READONLY || DUFFEL_API_KEY;
+const DUFFEL_TOKEN_MODE = DUFFEL_TOKEN.startsWith("duffel_live") ? "LIVE" : "TEST";
+console.log("[Duffel]", "token_source=" + DUFFEL_TOKEN_SOURCE, "mode=" + DUFFEL_TOKEN_MODE);
 const DUFFEL_API_VERSION = String(process.env.DUFFEL_API_VERSION || "v2").trim() || "v2";
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
@@ -2056,7 +2061,7 @@ app.post("/v1/flights/search", async (req, res) => {
   const requestId = String(req.headers["x-request-id"] || req.requestId || randomUUID());
   req.requestId = requestId;
 
-  if (!DUFFEL_API_KEY) {
+  if (!DUFFEL_TOKEN) {
     return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
   }
 
@@ -2143,7 +2148,7 @@ app.post("/v1/flights/search", async (req, res) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${DUFFEL_API_KEY}`,
+          Authorization: `Bearer ${DUFFEL_TOKEN}`,
           "Duffel-Version": DUFFEL_API_VERSION,
         },
         body: JSON.stringify({ data: requestData }),
@@ -2231,7 +2236,7 @@ app.post("/v1/flights/search", async (req, res) => {
         {
           headers: {
             Accept: "application/json",
-            Authorization: `Bearer ${DUFFEL_API_KEY}`,
+            Authorization: `Bearer ${DUFFEL_TOKEN}`,
             "Duffel-Version": DUFFEL_API_VERSION,
           },
         },
