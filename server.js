@@ -127,6 +127,121 @@ const hotelPhotoCache = makeTtlCache(); // key = hotelId or name+city
 const hotelDetailsCache = makeTtlCache(); // key = hotelId
 const hotelPhotoRefCache = makeTtlCache(); // key = hotelId
 
+// Duffel search cache + inflight dedupe
+const DUFFEL_SEARCH_CACHE_TTL_MS = getEnvInt("DUFFEL_SEARCH_CACHE_TTL_MS", 60 * 1000);
+const DUFFEL_SEARCH_CACHE_MAX = getEnvInt("DUFFEL_SEARCH_CACHE_MAX", 200);
+const duffelSearchCache = new Map(); // key -> { exp, value }
+const duffelSearchInflight = new Map(); // key -> Promise
+
+function pruneDuffelSearchCache() {
+  const t = nowMs();
+  for (const [key, val] of duffelSearchCache) {
+    if (val.exp <= t) duffelSearchCache.delete(key);
+  }
+  while (duffelSearchCache.size > DUFFEL_SEARCH_CACHE_MAX) {
+    const oldestKey = duffelSearchCache.keys().next().value;
+    if (!oldestKey) break;
+    duffelSearchCache.delete(oldestKey);
+  }
+}
+
+function getDuffelSearchCache(key) {
+  const hit = duffelSearchCache.get(key);
+  if (!hit) return null;
+  if (hit.exp <= nowMs()) {
+    duffelSearchCache.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+function setDuffelSearchCache(key, value, ttlMs) {
+  duffelSearchCache.set(key, { exp: nowMs() + ttlMs, value });
+  pruneDuffelSearchCache();
+}
+
+function normalizeDuffelKeyToken(value, mode = "lower") {
+  const out = String(value || "").trim();
+  if (!out) return "";
+  return mode === "upper" ? out.toUpperCase() : out.toLowerCase();
+}
+
+function normalizeDuffelCount(value) {
+  const n = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function getDuffelPassengerCounts(payload, requestData) {
+  let adults = 0;
+  let children = 0;
+  let infants = 0;
+  const passengers = Array.isArray(requestData?.passengers) ? requestData.passengers : null;
+  if (passengers) {
+    for (const pax of passengers) {
+      const type = normalizeDuffelKeyToken(pax?.type, "lower");
+      if (!type) continue;
+      if (type.startsWith("adult")) adults += 1;
+      else if (type.startsWith("child")) children += 1;
+      else if (type.startsWith("infant")) infants += 1;
+    }
+  } else {
+    adults = normalizeDuffelCount(payload?.adults);
+    children = normalizeDuffelCount(payload?.children);
+    infants = normalizeDuffelCount(payload?.infants);
+  }
+  return { adults, children, infants };
+}
+
+function getDuffelBagsValue(payload) {
+  const raw = payload?.bags ?? payload?.bags_count ?? payload?.bagsCount ?? payload?.bag_count;
+  if (raw == null) return "";
+  if (typeof raw === "object") {
+    const objVal = raw.count ?? raw.total ?? raw.quantity;
+    if (objVal == null) return "";
+    return normalizeDuffelCount(objVal);
+  }
+  const n = Number.parseInt(String(raw || ""), 10);
+  return Number.isFinite(n) ? n : String(raw || "").trim();
+}
+
+function buildDuffelSearchKey(payload, requestData) {
+  const slices = Array.isArray(requestData?.slices) ? requestData.slices : [];
+  const firstSlice = slices[0] || {};
+  const secondSlice = slices[1] || {};
+  const origin = normalizeDuffelKeyToken(firstSlice.origin || payload?.origin, "upper");
+  const destination = normalizeDuffelKeyToken(firstSlice.destination || payload?.dest || payload?.destination, "upper");
+  const departureDate = normalizeDuffelKeyToken(
+    firstSlice.departure_date || payload?.date || payload?.departure_date,
+    "lower"
+  );
+  const returnDate = normalizeDuffelKeyToken(
+    secondSlice.departure_date || payload?.return_date || payload?.returnDate,
+    "lower"
+  );
+  let tripType = normalizeDuffelKeyToken(payload?.trip_type || payload?.tripType, "lower");
+  if (!tripType) {
+    tripType = slices.length > 1 ? "round_trip" : "one_way";
+  }
+  const cabin = normalizeDuffelKeyToken(requestData?.cabin_class || payload?.cabin_class || payload?.cabinClass, "lower");
+  const currency = normalizeDuffelKeyToken(requestData?.currency || payload?.currency, "upper");
+  const { adults, children, infants } = getDuffelPassengerCounts(payload, requestData);
+  const bags = getDuffelBagsValue(payload);
+
+  return JSON.stringify({
+    origin,
+    destination,
+    departure_date: departureDate,
+    return_date: returnDate,
+    trip_type: tripType,
+    adults,
+    children,
+    infants,
+    currency,
+    cabin,
+    bags,
+  });
+}
+
 const HOTEL_PHOTO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOTEL_PHOTO_MAX_WIDTH = 900;
 const HOTEL_PHOTO_REF_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -2112,6 +2227,20 @@ app.post("/v1/flights/search", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Missing slices" });
   }
 
+  const searchKey = buildDuffelSearchKey(payload, requestData);
+  const cached = getDuffelSearchCache(searchKey);
+  if (cached) {
+    console.log("[Duffel]", "duffel_cache_hit", "searchKey=" + searchKey);
+    return res.status(cached.status).json(cached.body);
+  }
+
+  const inflight = duffelSearchInflight.get(searchKey);
+  if (inflight) {
+    console.log("[Duffel]", "duffel_inflight_join", "searchKey=" + searchKey);
+    const joined = await inflight;
+    return res.status(joined.status).json(joined.body);
+  }
+
   // One centralized log line (similar spirit to Hotels) to confirm config in prod.
   console.log(
     "[Flights REQCFG]",
@@ -2136,169 +2265,190 @@ app.post("/v1/flights/search", async (req, res) => {
     );
   }
 
-  const offerRequestsUrl = new URL("https://api.duffel.com/air/offer_requests");
-  offerRequestsUrl.searchParams.set("return_offers", "true");
-  offerRequestsUrl.searchParams.set("supplier_timeout", "20000");
-  console.log("[Duffel]", "offer_requests_url=" + offerRequestsUrl.toString());
-  let r;
-  try {
-    r = await fetchWithTimeout(
-      offerRequestsUrl.toString(),
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${DUFFEL_TOKEN}`,
-          "Duffel-Version": DUFFEL_API_VERSION,
-        },
-        body: JSON.stringify({ data: requestData }),
-      },
-      25000
-    );
-  } catch (e) {
-    console.log("[Duffel]", "step=offer_requests", "status=error");
-    return res.status(502).json({ ok: false, error: "Duffel request failed", hint: "offer_requests" });
-  }
-
-  let json;
-  try {
-    json = await r.json();
-  } catch (e) {
-    console.log("[Duffel]", "step=offer_requests", "status=" + String(r.status || "unknown"));
-    return res.status(502).json({ ok: false, error: "Duffel response invalid", hint: "offer_requests" });
-  }
-
-  const data = json?.data;
-
-  // Duffel responses can vary by version.
-  // Sometimes `data` IS the offer_request.
-  // Sometimes it's wrapped like `data.offer_request`.
-  const offerRequest = data?.offer_request || data;
-  const offerRequestWasWrapped = Boolean(data?.offer_request);
-
-  const offersLen = Array.isArray(offerRequest?.offers) ? offerRequest.offers.length : 0;
-
-  console.log(
-    "[Duffel]",
-    "offer_request_id=" + String(offerRequest?.id || "nil"),
-    "live_mode=" + String(offerRequest?.live_mode ?? "nil"),
-    "status=" + String(offerRequest?.status || "nil"),
-    "offers=" + String(offersLen),
-    "wrapped=" + String(offerRequestWasWrapped)
-  );
-
-  console.log("[Duffel]", "data_keys=" + JSON.stringify(Object.keys(data || {})));
-  console.log("[Duffel]", "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {})));
-
-  if (json?.meta) {
-    console.log("[Duffel]", "meta=" + JSON.stringify(json.meta));
-  }
-
-  if (!r.ok) {
-    console.log("[Duffel]", "step=offer_requests", "status=" + String(r.status));
-    return res.status(r.status).json(json);
-  }
-
-  const offerRequestId = String(offerRequest?.id || "").trim();
-  if (!offerRequestId) {
-    return res.status(r.status).json(json);
-  }
-
-  const MAX_PAGES = 5;
-  const MAX_OFFERS = 200;
-  const MAX_PAGINATION_MS = 8000;
-  const PAGE_LIMIT = 50;
-
-  const paginationStartMs = Date.now();
-  const fetchedOffers = [];
-  let after = "";
-  let pagesFetched = 0;
-  let listFailed = false;
-
-  while (pagesFetched < MAX_PAGES && fetchedOffers.length < MAX_OFFERS) {
-    const elapsedMs = Date.now() - paginationStartMs;
-    if (elapsedMs >= MAX_PAGINATION_MS) break;
-
-    const remainingMs = MAX_PAGINATION_MS - elapsedMs;
-    const timeoutMs = Math.max(1000, Math.min(6000, remainingMs));
-    const offersUrl = new URL("https://api.duffel.com/air/offers");
-    offersUrl.searchParams.set("offer_request_id", offerRequestId);
-    offersUrl.searchParams.set("limit", String(PAGE_LIMIT));
-    if (after) {
-      offersUrl.searchParams.set("after", after);
-    }
-
-    let offersRes;
-    let offersJson;
+  const runDuffelSearch = async () => {
+    const offerRequestsUrl = new URL("https://api.duffel.com/air/offer_requests");
+    offerRequestsUrl.searchParams.set("return_offers", "true");
+    offerRequestsUrl.searchParams.set("supplier_timeout", "20000");
+    console.log("[Duffel]", "offer_requests_url=" + offerRequestsUrl.toString());
+    let r;
     try {
-      offersRes = await fetchWithTimeout(
-        offersUrl.toString(),
+      r = await fetchWithTimeout(
+        offerRequestsUrl.toString(),
         {
+          method: "POST",
           headers: {
-            Accept: "application/json",
+            "Content-Type": "application/json",
             Authorization: `Bearer ${DUFFEL_TOKEN}`,
             "Duffel-Version": DUFFEL_API_VERSION,
           },
+          body: JSON.stringify({ data: requestData }),
         },
-        timeoutMs
+        25000
       );
-      offersJson = await offersRes.json().catch(() => ({}));
     } catch (e) {
-      listFailed = true;
-      if (!isProd) {
-        console.log("[Duffel]", "offers_list_error=exception");
-      }
-      break;
+      console.log("[Duffel]", "step=offer_requests", "status=error");
+      return { status: 502, body: { ok: false, error: "Duffel request failed", hint: "offer_requests" }, cacheable: false };
     }
 
-    if (!offersRes.ok) {
-      listFailed = true;
-      if (!isProd) {
-        console.log("[Duffel]", "offers_list_error=status_" + String(offersRes.status || "unknown"));
-      }
-      break;
+    let json;
+    try {
+      json = await r.json();
+    } catch (e) {
+      console.log("[Duffel]", "step=offer_requests", "status=" + String(r.status || "unknown"));
+      return { status: 502, body: { ok: false, error: "Duffel response invalid", hint: "offer_requests" }, cacheable: false };
     }
 
-    const pageOffers = Array.isArray(offersJson?.data) ? offersJson.data : [];
-    fetchedOffers.push(...pageOffers);
-    if (fetchedOffers.length >= MAX_OFFERS) {
-      fetchedOffers.length = MAX_OFFERS;
-      break;
-    }
+    const data = json?.data;
 
-    const nextAfter = String(offersJson?.meta?.after || "").trim();
+    // Duffel responses can vary by version.
+    // Sometimes `data` IS the offer_request.
+    // Sometimes it's wrapped like `data.offer_request`.
+    const offerRequest = data?.offer_request || data;
+    const offerRequestWasWrapped = Boolean(data?.offer_request);
+
+    const offersLen = Array.isArray(offerRequest?.offers) ? offerRequest.offers.length : 0;
+
     console.log(
       "[Duffel]",
-      "offers_list_page=" + String(pagesFetched),
-      "after=" + String(after || "nil"),
-      "got=" + String(pageOffers.length),
-      "nextAfter=" + String(nextAfter || "nil"),
-      "total=" + String(fetchedOffers.length)
+      "offer_request_id=" + String(offerRequest?.id || "nil"),
+      "live_mode=" + String(offerRequest?.live_mode ?? "nil"),
+      "status=" + String(offerRequest?.status || "nil"),
+      "offers=" + String(offersLen),
+      "wrapped=" + String(offerRequestWasWrapped)
     );
-    pagesFetched += 1;
-    if (!nextAfter || pageOffers.length === 0) break;
-    after = nextAfter;
-  }
 
-  if (listFailed) {
-    return res.status(r.status).json(json);
-  }
+    console.log("[Duffel]", "data_keys=" + JSON.stringify(Object.keys(data || {})));
+    console.log("[Duffel]", "offer_request_keys=" + JSON.stringify(Object.keys(offerRequest || {})));
 
-  if (offerRequestWasWrapped) {
-    if (data && typeof data === "object") {
-      if (!data.offer_request || typeof data.offer_request !== "object") {
-        data.offer_request = {};
+    if (json?.meta) {
+      console.log("[Duffel]", "meta=" + JSON.stringify(json.meta));
+    }
+
+    if (!r.ok) {
+      console.log("[Duffel]", "step=offer_requests", "status=" + String(r.status));
+      return { status: r.status, body: json, cacheable: false };
+    }
+
+    const offerRequestId = String(offerRequest?.id || "").trim();
+    if (!offerRequestId) {
+      return { status: r.status, body: json, cacheable: false };
+    }
+
+    const MAX_PAGES = 5;
+    const MAX_OFFERS = 200;
+    const MAX_PAGINATION_MS = 8000;
+    const PAGE_LIMIT = 50;
+
+    const paginationStartMs = Date.now();
+    const fetchedOffers = [];
+    let after = "";
+    let pagesFetched = 0;
+    let listFailed = false;
+
+    while (pagesFetched < MAX_PAGES && fetchedOffers.length < MAX_OFFERS) {
+      const elapsedMs = Date.now() - paginationStartMs;
+      if (elapsedMs >= MAX_PAGINATION_MS) break;
+
+      const remainingMs = MAX_PAGINATION_MS - elapsedMs;
+      const timeoutMs = Math.max(1000, Math.min(6000, remainingMs));
+      const offersUrl = new URL("https://api.duffel.com/air/offers");
+      offersUrl.searchParams.set("offer_request_id", offerRequestId);
+      offersUrl.searchParams.set("limit", String(PAGE_LIMIT));
+      if (after) {
+        offersUrl.searchParams.set("after", after);
       }
-      data.offer_request.offers = fetchedOffers;
-      // iOS expects `data.offers` (not `data.offer_request.offers`).
-      // Keep response schema backward-compatible by also projecting offers here.
+
+      let offersRes;
+      let offersJson;
+      try {
+        offersRes = await fetchWithTimeout(
+          offersUrl.toString(),
+          {
+            headers: {
+              Accept: "application/json",
+              Authorization: `Bearer ${DUFFEL_TOKEN}`,
+              "Duffel-Version": DUFFEL_API_VERSION,
+            },
+          },
+          timeoutMs
+        );
+        offersJson = await offersRes.json().catch(() => ({}));
+      } catch (e) {
+        listFailed = true;
+        if (!isProd) {
+          console.log("[Duffel]", "offers_list_error=exception");
+        }
+        break;
+      }
+
+      if (!offersRes.ok) {
+        listFailed = true;
+        if (!isProd) {
+          console.log("[Duffel]", "offers_list_error=status_" + String(offersRes.status || "unknown"));
+        }
+        break;
+      }
+
+      const pageOffers = Array.isArray(offersJson?.data) ? offersJson.data : [];
+      fetchedOffers.push(...pageOffers);
+      if (fetchedOffers.length >= MAX_OFFERS) {
+        fetchedOffers.length = MAX_OFFERS;
+        break;
+      }
+
+      const nextAfter = String(offersJson?.meta?.after || "").trim();
+      console.log(
+        "[Duffel]",
+        "offers_list_page=" + String(pagesFetched),
+        "after=" + String(after || "nil"),
+        "got=" + String(pageOffers.length),
+        "nextAfter=" + String(nextAfter || "nil"),
+        "total=" + String(fetchedOffers.length)
+      );
+      pagesFetched += 1;
+      if (!nextAfter || pageOffers.length === 0) break;
+      after = nextAfter;
+    }
+
+    if (listFailed) {
+      return { status: r.status, body: json, cacheable: false };
+    }
+
+    if (offerRequestWasWrapped) {
+      if (data && typeof data === "object") {
+        if (!data.offer_request || typeof data.offer_request !== "object") {
+          data.offer_request = {};
+        }
+        data.offer_request.offers = fetchedOffers;
+        // iOS expects `data.offers` (not `data.offer_request.offers`).
+        // Keep response schema backward-compatible by also projecting offers here.
+        data.offers = fetchedOffers;
+      }
+    } else if (data && typeof data === "object") {
       data.offers = fetchedOffers;
     }
-  } else if (data && typeof data === "object") {
-    data.offers = fetchedOffers;
+
+    const offersForCache = offerRequestWasWrapped ? json?.data?.offer_request?.offers : json?.data?.offers;
+    const cacheable = Boolean(r.ok && Array.isArray(offersForCache));
+    return { status: r.status, body: json, cacheable };
+  };
+
+  const inflightPromise = runDuffelSearch();
+  duffelSearchInflight.set(searchKey, inflightPromise);
+  let result;
+  try {
+    result = await inflightPromise;
+  } finally {
+    duffelSearchInflight.delete(searchKey);
   }
 
-  return res.status(r.status).json(json);
+  if (result?.cacheable) {
+    setDuffelSearchCache(searchKey, { status: result.status, body: result.body }, DUFFEL_SEARCH_CACHE_TTL_MS);
+    const ttlSec = Math.max(1, Math.round(DUFFEL_SEARCH_CACHE_TTL_MS / 1000));
+    console.log("[Duffel]", "duffel_cache_store", "searchKey=" + searchKey, "ttlSec=" + ttlSec);
+  }
+
+  return res.status(result.status).json(result.body);
 });
 
 
