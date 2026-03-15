@@ -2451,6 +2451,185 @@ app.post("/v1/flights/search", async (req, res) => {
   return res.status(result.status).json(result.body);
 });
 
+// ---------------------------------------------
+// Seat Maps (Duffel proxy)
+// GET /v1/flights/seat_maps?offer_id=off_xxxxx
+// ---------------------------------------------
+app.get("/v1/flights/seat_maps", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+
+  if (!DUFFEL_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  }
+
+  const offerId = String(req.query.offer_id || "").trim();
+  if (!offerId) {
+    return res.status(400).json({ ok: false, error: "Missing offer_id" });
+  }
+
+  console.log("[Duffel SeatMaps]", "requestId=" + requestId, "offerId=" + offerId, "userId=" + userId);
+
+  const url = new URL("https://api.duffel.com/air/seat_maps");
+  url.searchParams.set("offer_id", offerId);
+
+  let r;
+  try {
+    r = await fetchWithTimeout(
+      url.toString(),
+      {
+        method: "GET",
+        headers: {
+          "Accept": "application/json",
+          "Accept-Encoding": "gzip",
+          "Authorization": `Bearer ${DUFFEL_TOKEN}`,
+          "Duffel-Version": DUFFEL_API_VERSION,
+        },
+      },
+      15000
+    );
+  } catch (e) {
+    console.log("[Duffel SeatMaps]", "requestId=" + requestId, "error=fetch_failed", e?.message || "");
+    return res.status(502).json({ ok: false, error: "Duffel seat maps request failed" });
+  }
+
+  let json;
+  try {
+    json = await r.json();
+  } catch (e) {
+    console.log("[Duffel SeatMaps]", "requestId=" + requestId, "error=json_parse_failed");
+    return res.status(502).json({ ok: false, error: "Duffel seat maps response invalid" });
+  }
+
+  console.log("[Duffel SeatMaps]", "requestId=" + requestId, "status=" + r.status, "segments=" + (Array.isArray(json?.data) ? json.data.length : 0));
+
+  return res.status(r.status).json(json);
+});
+
+// ---------------------------------------------
+// Available Services / Baggage (Duffel proxy)
+// GET /v1/flights/available_services?offer_id=off_xxxxx
+// ---------------------------------------------
+app.get("/v1/flights/available_services", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+
+  if (!DUFFEL_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  }
+
+  const offerId = String(req.query.offer_id || "").trim();
+  if (!offerId) {
+    return res.status(400).json({ ok: false, error: "Missing offer_id" });
+  }
+
+  console.log("[Duffel AvailServices]", "requestId=" + requestId, "offerId=" + offerId, "userId=" + userId);
+
+  const url = new URL(`https://api.duffel.com/air/offers/${encodeURIComponent(offerId)}`);
+  url.searchParams.set("return_available_services", "true");
+
+  let r;
+  try {
+    r = await fetchWithTimeout(
+      url.toString(),
+      {
+        method: "GET",
+        headers: {
+          "Accept": "application/json",
+          "Accept-Encoding": "gzip",
+          "Authorization": `Bearer ${DUFFEL_TOKEN}`,
+          "Duffel-Version": DUFFEL_API_VERSION,
+        },
+      },
+      15000
+    );
+  } catch (e) {
+    console.log("[Duffel AvailServices]", "requestId=" + requestId, "error=fetch_failed", e?.message || "");
+    return res.status(502).json({ ok: false, error: "Duffel available services request failed" });
+  }
+
+  let json;
+  try {
+    json = await r.json();
+  } catch (e) {
+    console.log("[Duffel AvailServices]", "requestId=" + requestId, "error=json_parse_failed");
+    return res.status(502).json({ ok: false, error: "Duffel available services response invalid" });
+  }
+
+  // Extract just the available_services from the offer response for the iOS app
+  const offer = json?.data;
+  const availableServices = Array.isArray(offer?.available_services) ? offer.available_services : [];
+
+  console.log("[Duffel AvailServices]", "requestId=" + requestId, "status=" + r.status, "services=" + availableServices.length);
+
+  if (!r.ok) {
+    return res.status(r.status).json(json);
+  }
+
+  // Return the full offer data (which includes available_services)
+  return res.json({ ok: true, data: offer });
+});
+
+// ---------------------------------------------
+// Single Offer (Duffel proxy)
+// GET /v1/flights/offer?offer_id=off_xxxxx
+// ---------------------------------------------
+app.get("/v1/flights/offer", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+
+  if (!DUFFEL_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  }
+
+  const offerId = String(req.query.offer_id || "").trim();
+  if (!offerId) {
+    return res.status(400).json({ ok: false, error: "Missing offer_id" });
+  }
+
+  console.log("[Duffel Offer]", "requestId=" + requestId, "offerId=" + offerId, "userId=" + userId);
+
+  const url = new URL(`https://api.duffel.com/air/offers/${encodeURIComponent(offerId)}`);
+
+  let r;
+  try {
+    r = await fetchWithTimeout(
+      url.toString(),
+      {
+        method: "GET",
+        headers: {
+          "Accept": "application/json",
+          "Accept-Encoding": "gzip",
+          "Authorization": `Bearer ${DUFFEL_TOKEN}`,
+          "Duffel-Version": DUFFEL_API_VERSION,
+        },
+      },
+      15000
+    );
+  } catch (e) {
+    console.log("[Duffel Offer]", "requestId=" + requestId, "error=fetch_failed", e?.message || "");
+    return res.status(502).json({ ok: false, error: "Duffel offer request failed" });
+  }
+
+  let json;
+  try {
+    json = await r.json();
+  } catch (e) {
+    console.log("[Duffel Offer]", "requestId=" + requestId, "error=json_parse_failed");
+    return res.status(502).json({ ok: false, error: "Duffel offer response invalid" });
+  }
+
+  console.log("[Duffel Offer]", "requestId=" + requestId, "status=" + r.status);
+
+  return res.status(r.status).json(json);
+});
+
 
 // ---------------------------------------------
 // Places Directions (proxy)
