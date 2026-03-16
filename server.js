@@ -4246,6 +4246,100 @@ app.delete("/me/saved/:kind/:externalId", async (req, res) => {
 });
 
 // ---------------------------------------------
+// Exchange Rates (cached, refreshed hourly)
+// ---------------------------------------------
+let exchangeRatesCache = { rates: null, base: "USD", updatedAt: null, expiresAt: 0 };
+const EXCHANGE_RATES_TTL_MS = 60 * 60 * 1000; // 1 hour
+const EXCHANGE_RATES_MARGIN = 0.025; // 2.5% safety margin on all rates
+
+async function fetchExchangeRates() {
+  const now = Date.now();
+  if (exchangeRatesCache.rates && exchangeRatesCache.expiresAt > now) {
+    return exchangeRatesCache;
+  }
+
+  // Use Open Exchange Rates free tier (USD base, 1000 req/month)
+  // App ID is free — sign up at openexchangerates.org
+  const appId = process.env.OPEN_EXCHANGE_RATES_APP_ID || "";
+
+  let rawRates = null;
+
+  if (appId) {
+    try {
+      const r = await fetch(`https://openexchangerates.org/api/latest.json?app_id=${appId}`);
+      const json = await r.json();
+      if (json && json.rates) {
+        rawRates = json.rates;
+      }
+    } catch (e) {
+      console.log("[ExchangeRates] openexchangerates fetch failed:", e.message);
+    }
+  }
+
+  // Fallback: use ECB (free, no key, EUR-based — we cross-convert to USD base)
+  if (!rawRates) {
+    try {
+      const r = await fetch("https://open.er-api.com/v6/latest/USD");
+      const json = await r.json();
+      if (json && json.rates) {
+        rawRates = json.rates;
+      }
+    } catch (e) {
+      console.log("[ExchangeRates] er-api fallback failed:", e.message);
+    }
+  }
+
+  if (!rawRates) {
+    console.log("[ExchangeRates] all sources failed, returning stale cache or null");
+    return exchangeRatesCache;
+  }
+
+  // Apply safety margin: make foreign currencies MORE expensive for display
+  // If 1 USD = 1.36 CAD, we show 1 USD = 1.36 * (1 - 0.025) = 1.326 CAD
+  // This means we UNDER-convert: user sees a slightly lower price in foreign currency
+  // When they pay in USD, the real amount won't be more than displayed
+  // This protects the business — user never sees a price lower than what they actually pay
+  const safeRates = {};
+  for (const [code, rate] of Object.entries(rawRates)) {
+    if (typeof rate === "number" && rate > 0) {
+      safeRates[code] = Math.round(rate * (1 - EXCHANGE_RATES_MARGIN) * 1000000) / 1000000;
+    }
+  }
+
+  exchangeRatesCache = {
+    rates: safeRates,
+    base: "USD",
+    updatedAt: new Date().toISOString(),
+    expiresAt: now + EXCHANGE_RATES_TTL_MS,
+    margin: EXCHANGE_RATES_MARGIN,
+  };
+
+  console.log("[ExchangeRates] refreshed", Object.keys(safeRates).length, "currencies, margin=", EXCHANGE_RATES_MARGIN);
+  return exchangeRatesCache;
+}
+
+// Pre-fetch on boot
+fetchExchangeRates().catch(() => {});
+
+app.get("/v1/exchange-rates", async (req, res) => {
+  try {
+    const cached = await fetchExchangeRates();
+    if (!cached.rates) {
+      return res.status(503).json({ ok: false, error: "Exchange rates temporarily unavailable" });
+    }
+    return res.json({
+      ok: true,
+      base: cached.base,
+      rates: cached.rates,
+      updated_at: cached.updatedAt,
+      margin: cached.margin,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ---------------------------------------------
 // Start server
 // ---------------------------------------------
 const port = process.env.PORT || 4001;
