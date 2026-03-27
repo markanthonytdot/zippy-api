@@ -4226,6 +4226,7 @@ app.delete("/me/saved/:kind/:externalId", async (req, res) => {
   const externalId = String(req.params.externalId || "").trim();
 
   try {
+    console.log(`[DELETE /me/saved] userId=${userId} kind=${kind} externalId=${externalId}`);
     const result = await dbPool.query(
       `
       update saved_items
@@ -4238,11 +4239,53 @@ app.delete("/me/saved/:kind/:externalId", async (req, res) => {
       `,
       [userId, kind, externalId]
     );
+    console.log(`[DELETE /me/saved] rowCount=${result.rowCount}`);
 
     if (result.rowCount === 0) {
       return res.status(404).json({ ok: false, error: "Item not found" });
     }
     return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Hard-purge all saved items of a given kind for the authenticated user
+app.delete("/me/saved-purge/:kind", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+  if (!requireDb(req, res)) return;
+
+  const kind = String(req.params.kind || "").trim();
+  if (!kind) return res.status(400).json({ ok: false, error: "kind required" });
+
+  try {
+    const result = await dbPool.query(
+      `DELETE FROM saved_items WHERE user_id = $1 AND kind = $2`,
+      [userId, kind]
+    );
+    return res.json({ ok: true, deleted: result.rowCount });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Debug: list ALL saved items (including soft-deleted) for the authenticated user
+app.get("/me/saved-debug", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+  if (!requireDb(req, res)) return;
+
+  try {
+    const { rows } = await dbPool.query(
+      `SELECT id, kind, external_id, payload, created_at, updated_at, deleted_at
+       FROM saved_items
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [userId]
+    );
+    return res.json({ ok: true, userId, count: rows.length, items: rows });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
