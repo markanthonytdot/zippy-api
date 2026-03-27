@@ -4226,7 +4226,7 @@ app.delete("/me/saved/:kind/:externalId", async (req, res) => {
   const externalId = String(req.params.externalId || "").trim();
 
   try {
-    await dbPool.query(
+    const result = await dbPool.query(
       `
       update saved_items
       set deleted_at = now(),
@@ -4239,6 +4239,9 @@ app.delete("/me/saved/:kind/:externalId", async (req, res) => {
       [userId, kind, externalId]
     );
 
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "Item not found" });
+    }
     return res.json({ ok: true });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
