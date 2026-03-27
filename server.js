@@ -4292,6 +4292,51 @@ app.get("/me/saved-debug", async (req, res) => {
 });
 
 // ---------------------------------------------
+// Purge all saved items of a kind (hard delete, both identities)
+// ---------------------------------------------
+app.delete("/me/saved-purge/:kind", async (req, res) => {
+  // Get both possible user identities
+  const jwtUserId = (req.userIdVerified && req.userId) ? req.userId : null;
+  const deviceUserId = String(req.headers["x-user-id"] || "").trim() || null;
+
+  if (!jwtUserId && !deviceUserId) {
+    return res.status(401).json({ ok: false, error: "No identity provided" });
+  }
+  if (!requireDb(req, res)) return;
+
+  const kind = String(req.params.kind || "").trim();
+  if (!kind) return res.status(400).json({ ok: false, error: "kind required" });
+
+  try {
+    let totalDeleted = 0;
+
+    // Delete under JWT identity
+    if (jwtUserId) {
+      const r1 = await dbPool.query(
+        `DELETE FROM saved_items WHERE user_id = $1 AND kind = $2`,
+        [jwtUserId, kind]
+      );
+      totalDeleted += r1.rowCount;
+      console.log(`[PURGE] JWT user=${jwtUserId} kind=${kind} deleted=${r1.rowCount}`);
+    }
+
+    // Delete under device UUID identity (if different)
+    if (deviceUserId && deviceUserId !== jwtUserId) {
+      const r2 = await dbPool.query(
+        `DELETE FROM saved_items WHERE user_id = $1 AND kind = $2`,
+        [deviceUserId, kind]
+      );
+      totalDeleted += r2.rowCount;
+      console.log(`[PURGE] device user=${deviceUserId} kind=${kind} deleted=${r2.rowCount}`);
+    }
+
+    return res.json({ ok: true, deleted: totalDeleted });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ---------------------------------------------
 // Exchange Rates (cached, refreshed hourly)
 // ---------------------------------------------
 let exchangeRatesCache = { rates: null, base: "USD", updatedAt: null, expiresAt: 0 };
