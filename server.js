@@ -346,6 +346,19 @@ const DEV_AUTH_SECRET = String(process.env.DEV_AUTH_SECRET || "").trim();
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
 const APPLE_AUDIENCE = "com.heyzippi.zippi";
+const GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"];
+const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
+const GOOGLE_AUDIENCES = String(process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || "")
+  .split(",")
+  .map((value) => String(value || "").trim())
+  .filter(Boolean);
+
+function maskTraceValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "(empty)";
+  if (raw.length <= 10) return raw;
+  return `${raw.slice(0, 6)}...${raw.slice(-4)}`;
+}
 
 // jose lazy loader (works in CommonJS)
 let josePromise = null;
@@ -364,6 +377,15 @@ async function getAppleJwks() {
     appleJwks = createRemoteJWKSet(new URL(APPLE_JWKS_URL));
   }
   return appleJwks;
+}
+
+let googleJwks = null;
+async function getGoogleJwks() {
+  if (!googleJwks) {
+    const { createRemoteJWKSet } = await getJose();
+    googleJwks = createRemoteJWKSet(new URL(GOOGLE_JWKS_URL));
+  }
+  return googleJwks;
 }
 
 // sign our own Zippy JWT (HS256)
@@ -456,6 +478,7 @@ app.use("/v1/places/eta", rateLimitMiddleware(etaRouteLimiter, "eta"));
 app.use("/v1/hotels", rateLimitMiddleware(hotelsRouteLimiter, "hotels"));
 app.use("/v1/flights", rateLimitMiddleware(flightsRouteLimiter, "flights"));
 app.use("/auth/apple", rateLimitMiddleware(authAppleLimiter, "authApple"));
+app.use("/auth/google", rateLimitMiddleware(authAppleLimiter, "authGoogle"));
 app.use("/auth/dev", rateLimitMiddleware(authAppleLimiter, "authDev"));
 app.use("/me/saved", rateLimitMiddleware(meSavedLimiter, "meSaved"));
 app.use("/admin/init", rateLimitMiddleware(adminInitLimiter, "adminInit"));
@@ -4133,6 +4156,130 @@ app.post("/auth/apple", async (req, res) => {
   } catch (e) {
     const reason = e?.code || e?.name || e?.message || "unknown";
     console.warn("Apple identityToken verification failed:", reason);
+    return res.status(401).json({ ok: false, error: "Invalid identityToken" });
+  }
+});
+
+// ---------------------------------------------
+// Sign in with Google (dev + prod)
+// ---------------------------------------------
+app.post("/auth/google", async (req, res) => {
+  console.log(
+    "[GOOGLE_AUTH_TRACE] route_entered authMode=%s identityTokenPresent=%s audienceConfigured=%s audiences=%s",
+    AUTH_MODE,
+    Boolean(String(req.body?.identityToken || req.body?.idToken || "").trim()),
+    GOOGLE_AUDIENCES.length > 0,
+    GOOGLE_AUDIENCES.map(maskTraceValue).join(",") || "(none)"
+  );
+
+  if (AUTH_MODE !== "prod") {
+    const devSub = String(req.body?.devSub || "").trim();
+    if (!devSub) {
+      return res.status(400).json({ ok: false, error: "Missing devSub" });
+    }
+    if (devSub.length > 4000) {
+      return res.status(400).json({ ok: false, error: "Invalid devSub" });
+    }
+    if (!JWT_SECRET) {
+      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
+
+    try {
+      const token = await signZippyToken(devSub);
+      console.log("[Auth] dev token minted for sub=" + devSub + " route=/auth/google");
+      return res.json({ ok: true, token, mode: "dev" });
+    } catch (e) {
+      console.warn("Failed to mint dev token:", e?.message || e);
+      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
+  }
+
+  if (!JWT_SECRET) {
+    console.warn("Missing JWT_SECRET for prod auth");
+    return res.status(500).json({ ok: false, error: "Server misconfigured" });
+  }
+  if (GOOGLE_AUDIENCES.length === 0) {
+    console.warn(
+      "[GOOGLE_AUTH_TRACE] google_audience_missing authMode=%s googleClientIdConfigured=%s googleClientIdsConfigured=%s",
+      AUTH_MODE,
+      Boolean(String(process.env.GOOGLE_CLIENT_ID || "").trim()),
+      Boolean(String(process.env.GOOGLE_CLIENT_IDS || "").trim())
+    );
+    console.warn("Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_IDS for Google auth");
+    return res.status(500).json({ ok: false, error: "Server misconfigured" });
+  }
+
+  const devSub = String(req.body?.devSub || "").trim();
+  if (devSub && process.env.ALLOW_DEV_AUTH === "true") {
+    if (devSub.length > 4000) {
+      return res.status(400).json({ ok: false, error: "Invalid devSub" });
+    }
+    if (!requireDevAuthSecret(req, res)) return;
+    try {
+      const token = await signZippyToken(devSub);
+      console.log("[Auth] dev token minted for sub=" + devSub + " route=/auth/google");
+      return res.json({ ok: true, token, mode: "dev" });
+    } catch (e) {
+      console.warn("Failed to mint dev token:", e?.message || e);
+      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
+  }
+
+  const identityToken = String(req.body?.identityToken || req.body?.idToken || "").trim();
+  if (!identityToken) {
+    return res.status(400).json({ ok: false, error: "Missing identityToken" });
+  }
+  if (identityToken.length > 4000) {
+    return res.status(400).json({ ok: false, error: "Invalid identityToken" });
+  }
+
+  try {
+    console.log(
+      "[GOOGLE_AUTH_TRACE] verify_start authMode=%s identityTokenPresent=%s audiences=%s",
+      AUTH_MODE,
+      true,
+      GOOGLE_AUDIENCES.map(maskTraceValue).join(",")
+    );
+    const { jwtVerify } = await getJose();
+    const jwks = await getGoogleJwks();
+    const audience = GOOGLE_AUDIENCES.length === 1 ? GOOGLE_AUDIENCES[0] : GOOGLE_AUDIENCES;
+
+    const { payload } = await jwtVerify(identityToken, jwks, {
+      issuer: GOOGLE_ISSUERS,
+      audience,
+    });
+
+    console.log(
+      "[GOOGLE_AUTH_TRACE] verify_success googleSubPresent=%s googleSubMasked=%s",
+      Boolean(String(payload?.sub || "").trim()),
+      maskTraceValue(String(payload?.sub || "").trim())
+    );
+
+    const googleSub = String(payload?.sub || "").trim();
+    if (!googleSub) {
+      return res.status(401).json({ ok: false, error: "Invalid identityToken" });
+    }
+
+    const token = await signZippyToken(googleSub);
+    if (!token) {
+      return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
+
+    console.log(
+      "[GOOGLE_AUTH_TRACE] jwt_minted success=%s googleSubMasked=%s",
+      Boolean(token),
+      maskTraceValue(googleSub)
+    );
+
+    return res.json({ ok: true, token, user: { sub: googleSub } });
+  } catch (e) {
+    const reason = e?.code || e?.name || e?.message || "unknown";
+    console.warn(
+      "[GOOGLE_AUTH_TRACE] verify_failure errorClass=%s errorMessage=%s",
+      e?.name || e?.constructor?.name || "unknown",
+      e?.message || String(e || "unknown")
+    );
+    console.warn("Google identityToken verification failed:", reason);
     return res.status(401).json({ ok: false, error: "Invalid identityToken" });
   }
 });
