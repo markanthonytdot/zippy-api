@@ -32,6 +32,9 @@ function makeTtlCache() {
     set(key, value, ttlMs) {
       map.set(key, { exp: nowMs() + ttlMs, value });
     },
+    delete(key) {
+      map.delete(key);
+    },
     _size() {
       return map.size;
     },
@@ -247,6 +250,8 @@ const HOTEL_PHOTO_MAX_WIDTH = 900;
 const HOTEL_PHOTO_REF_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const HOTEL_DETAILS_TTL_MS = 24 * 60 * 60 * 1000;
 const HOTEL_PHOTO_REF_NULL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const HOTEL_ENRICHED_PHOTO_CACHE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
+const HOTEL_ENRICHED_PHOTO_CACHE_MAX_REFS = 8;
 
 // limiters (tune later)
 const placesDetailsLimiter = makeFixedWindowLimiter({
@@ -554,6 +559,35 @@ const dbPool = process.env.DATABASE_URL
       ssl: { rejectUnauthorized: false },
     })
   : null;
+
+let ensureHotelPhotoEnrichmentCacheTablePromise = null;
+
+async function ensureHotelPhotoEnrichmentCacheTable() {
+  if (!dbPool) return false;
+  if (!ensureHotelPhotoEnrichmentCacheTablePromise) {
+    ensureHotelPhotoEnrichmentCacheTablePromise = dbPool.query(`
+      create table if not exists hotel_photo_enrichment_cache (
+        cache_key text primary key,
+        hotel_id text,
+        hotel_name text not null,
+        city text,
+        country text,
+        place_id text,
+        place_name text,
+        photo_references jsonb not null default '[]'::jsonb,
+        fetched_at timestamptz not null,
+        expires_at timestamptz not null,
+        debug jsonb not null default '{}'::jsonb,
+        updated_at timestamptz not null default now()
+      )
+    `).catch((err) => {
+      ensureHotelPhotoEnrichmentCacheTablePromise = null;
+      throw err;
+    });
+  }
+  await ensureHotelPhotoEnrichmentCacheTablePromise;
+  return true;
+}
 
 // ---------------------------------------------
 // DB health
@@ -1341,7 +1375,7 @@ app.post("/v1/hotels/prices", async (req, res) => {
 
 // ---------------------------------------------
 // Hotels Photo (lazy)
-// GET /v1/hotels/photo?hotelId=...&maxWidth=...
+// GET /v1/hotels/photo?hotelId=...&maxWidth=...&photoIndex=...
 // ---------------------------------------------
 app.get("/v1/hotels/photo", async (req, res) => {
   const userId = await requireUserId(req, res);
@@ -1373,6 +1407,19 @@ app.get("/v1/hotels/photo", async (req, res) => {
     maxWidth = Math.min(1600, Math.max(100, parsed));
   }
 
+  let photoIndex = 0;
+  const photoIndexParam = req.query.photoIndex;
+  if (photoIndexParam !== undefined) {
+    if (typeof photoIndexParam !== "string") {
+      return res.status(400).json({ ok: false, error: "Invalid photoIndex: must be a string number" });
+    }
+    const parsed = parseInt(photoIndexParam, 10);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > HOTEL_ENRICHED_PHOTO_CACHE_MAX_REFS - 1) {
+      return res.status(400).json({ ok: false, error: "Invalid photoIndex" });
+    }
+    photoIndex = parsed;
+  }
+
   const nameParam = req.query.name;
   if (nameParam !== undefined && typeof nameParam !== "string") {
     return res.status(400).json({ ok: false, error: "Invalid name: must be a string" });
@@ -1391,6 +1438,24 @@ app.get("/v1/hotels/photo", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid city" });
   }
 
+  const countryParam = req.query.country;
+  if (countryParam !== undefined && typeof countryParam !== "string") {
+    return res.status(400).json({ ok: false, error: "Invalid country: must be a string" });
+  }
+  const countryInput = String(countryParam || "").trim();
+  if (countryInput.length > 200) {
+    return res.status(400).json({ ok: false, error: "Invalid country" });
+  }
+
+  const addressParam = req.query.address;
+  if (addressParam !== undefined && typeof addressParam !== "string") {
+    return res.status(400).json({ ok: false, error: "Invalid address: must be a string" });
+  }
+  const addressInput = String(addressParam || "").trim();
+  if (addressInput.length > 300) {
+    return res.status(400).json({ ok: false, error: "Invalid address" });
+  }
+
   const latParam = req.query.lat;
   const lngParam = req.query.lng;
   const latNum = latParam !== undefined ? Number.parseFloat(String(latParam)) : NaN;
@@ -1407,6 +1472,7 @@ app.get("/v1/hotels/photo", async (req, res) => {
 
   const debugParam = String(req.query.debug || "").trim();
   const debugEnabled = debugParam === "1";
+  const refreshRequested = String(req.query.refresh || "").trim() === "1";
   const requestStart = Date.now();
   const debug = debugEnabled
     ? {
@@ -1437,16 +1503,28 @@ app.get("/v1/hotels/photo", async (req, res) => {
   const clientDetails = hasClientContext
     ? {
         name: nameInput,
-        address: null,
-        city: cityInput || null,
-        country: null,
+        address: addressInput || null,
+        city: cityInput || deriveCityFromAddress(addressInput) || null,
+        country: countryInput || deriveCountryFromAddress(addressInput) || null,
       }
     : null;
-  const clientQueries = hasClientContext ? buildHotelPhotoQueriesFromClient(nameInput, cityInput) : [];
+  const clientQueries = hasClientContext
+    ? buildHotelPhotoQueriesFromClient(nameInput, cityInput, countryInput, addressInput)
+    : [];
 
-  const cached = hotelPhotoRefCache.get(hotelIdKey);
+  if (refreshRequested) {
+    hotelPhotoRefCache.delete(hotelIdKey);
+  }
+
+  const cached = refreshRequested ? null : hotelPhotoRefCache.get(hotelIdKey);
   if (cached) {
-    const photoUrl = cached.photoRef ? buildPlacesPhotoUrl(req, cached.photoRef, maxWidth) : null;
+    const photoReferences = normalizeHotelPhotoReferences(
+      Array.isArray(cached?.photoReferences) && cached.photoReferences.length > 0
+        ? cached.photoReferences
+        : [cached?.photoRef || null]
+    );
+    const selectedRef = photoReferences[photoIndex] || null;
+    const photoUrl = selectedRef ? buildPlacesPhotoUrl(req, selectedRef, maxWidth) : null;
     if (debugEnabled) {
       const details = hotelDetailsCache.get(hotelIdKey);
       const city = String(details?.city || "").trim() || deriveCityFromAddress(details?.address);
@@ -1458,11 +1536,18 @@ app.get("/v1/hotels/photo", async (req, res) => {
         typeof cached?.debug?.googleSearchResultsCount === "number" ? cached.debug.googleSearchResultsCount : 0;
       debug.chosenPlaceId = cached?.placeId || null;
       debug.detailsPhotosCount = typeof cached?.debug?.detailsPhotosCount === "number" ? cached.debug.detailsPhotosCount : 0;
-      debug.reason = normalizeHotelPhotoDebugReason(cached?.debug?.reason, Boolean(photoUrl));
+      debug.reason = normalizeHotelPhotoDebugReason(cached?.debug?.reason, Boolean(selectedRef));
       debug.step = getHotelPhotoDebugStep(debug.reason);
       logStep("done", { ms: Date.now() - requestStart, reason: debug.reason });
     }
-    return res.json({ ok: true, hotelId: hotelIdRaw, cached: true, photoUrl, ...(debugEnabled ? { debug } : {}) });
+    return res.json({
+      ok: true,
+      hotelId: hotelIdRaw,
+      cached: true,
+      photoIndex,
+      photoUrl,
+      ...(debugEnabled ? { debug } : {}),
+    });
   }
 
   if (!GOOGLE_PLACES_API_KEY) {
@@ -1488,6 +1573,7 @@ app.get("/v1/hotels/photo", async (req, res) => {
         onStep: logStep,
         queries: clientQueries,
         locationBias,
+        refresh: refreshRequested,
       });
     } catch (err) {
       const failedStep = err?.step || "details_photos";
@@ -1504,12 +1590,18 @@ app.get("/v1/hotels/photo", async (req, res) => {
       });
     }
     const photoRef = result?.photoRef || null;
+    const photoReferences = normalizeHotelPhotoReferences(
+      Array.isArray(result?.photoReferences) && result.photoReferences.length > 0
+        ? result.photoReferences
+        : [photoRef]
+    );
     const ttl = photoRef ? HOTEL_PHOTO_REF_TTL_MS : HOTEL_PHOTO_REF_NULL_TTL_MS;
     const normalizedReason = normalizeHotelPhotoDebugReason(result?.reason, Boolean(photoRef));
     hotelPhotoRefCache.set(
       hotelIdKey,
       {
         photoRef,
+        photoReferences,
         placeId: result?.placeId || null,
         placeName: result?.placeName || null,
         debug: {
@@ -1522,7 +1614,8 @@ app.get("/v1/hotels/photo", async (req, res) => {
       },
       ttl
     );
-    const photoUrl = photoRef ? buildPlacesPhotoUrl(req, photoRef, maxWidth) : null;
+    const selectedRef = photoReferences[photoIndex] || null;
+    const photoUrl = selectedRef ? buildPlacesPhotoUrl(req, selectedRef, maxWidth) : null;
     if (debugEnabled) {
       debug.triedQueries = Array.isArray(result?.triedQueries) ? result.triedQueries : [];
       debug.chosenQuery = result?.query || null;
@@ -1539,7 +1632,14 @@ app.get("/v1/hotels/photo", async (req, res) => {
         photosCount: debug.detailsPhotosCount,
       });
     }
-    return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl, ...(debugEnabled ? { debug } : {}) });
+    return res.json({
+      ok: true,
+      hotelId: hotelIdRaw,
+      cached: Boolean(result?.cached),
+      photoIndex,
+      photoUrl,
+      ...(debugEnabled ? { debug } : {}),
+    });
   }
 
   let details;
@@ -1579,7 +1679,11 @@ app.get("/v1/hotels/photo", async (req, res) => {
 
   let result;
   try {
-    result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details, { onStep: logStep, locationBias });
+    result = await fetchHotelPhotoReferenceByDetails(hotelIdRaw, details, {
+      onStep: logStep,
+      locationBias,
+      refresh: refreshRequested,
+    });
   } catch (err) {
     if (debugEnabled) {
       debug.step = err?.step || "details_photos";
@@ -1595,12 +1699,18 @@ app.get("/v1/hotels/photo", async (req, res) => {
     });
   }
   const photoRef = result?.photoRef || null;
+  const photoReferences = normalizeHotelPhotoReferences(
+    Array.isArray(result?.photoReferences) && result.photoReferences.length > 0
+      ? result.photoReferences
+      : [photoRef]
+  );
   const ttl = photoRef ? HOTEL_PHOTO_REF_TTL_MS : HOTEL_PHOTO_REF_NULL_TTL_MS;
   const normalizedReason = normalizeHotelPhotoDebugReason(result?.reason, Boolean(photoRef));
   hotelPhotoRefCache.set(
     hotelIdKey,
     {
       photoRef,
+      photoReferences,
       placeId: result?.placeId || null,
       placeName: result?.placeName || null,
       debug: {
@@ -1613,7 +1723,8 @@ app.get("/v1/hotels/photo", async (req, res) => {
     },
     ttl
   );
-  const photoUrl = photoRef ? buildPlacesPhotoUrl(req, photoRef, maxWidth) : null;
+  const selectedRef = photoReferences[photoIndex] || null;
+  const photoUrl = selectedRef ? buildPlacesPhotoUrl(req, selectedRef, maxWidth) : null;
   if (debugEnabled) {
     debug.triedQueries = Array.isArray(result?.triedQueries) ? result.triedQueries : [];
     debug.chosenQuery = result?.query || null;
@@ -1631,7 +1742,14 @@ app.get("/v1/hotels/photo", async (req, res) => {
       photosCount: debug.detailsPhotosCount,
     });
   }
-  return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl, ...(debugEnabled ? { debug } : {}) });
+  return res.json({
+    ok: true,
+    hotelId: hotelIdRaw,
+    cached: Boolean(result?.cached),
+    photoIndex,
+    photoUrl,
+    ...(debugEnabled ? { debug } : {}),
+  });
 });
 
 // ---------------------------------------------
@@ -3152,10 +3270,187 @@ function cacheHotelDetails(hotelId, name, address, city) {
   hotelDetailsCache.set(id, record, HOTEL_DETAILS_TTL_MS);
 }
 
+function getHotelPhotoEnrichmentDetailsContext(hotelId, details) {
+  const hotelName = String(details?.name || "").trim();
+  if (!hotelName) return null;
+  const address = String(details?.address || "").trim();
+  const city = String(details?.city || "").trim() || deriveCityFromAddress(address);
+  const country = String(details?.country || "").trim() || deriveCountryFromAddress(address);
+  const cacheKey = makeHotelPhotoEnrichmentCacheKey(hotelId, hotelName, city, country);
+  if (!cacheKey) return null;
+  return {
+    cacheKey,
+    hotelId: String(hotelId || "").trim() || null,
+    hotelName,
+    city: String(city || "").trim() || null,
+    country: String(country || "").trim() || null,
+  };
+}
+
+function makeHotelPhotoEnrichmentCacheKey(hotelId, name, city, country) {
+  const id = normalizeCacheKeyPart(hotelId);
+  if (id) return `hotelId:${id}`;
+  const nameKey = normalizeCacheKeyPart(name);
+  if (!nameKey) return "";
+  const cityKey = normalizeCacheKeyPart(city);
+  const countryKey = normalizeCacheKeyPart(country);
+  return `hotel:${nameKey}|${cityKey}|${countryKey}`;
+}
+
+function normalizeHotelPhotoReferences(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of value) {
+    const ref = String(item || "").trim();
+    if (!ref || seen.has(ref)) continue;
+    seen.add(ref);
+    out.push(ref);
+    if (out.length >= HOTEL_ENRICHED_PHOTO_CACHE_MAX_REFS) break;
+  }
+  return out;
+}
+
+async function getPersistentHotelPhotoEnrichmentCache(hotelId, details) {
+  if (!dbPool) return null;
+  const ctx = getHotelPhotoEnrichmentDetailsContext(hotelId, details);
+  if (!ctx?.cacheKey) return null;
+  try {
+    await ensureHotelPhotoEnrichmentCacheTable();
+    const { rows } = await dbPool.query(
+      `
+      select cache_key, hotel_id, hotel_name, city, country, place_id, place_name,
+             photo_references, fetched_at, expires_at, debug
+      from hotel_photo_enrichment_cache
+      where cache_key = $1
+        and expires_at > now()
+      limit 1
+      `,
+      [ctx.cacheKey]
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const photoReferences = normalizeHotelPhotoReferences(row.photo_references);
+    return {
+      cacheKey: row.cache_key,
+      hotelId: row.hotel_id || ctx.hotelId,
+      hotelName: row.hotel_name || ctx.hotelName,
+      city: row.city || ctx.city,
+      country: row.country || ctx.country,
+      placeId: row.place_id || null,
+      placeName: row.place_name || null,
+      photoReferences,
+      fetchedAt: row.fetched_at || null,
+      expiresAt: row.expires_at || null,
+      debug: row.debug && typeof row.debug === "object" ? row.debug : {},
+    };
+  } catch (err) {
+    console.warn("[Hotels PHOTO CACHE] persistent_read_failed", err?.message || err);
+    return null;
+  }
+}
+
+async function storePersistentHotelPhotoEnrichmentCache(hotelId, details, result) {
+  if (!dbPool) return false;
+  const ctx = getHotelPhotoEnrichmentDetailsContext(hotelId, details);
+  if (!ctx?.cacheKey) return false;
+  const photoReferences = normalizeHotelPhotoReferences(result?.photoReferences);
+  const fetchedAt = new Date();
+  const expiresAt = new Date(Date.now() + HOTEL_ENRICHED_PHOTO_CACHE_TTL_MS);
+  const debug = {
+    query: result?.query || null,
+    triedQueries: Array.isArray(result?.triedQueries) ? result.triedQueries : [],
+    candidatesCount: typeof result?.candidatesCount === "number" ? result.candidatesCount : 0,
+    photosCount: typeof result?.photosCount === "number" ? result.photosCount : photoReferences.length,
+    reason: String(result?.reason || (photoReferences.length > 0 ? "ok" : "no_photos")),
+  };
+  try {
+    await ensureHotelPhotoEnrichmentCacheTable();
+    await dbPool.query(
+      `
+      insert into hotel_photo_enrichment_cache (
+        cache_key, hotel_id, hotel_name, city, country, place_id, place_name,
+        photo_references, fetched_at, expires_at, debug, updated_at
+      ) values (
+        $1, $2, $3, $4, $5, $6, $7,
+        $8::jsonb, $9, $10, $11::jsonb, now()
+      )
+      on conflict (cache_key)
+      do update set
+        hotel_id = excluded.hotel_id,
+        hotel_name = excluded.hotel_name,
+        city = excluded.city,
+        country = excluded.country,
+        place_id = excluded.place_id,
+        place_name = excluded.place_name,
+        photo_references = excluded.photo_references,
+        fetched_at = excluded.fetched_at,
+        expires_at = excluded.expires_at,
+        debug = excluded.debug,
+        updated_at = now()
+      `,
+      [
+        ctx.cacheKey,
+        ctx.hotelId,
+        ctx.hotelName,
+        ctx.city,
+        ctx.country,
+        result?.placeId || null,
+        result?.placeName || null,
+        JSON.stringify(photoReferences),
+        fetchedAt,
+        expiresAt,
+        JSON.stringify(debug),
+      ]
+    );
+    return true;
+  } catch (err) {
+    console.warn("[Hotels PHOTO CACHE] persistent_write_failed", err?.message || err);
+    return false;
+  }
+}
+
+async function deletePersistentHotelPhotoEnrichmentCache(hotelId, details) {
+  if (!dbPool) return false;
+  const ctx = getHotelPhotoEnrichmentDetailsContext(hotelId, details);
+  if (!ctx?.cacheKey) return false;
+  try {
+    await ensureHotelPhotoEnrichmentCacheTable();
+    await dbPool.query(`delete from hotel_photo_enrichment_cache where cache_key = $1`, [ctx.cacheKey]);
+    return true;
+  } catch (err) {
+    console.warn("[Hotels PHOTO CACHE] persistent_delete_failed", err?.message || err);
+    return false;
+  }
+}
+
 async function fetchHotelPhotoReferenceByDetails(hotelId, details, options = {}) {
   if (!details) return null;
   if (!GOOGLE_PLACES_API_KEY) return null;
-  return await fetchHotelPhotoReferenceWithFallback(details, options);
+  const refresh = options.refresh === true;
+  if (refresh) {
+    await deletePersistentHotelPhotoEnrichmentCache(hotelId, details);
+  } else {
+    const cached = await getPersistentHotelPhotoEnrichmentCache(hotelId, details);
+    if (cached) {
+      const photoRef = cached.photoReferences[0] || null;
+      return {
+        photoRef,
+        photoReferences: cached.photoReferences,
+        placeId: cached.placeId,
+        placeName: cached.placeName,
+        photosCount: cached.photoReferences.length,
+        candidatesCount: typeof cached.debug?.candidatesCount === "number" ? cached.debug.candidatesCount : 0,
+        query: cached.debug?.query || null,
+        triedQueries: Array.isArray(cached.debug?.triedQueries) ? cached.debug.triedQueries : buildHotelPhotoQueries(details),
+        reason: cached.debug?.reason || (photoRef ? "ok" : "no_photos"),
+        cached: true,
+      };
+    }
+  }
+  const result = await fetchHotelPhotoReferenceWithFallback(details, options);
+  await storePersistentHotelPhotoEnrichmentCache(hotelId, details, result);
+  return { ...result, cached: false };
 }
 
 function buildHotelPhotoQueries(details) {
@@ -3183,11 +3478,20 @@ function buildHotelPhotoQueries(details) {
   return out;
 }
 
-function buildHotelPhotoQueriesFromClient(name, city) {
+function buildHotelPhotoQueriesFromClient(name, city, country, address) {
   const baseName = String(name || "").trim();
   if (!baseName) return [];
   const cityText = String(city || "").trim();
+  const countryText = String(country || "").trim();
+  const addressText = String(address || "").trim();
   const queries = [];
+  if (addressText) {
+    queries.push([baseName, addressText, countryText].filter(Boolean).join(" "));
+  }
+  if (cityText && countryText) {
+    queries.push(`${baseName} ${cityText} ${countryText}`);
+    queries.push(`${baseName} hotel ${cityText} ${countryText}`);
+  }
   if (cityText) {
     queries.push(`${baseName} ${cityText}`);
     queries.push(`${baseName} hotel ${cityText}`);
@@ -3211,6 +3515,7 @@ async function fetchHotelPhotoReferenceWithFallback(details, options = {}) {
   if (queries.length === 0) {
     return {
       photoRef: null,
+      photoReferences: [],
       placeId: null,
       placeName: null,
       photosCount: 0,
@@ -3222,6 +3527,7 @@ async function fetchHotelPhotoReferenceWithFallback(details, options = {}) {
   }
   let lastResult = {
     photoRef: null,
+    photoReferences: [],
     placeId: null,
     placeName: null,
     photosCount: 0,
@@ -3236,6 +3542,7 @@ async function fetchHotelPhotoReferenceWithFallback(details, options = {}) {
     if (result.photoRef) {
       return {
         photoRef: result.photoRef,
+        photoReferences: result.photoReferences,
         placeId: result.placeId,
         placeName: result.placeName,
         photosCount: result.photosCount,
@@ -3279,8 +3586,11 @@ async function fetchPlacesDetailsPhotoReference(placeId) {
     throw err;
   }
   const photos = Array.isArray(json.result?.photos) ? json.result.photos : [];
-  const photoRef = String(photos[0]?.photo_reference || "").trim() || null;
-  return { photoRef, photosCount: photos.length };
+  const photoReferences = normalizeHotelPhotoReferences(
+    photos.map((item) => String(item?.photo_reference || "").trim())
+  );
+  const photoRef = photoReferences[0] || null;
+  return { photoRef, photoReferences, photosCount: photos.length };
 }
 
 async function fetchPlacesFindPlacePhotoReference(query, options = {}) {
@@ -3358,6 +3668,7 @@ async function fetchPlacesFindPlacePhotoReference(query, options = {}) {
     }
     return {
       photoRef: details.photoRef,
+      photoReferences: details.photoReferences,
       placeId,
       placeName,
       photosCount: details.photosCount,
@@ -3367,6 +3678,7 @@ async function fetchPlacesFindPlacePhotoReference(query, options = {}) {
   }
   return {
     photoRef: null,
+    photoReferences: [],
     placeId: null,
     placeName: null,
     photosCount: 0,
