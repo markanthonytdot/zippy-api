@@ -1540,6 +1540,16 @@ app.get("/v1/hotels/photo", async (req, res) => {
       debug.step = getHotelPhotoDebugStep(debug.reason);
       logStep("done", { ms: Date.now() - requestStart, reason: debug.reason });
     }
+    logHotelsPhotoCacheEvent({
+      hotelId: hotelIdRaw,
+      hotelName: nameInput || cached?.placeName || debug.hotelName || "",
+      photoIndex,
+      cacheStatus: "HIT",
+      cacheLayer: "memory",
+      placeIdSource: cached?.placeId ? "cache" : "none",
+      photoRefsSource: photoReferences.length > 0 ? "cache" : "none",
+      photoUrlReturned: Boolean(photoUrl),
+    });
     return res.json({
       ok: true,
       hotelId: hotelIdRaw,
@@ -1556,6 +1566,16 @@ app.get("/v1/hotels/photo", async (req, res) => {
       debug.reason = "exception";
       logStep("google_search", { ms: Date.now() - requestStart, reason: debug.reason });
     }
+    logHotelsPhotoCacheEvent({
+      hotelId: hotelIdRaw,
+      hotelName: nameInput || "",
+      photoIndex,
+      cacheStatus: refreshRequested ? "REFRESH" : "MISS",
+      cacheLayer: "fresh",
+      placeIdSource: "none",
+      photoRefsSource: "none",
+      photoUrlReturned: false,
+    });
     return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null, ...(debugEnabled ? { debug } : {}) });
   }
 
@@ -1632,6 +1652,16 @@ app.get("/v1/hotels/photo", async (req, res) => {
         photosCount: debug.detailsPhotosCount,
       });
     }
+    logHotelsPhotoCacheEvent({
+      hotelId: hotelIdRaw,
+      hotelName: nameInput,
+      photoIndex,
+      cacheStatus: result?.cached ? "HIT" : refreshRequested ? "REFRESH" : "MISS",
+      cacheLayer: result?.cached ? "persistent" : "fresh",
+      placeIdSource: result?.placeId ? (result?.cached ? "cache" : "fresh") : "none",
+      photoRefsSource: photoReferences.length > 0 ? (result?.cached ? "cache" : "fresh") : "none",
+      photoUrlReturned: Boolean(photoUrl),
+    });
     return res.json({
       ok: true,
       hotelId: hotelIdRaw,
@@ -1671,6 +1701,16 @@ app.get("/v1/hotels/photo", async (req, res) => {
       debug.reason = "no_hotel_context";
       logStep("amadeus_lookup", { ms: Date.now() - amadeusStart, reason: debug.reason });
     }
+    logHotelsPhotoCacheEvent({
+      hotelId: hotelIdRaw,
+      hotelName: name || "",
+      photoIndex,
+      cacheStatus: refreshRequested ? "REFRESH" : "MISS",
+      cacheLayer: "fresh",
+      placeIdSource: "none",
+      photoRefsSource: "none",
+      photoUrlReturned: false,
+    });
     return res.json({ ok: true, hotelId: hotelIdRaw, cached: false, photoUrl: null, ...(debugEnabled ? { debug } : {}) });
   }
   if (debugEnabled) {
@@ -1742,6 +1782,16 @@ app.get("/v1/hotels/photo", async (req, res) => {
       photosCount: debug.detailsPhotosCount,
     });
   }
+  logHotelsPhotoCacheEvent({
+    hotelId: hotelIdRaw,
+    hotelName: name,
+    photoIndex,
+    cacheStatus: result?.cached ? "HIT" : refreshRequested ? "REFRESH" : "MISS",
+    cacheLayer: result?.cached ? "persistent" : "fresh",
+    placeIdSource: result?.placeId ? (result?.cached ? "cache" : "fresh") : "none",
+    photoRefsSource: photoReferences.length > 0 ? (result?.cached ? "cache" : "fresh") : "none",
+    photoUrlReturned: Boolean(photoUrl),
+  });
   return res.json({
     ok: true,
     hotelId: hotelIdRaw,
@@ -3233,6 +3283,21 @@ function getHotelPhotoDebugStep(reason) {
   if (reason === "no_photos") return "details_photos";
   if (reason === "exception") return "details_photos";
   return "done";
+}
+
+function logHotelsPhotoCacheEvent(info = {}) {
+  const parts = [
+    "[HOTELS_PHOTO_CACHE]",
+    "hotelId=" + String(info.hotelId || "").trim(),
+    "hotelName=" + truncateText(String(info.hotelName || "").trim(), 120),
+    "photoIndex=" + String(Number.isFinite(info.photoIndex) ? info.photoIndex : 0),
+    "cacheStatus=" + String(info.cacheStatus || "MISS"),
+    "cacheLayer=" + String(info.cacheLayer || "fresh"),
+    "placeIdSource=" + String(info.placeIdSource || "none"),
+    "photoRefsSource=" + String(info.photoRefsSource || "none"),
+    "photoUrl=" + (info.photoUrlReturned ? "1" : "0"),
+  ];
+  console.log(...parts);
 }
 
 function splitAddressParts(address) {
