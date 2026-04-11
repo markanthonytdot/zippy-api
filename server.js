@@ -551,8 +551,9 @@ app.get("/", (req, res) => {
 // Hotels abuse protection
 // ---------------------------------------------
 app.use("/v1/hotels", async (req, res, next) => {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
+  const allowAnonymous = req.path === "/search" || req.path === "/ping";
+  const userId = allowAnonymous ? await resolveOptionalUserId(req) : await requireUserId(req, res);
+  if (!allowAnonymous && !userId) return;
 
   const limiterId = getRateLimitKey(req, userId);
   const lim = hotelsMinuteLimiter.allow(`hotels:${limiterId}`);
@@ -563,7 +564,7 @@ app.use("/v1/hotels", async (req, res, next) => {
 
   console.log(
     "[Hotels LIMIT]",
-    "userId=" + userId,
+    "userId=" + String(userId || "anonymous"),
     "path=" + req.path,
     "hour=" + q.hourCount + "/" + q.hourlyLimit,
     "day=" + q.dayCount + "/" + q.dailyLimit
@@ -3769,6 +3770,49 @@ async function requireUserId(req, res) {
   req.userId = userId;
   req.userIdVerified = false;
   return userId;
+}
+
+async function resolveOptionalUserId(req) {
+  // 1) prefer existing verified identity
+  if (req.userId && req.userIdVerified) {
+    return req.userId;
+  }
+
+  // 2) try bearer JWT if present; ignore failures for public routes
+  const auth = String(req.headers.authorization || "");
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (m && JWT_SECRET) {
+    const token = m[1].trim();
+    try {
+      const { jwtVerify } = await getJose();
+      const encoder = new TextEncoder();
+
+      const { payload } = await jwtVerify(token, encoder.encode(JWT_SECRET), {
+        issuer: JWT_ISSUER,
+        audience: JWT_AUDIENCE,
+      });
+
+      const sub = String(payload?.sub || "").trim();
+      if (sub) {
+        req.userId = sub;
+        req.userIdVerified = true;
+        return sub;
+      }
+    } catch (e) {
+      console.log("[Auth] optional jwt verify failed:", e?.message || e);
+    }
+  }
+
+  // 3) fallback: optional x-user-id
+  const userId = String(req.userId || req.headers["x-user-id"] || "").trim();
+  if (userId) {
+    req.userId = userId;
+    req.userIdVerified = false;
+    return userId;
+  }
+
+  // 4) anonymous public access
+  return null;
 }
 
 function requireDb(req, res) {
