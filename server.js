@@ -325,10 +325,45 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 // Duffel key (server-only)
 const DUFFEL_LIVE_TOKEN_READONLY = String(process.env.DUFFEL_LIVE_TOKEN_READONLY || "").trim();
 const DUFFEL_API_KEY = String(process.env.DUFFEL_API_KEY || "").trim();
-const DUFFEL_TOKEN_SOURCE = DUFFEL_LIVE_TOKEN_READONLY ? "LIVE_READONLY" : "DUFFEL_API_KEY";
-const DUFFEL_TOKEN = DUFFEL_LIVE_TOKEN_READONLY || DUFFEL_API_KEY;
-const DUFFEL_TOKEN_MODE = DUFFEL_TOKEN.startsWith("duffel_live") ? "LIVE" : "TEST";
-console.log("[Duffel]", "token_source=" + DUFFEL_TOKEN_SOURCE, "mode=" + DUFFEL_TOKEN_MODE);
+const DUFFEL_FLIGHTS_KEY = String(process.env.DUFFEL_FLIGHTS_KEY || "").trim();
+const DUFFEL_STAYS_KEY = String(process.env.DUFFEL_STAYS_KEY || "").trim();
+const DUFFEL_FLIGHTS_TOKEN = DUFFEL_FLIGHTS_KEY || DUFFEL_LIVE_TOKEN_READONLY;
+const DUFFEL_STAYS_TOKEN = DUFFEL_STAYS_KEY || DUFFEL_API_KEY;
+const DUFFEL_FLIGHTS_TOKEN_SOURCE = DUFFEL_FLIGHTS_KEY
+  ? "DUFFEL_FLIGHTS_KEY"
+  : DUFFEL_LIVE_TOKEN_READONLY
+    ? "DUFFEL_LIVE_TOKEN_READONLY"
+    : "MISSING";
+const DUFFEL_STAYS_TOKEN_SOURCE = DUFFEL_STAYS_KEY
+  ? "DUFFEL_STAYS_KEY"
+  : DUFFEL_API_KEY
+    ? "DUFFEL_API_KEY"
+    : "MISSING";
+function classifyDuffelTokenMode(token) {
+  const raw = String(token || "").trim();
+  if (!raw) return "MISSING";
+  if (raw.startsWith("duffel_live")) return "LIVE";
+  if (raw.startsWith("duffel_test")) return "TEST";
+  return "UNKNOWN";
+}
+function summarizeDuffelTokenPrefix(token) {
+  const raw = String(token || "").trim();
+  if (!raw) return "(empty)";
+  if (raw.startsWith("duffel_live_")) return "duffel_live_...";
+  if (raw.startsWith("duffel_test_")) return "duffel_test_...";
+  return `${raw.slice(0, Math.min(12, raw.length))}...`;
+}
+const DUFFEL_FLIGHTS_MODE = classifyDuffelTokenMode(DUFFEL_FLIGHTS_TOKEN);
+const DUFFEL_STAYS_MODE = classifyDuffelTokenMode(DUFFEL_STAYS_TOKEN);
+console.log(
+  "[Duffel]",
+  "flights_token_source=" + DUFFEL_FLIGHTS_TOKEN_SOURCE,
+  "flights_mode=" + DUFFEL_FLIGHTS_MODE,
+  "flights_token_prefix=" + summarizeDuffelTokenPrefix(DUFFEL_FLIGHTS_TOKEN),
+  "stays_token_source=" + DUFFEL_STAYS_TOKEN_SOURCE,
+  "stays_mode=" + DUFFEL_STAYS_MODE,
+  "stays_token_prefix=" + summarizeDuffelTokenPrefix(DUFFEL_STAYS_TOKEN)
+);
 const DUFFEL_API_VERSION = String(process.env.DUFFEL_API_VERSION || "v2").trim() || "v2";
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
@@ -912,8 +947,8 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
 }
 
 async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, adults, max, radiusKm, requestId }) {
-  if (!DUFFEL_TOKEN) {
-    return { ok: false, status: 500, error: "DUFFEL_API_KEY not set" };
+  if (!DUFFEL_STAYS_TOKEN) {
+    return { ok: false, status: 500, error: "DUFFEL_STAYS_KEY not set" };
   }
 
   const payload = {
@@ -962,7 +997,7 @@ async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, ad
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
-          Authorization: `Bearer ${DUFFEL_TOKEN}`,
+          Authorization: `Bearer ${DUFFEL_STAYS_TOKEN}`,
           "Duffel-Version": DUFFEL_API_VERSION,
         },
         body: JSON.stringify(payload),
@@ -1015,8 +1050,8 @@ app.post("/v1/hotels/search", async (req, res) => {
   const requestStartMs = Date.now();
   const requestId = String(req.requestId || randomUUID());
   req.requestId = requestId;
-  if (!DUFFEL_TOKEN) {
-    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  if (!DUFFEL_STAYS_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_STAYS_KEY not set" });
   }
 
   const body = req.body || {};
@@ -1950,8 +1985,8 @@ app.post("/v1/flights/search", async (req, res) => {
   const requestId = String(req.headers["x-request-id"] || req.requestId || randomUUID());
   req.requestId = requestId;
 
-  if (!DUFFEL_TOKEN) {
-    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  if (!DUFFEL_FLIGHTS_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_FLIGHTS_KEY not set" });
   }
 
   if (!req.body || typeof req.body !== "object") {
@@ -2052,7 +2087,7 @@ app.post("/v1/flights/search", async (req, res) => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${DUFFEL_TOKEN}`,
+            Authorization: `Bearer ${DUFFEL_FLIGHTS_TOKEN}`,
             "Duffel-Version": DUFFEL_API_VERSION,
           },
           body: JSON.stringify({ data: requestData }),
@@ -2140,7 +2175,7 @@ app.post("/v1/flights/search", async (req, res) => {
           {
             headers: {
               Accept: "application/json",
-              Authorization: `Bearer ${DUFFEL_TOKEN}`,
+              Authorization: `Bearer ${DUFFEL_FLIGHTS_TOKEN}`,
               "Duffel-Version": DUFFEL_API_VERSION,
             },
           },
@@ -2235,8 +2270,8 @@ app.get("/v1/flights/seat_maps", async (req, res) => {
 
   const requestId = String(req.headers["x-request-id"] || randomUUID());
 
-  if (!DUFFEL_TOKEN) {
-    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  if (!DUFFEL_FLIGHTS_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_FLIGHTS_KEY not set" });
   }
 
   const offerId = String(req.query.offer_id || "").trim();
@@ -2258,7 +2293,7 @@ app.get("/v1/flights/seat_maps", async (req, res) => {
         headers: {
           "Accept": "application/json",
           "Accept-Encoding": "gzip",
-          "Authorization": `Bearer ${DUFFEL_TOKEN}`,
+          "Authorization": `Bearer ${DUFFEL_FLIGHTS_TOKEN}`,
           "Duffel-Version": DUFFEL_API_VERSION,
         },
       },
@@ -2292,8 +2327,8 @@ app.get("/v1/flights/available_services", async (req, res) => {
 
   const requestId = String(req.headers["x-request-id"] || randomUUID());
 
-  if (!DUFFEL_TOKEN) {
-    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  if (!DUFFEL_FLIGHTS_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_FLIGHTS_KEY not set" });
   }
 
   const offerId = String(req.query.offer_id || "").trim();
@@ -2315,7 +2350,7 @@ app.get("/v1/flights/available_services", async (req, res) => {
         headers: {
           "Accept": "application/json",
           "Accept-Encoding": "gzip",
-          "Authorization": `Bearer ${DUFFEL_TOKEN}`,
+          "Authorization": `Bearer ${DUFFEL_FLIGHTS_TOKEN}`,
           "Duffel-Version": DUFFEL_API_VERSION,
         },
       },
@@ -2358,8 +2393,8 @@ app.get("/v1/flights/offer", async (req, res) => {
 
   const requestId = String(req.headers["x-request-id"] || randomUUID());
 
-  if (!DUFFEL_TOKEN) {
-    return res.status(500).json({ ok: false, error: "DUFFEL_API_KEY not set" });
+  if (!DUFFEL_FLIGHTS_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_FLIGHTS_KEY not set" });
   }
 
   const offerId = String(req.query.offer_id || "").trim();
@@ -2380,7 +2415,7 @@ app.get("/v1/flights/offer", async (req, res) => {
         headers: {
           "Accept": "application/json",
           "Accept-Encoding": "gzip",
-          "Authorization": `Bearer ${DUFFEL_TOKEN}`,
+          "Authorization": `Bearer ${DUFFEL_FLIGHTS_TOKEN}`,
           "Duffel-Version": DUFFEL_API_VERSION,
         },
       },
