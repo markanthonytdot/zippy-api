@@ -1181,6 +1181,7 @@ app.post("/v1/hotels/search", async (req, res) => {
   if (!Number.isFinite(max)) max = 12;
   max = Math.round(max);
   if (max <= 0) max = 12;
+  if (max < 10) max = 10;
   if (max > 50) max = 50;
 
   let searchLat = latInput;
