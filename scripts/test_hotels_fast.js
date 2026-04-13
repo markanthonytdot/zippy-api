@@ -55,19 +55,31 @@ async function main() {
   const pricesJson = await pricesRes.json();
   assert(pricesJson.ok === true, "prices ok");
   assert(Array.isArray(pricesJson.items), "prices items array");
-  assert(pricesJson.items.length === requestedHotelIds.length, "prices item count matches request");
+  assert(pricesJson.items.length >= requestedHotelIds.length, "prices has at least one row per requested hotel");
+  const pricesByHotelId = new Map();
   for (const item of pricesJson.items) {
     const hotelId = String(item?.hotelId || "").trim();
     assert(hotelId, "prices item hotelId present");
     assert(byId.has(hotelId), "prices item hotelId exists in search results");
     assert(item.price_status, "prices item price_status present");
-    assert(item.error !== "missing_search_context", "search to prices continuity is preserved");
+    if (!pricesByHotelId.has(hotelId)) pricesByHotelId.set(hotelId, []);
+    pricesByHotelId.get(hotelId).push(item);
+  }
 
-    const searchItem = byId.get(hotelId);
+  for (const requestedHotelId of requestedHotelIds) {
+    const grouped = pricesByHotelId.get(requestedHotelId) || [];
+    assert(grouped.length > 0, "requested hotel has price rows");
+    const continuityBreak = grouped.find((entry) => entry?.error === "missing_search_context");
+    assert(!continuityBreak, "search to prices continuity is preserved");
+
+    const searchItem = byId.get(requestedHotelId);
     if (searchItem?.offer) {
-      assert(item.price_status === "priced", "search item with offer is priced");
-      assert(item.offer && typeof item.offer === "object", "priced item offer present");
-      assert(item.price && typeof item.price === "object", "priced item price present");
+      const pricedRows = grouped.filter((entry) => entry?.price_status === "priced");
+      assert(pricedRows.length > 0, "search item with offer has at least one priced row");
+      for (const entry of pricedRows) {
+        assert(entry.offer && typeof entry.offer === "object", "priced item offer present");
+        assert(entry.price && typeof entry.price === "object", "priced item price present");
+      }
     }
   }
 

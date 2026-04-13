@@ -929,7 +929,8 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
       result?.cheapest_rate_base_currency ||
       ""
   ).trim();
-  const room = Array.isArray(accommodation?.rooms) ? accommodation.rooms[0] || null : null;
+  const rooms = Array.isArray(accommodation?.rooms) ? accommodation.rooms : [];
+  const room = rooms[0] || null;
   const rate = Array.isArray(room?.rates) ? room.rates[0] || null : null;
   const bed = Array.isArray(room?.beds) ? room.beds[0] || null : null;
   const photo = Array.isArray(accommodation?.photos) ? accommodation.photos[0] || null : null;
@@ -966,6 +967,50 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
         }
       : null;
 
+  const offers = [];
+  const seenOfferKeys = new Set();
+  for (let roomIndex = 0; roomIndex < rooms.length; roomIndex += 1) {
+    const roomEntry = rooms[roomIndex] || {};
+    const roomBeds = Array.isArray(roomEntry?.beds) ? roomEntry.beds : [];
+    const roomBed = roomBeds[0] || null;
+    const rates = Array.isArray(roomEntry?.rates) ? roomEntry.rates : [];
+    for (let rateIndex = 0; rateIndex < rates.length; rateIndex += 1) {
+      const rateEntry = rates[rateIndex] || {};
+      const mappedOffer = {
+        id: String(rateEntry?.id || result?.id || `offer_${roomIndex}_${rateIndex}`).trim() || null,
+        checkInDate: String(result?.check_in_date || checkIn || "").trim() || null,
+        checkOutDate: String(result?.check_out_date || checkOut || "").trim() || null,
+        adults,
+        roomType: String(roomEntry?.name || "").trim() || null,
+        roomDescription: String(rateEntry?.description || accommodation?.description || "").trim() || null,
+        bedType: String(roomBed?.type || "").trim() || null,
+        boardType: String(rateEntry?.board_type || "").trim() || null,
+        paymentType: String(rateEntry?.payment_type || "").trim() || null,
+        refundable: null,
+        cancellation: null,
+        price: {
+          total: String(rateEntry?.total_amount || "").trim() || null,
+          base: String(rateEntry?.base_amount || result?.cheapest_rate_base_amount || "").trim() || null,
+          taxes: String(rateEntry?.tax_amount || rateEntry?.fee_amount || "").trim() || null,
+          currency: String(rateEntry?.total_currency || cheapestCurrency || "").trim() || null,
+        },
+        raw: null,
+      };
+      const dedupeKey = [
+        mappedOffer.id || "",
+        mappedOffer.price?.total || "",
+        mappedOffer.price?.currency || "",
+        mappedOffer.roomType || "",
+      ].join("|");
+      if (seenOfferKeys.has(dedupeKey)) continue;
+      seenOfferKeys.add(dedupeKey);
+      offers.push(mappedOffer);
+    }
+  }
+  if (offers.length === 0 && offer) {
+    offers.push(offer);
+  }
+
   cacheHotelDetails(hotelId, name, address, city);
 
   return {
@@ -977,6 +1022,7 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
     rating,
     price,
     offer,
+    offers,
     bookingUrl: null,
     photoUrl: String(photo?.url || "").trim() || null,
   };
@@ -1009,6 +1055,11 @@ function cacheDuffelHotelPriceSnapshot(item, checkIn, nights, adults) {
   const hotelId = String(item?.hotelId || "").trim();
   const key = makeDuffelHotelPriceCacheKey(hotelId, checkIn, nights, adults);
   if (!key) return false;
+  const primaryOffer = item?.offer && typeof item.offer === "object" ? item.offer : null;
+  const offers = Array.isArray(item?.offers)
+    ? item.offers.filter((entry) => entry && typeof entry === "object")
+    : [];
+  const allOffers = offers.length > 0 ? offers : (primaryOffer ? [primaryOffer] : []);
   const snapshot = {
     hotelId,
     name: String(item?.name || "").trim() || null,
@@ -1018,7 +1069,8 @@ function cacheDuffelHotelPriceSnapshot(item, checkIn, nights, adults) {
           currency: String(item.price.currency || "").trim() || null,
         }
       : null,
-    offer: item?.offer && typeof item.offer === "object" ? item.offer : null,
+    offer: primaryOffer || allOffers[0] || null,
+    offers: allOffers,
   };
   hotelDuffelPriceCache.set(key, snapshot, HOTEL_DUFFEL_PRICE_CACHE_TTL_MS);
   return true;
@@ -1368,18 +1420,28 @@ app.post("/v1/hotels/prices", async (req, res) => {
   let failedCount = 0;
   for (const hotelId of hotelIds) {
     const snapshot = readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults);
-    if (snapshot && snapshot.offer) {
-      items.push({
-        hotelId,
-        ok: true,
-        price_status: "priced",
-        price: snapshot.price,
-        offer: snapshot.offer,
-      });
-      pricedCount += 1;
-      continue;
-    }
     if (snapshot) {
+      const offers = Array.isArray(snapshot?.offers) && snapshot.offers.length > 0
+        ? snapshot.offers
+        : (snapshot.offer ? [snapshot.offer] : []);
+      if (offers.length > 0) {
+        for (const offer of offers) {
+          if (!offer || typeof offer !== "object") continue;
+          const offerPrice = offer?.price && typeof offer.price === "object" ? offer.price : null;
+          const total = String(offerPrice?.total || snapshot?.price?.total || "").trim() || null;
+          const currency = String(offerPrice?.currency || snapshot?.price?.currency || "").trim() || null;
+          const pricedEntry = {
+            hotelId,
+            ok: true,
+            price_status: "priced",
+            price: total || currency ? { total, currency } : null,
+            offer,
+          };
+          items.push(pricedEntry);
+          pricedCount += 1;
+        }
+        continue;
+      }
       items.push({ hotelId, ok: false, price_status: "unavailable", price: null, offer: null, error: "no_offers" });
       unavailableCount += 1;
     } else {
