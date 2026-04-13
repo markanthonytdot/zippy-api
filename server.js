@@ -946,6 +946,7 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
   const rate = Array.isArray(room?.rates) ? room.rates[0] || null : null;
   const bed = Array.isArray(room?.beds) ? room.beds[0] || null : null;
   const photo = Array.isArray(accommodation?.photos) ? accommodation.photos[0] || null : null;
+  const ratePolicy = pickOfferCancellation(rate);
 
   const price =
     cheapestTotal && cheapestCurrency
@@ -967,8 +968,8 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
           bedType: sanitizeDuffelText(bed?.type, 120),
           boardType: sanitizeDuffelText(rate?.board_type, 120),
           paymentType: sanitizeDuffelText(rate?.payment_type, 120),
-          refundable: null,
-          cancellation: null,
+          refundable: ratePolicy.refundable,
+          cancellation: ratePolicy.cancellation,
           price: {
             total: String(rate?.total_amount || cheapestTotal || "").trim() || null,
             base: String(rate?.base_amount || result?.cheapest_rate_base_amount || "").trim() || null,
@@ -988,6 +989,7 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
     const rates = Array.isArray(roomEntry?.rates) ? roomEntry.rates : [];
     for (let rateIndex = 0; rateIndex < rates.length; rateIndex += 1) {
       const rateEntry = rates[rateIndex] || {};
+      const rateEntryPolicy = pickOfferCancellation(rateEntry);
       const mappedOffer = {
         id: String(rateEntry?.id || result?.id || `offer_${roomIndex}_${rateIndex}`).trim() || null,
         checkInDate: String(result?.check_in_date || checkIn || "").trim() || null,
@@ -998,8 +1000,8 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
         bedType: sanitizeDuffelText(roomBed?.type, 120),
         boardType: sanitizeDuffelText(rateEntry?.board_type, 120),
         paymentType: sanitizeDuffelText(rateEntry?.payment_type, 120),
-        refundable: null,
-        cancellation: null,
+        refundable: rateEntryPolicy.refundable,
+        cancellation: rateEntryPolicy.cancellation,
         price: {
           total: String(rateEntry?.total_amount || "").trim() || null,
           base: String(rateEntry?.base_amount || result?.cheapest_rate_base_amount || "").trim() || null,
@@ -4177,7 +4179,95 @@ function pickOfferCheckOutDate(offer, fallback, checkInDate, nights) {
   return derived || fallback;
 }
 
-function pickOfferCancellation(offer) {
+function parseOfferAmountNumber(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  const normalized = String(value)
+    .trim()
+    .replace(/[^0-9.+-]/g, "");
+  if (!normalized) return null;
+  const amount = Number(normalized);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function pickOfferCancellationFromTimeline(offer) {
+  const timeline = Array.isArray(offer?.cancellation_timeline)
+    ? offer.cancellation_timeline
+    : (Array.isArray(offer?.cancellationTimeline) ? offer.cancellationTimeline : null);
+  if (!timeline) return null;
+
+  const now = Date.now();
+  const totalAmount = parseOfferAmountNumber(
+    offer?.total_amount ?? offer?.totalAmount ?? offer?.price?.total ?? offer?.price?.amount
+  );
+  const windows = [];
+  for (const item of timeline) {
+    if (!item || typeof item !== "object") continue;
+    const before = normalizeOfferValue(item?.before || item?.deadline || item?.until);
+    const beforeTime = before ? new Date(before).getTime() : NaN;
+    if (!Number.isFinite(beforeTime) || beforeTime <= now) continue;
+    const refundAmount = parseOfferAmountNumber(
+      item?.refund_amount ?? item?.refundAmount ?? item?.amount ?? item?.refund?.amount
+    );
+    windows.push({
+      before,
+      beforeTime,
+      refundAmount,
+    });
+  }
+
+  if (windows.length === 0) {
+    return { refundable: false, cancellation: null };
+  }
+
+  const latestWindow = (entries) => {
+    if (!Array.isArray(entries) || entries.length === 0) return null;
+    let selected = null;
+    for (const entry of entries) {
+      if (!selected || entry.beforeTime > selected.beforeTime) {
+        selected = entry;
+      }
+    }
+    return selected;
+  };
+
+  const epsilon = 0.01;
+  const fullRefundWindows = Number.isFinite(totalAmount)
+    ? windows.filter((entry) => Number.isFinite(entry.refundAmount) && entry.refundAmount >= totalAmount - epsilon)
+    : [];
+  const fullRefund = latestWindow(fullRefundWindows);
+  if (fullRefund) {
+    return {
+      refundable: true,
+      cancellation: {
+        deadline: fullRefund.before,
+        description: null,
+      },
+    };
+  }
+
+  const partialRefundWindows = windows.filter(
+    (entry) => Number.isFinite(entry.refundAmount) && entry.refundAmount > epsilon
+  );
+  const partialRefund = latestWindow(partialRefundWindows);
+  if (partialRefund) {
+    return {
+      refundable: true,
+      cancellation: {
+        deadline: null,
+        description: partialRefund.before
+          ? `Partial refund available until ${partialRefund.before}`
+          : "Partial refund available",
+      },
+    };
+  }
+
+  return { refundable: false, cancellation: null };
+}
+
+function pickOfferCancellationFromPolicies(offer) {
   let refundable = null;
   const refundableFlag = offer?.policies?.refundable?.cancellationRefundable;
   if (typeof refundableFlag === "boolean") {
@@ -4219,6 +4309,12 @@ function pickOfferCancellation(offer) {
       description,
     },
   };
+}
+
+function pickOfferCancellation(offer) {
+  const timelineDerived = pickOfferCancellationFromTimeline(offer);
+  if (timelineDerived) return timelineDerived;
+  return pickOfferCancellationFromPolicies(offer);
 }
 
 function buildOfferRawDebug(offer) {
