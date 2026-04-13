@@ -897,9 +897,20 @@ function formatDuffelAddress(address) {
     address.postal_code,
     address.country_code,
   ]
-    .map((value) => String(value || "").trim())
+    .map((value) => sanitizeDuffelText(value))
     .filter(Boolean);
   return parts.length > 0 ? parts.join(", ") : null;
+}
+
+function sanitizeDuffelText(value, maxLen = 4000) {
+  const raw = String(value || "");
+  if (!raw) return null;
+  const cleaned = raw
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return null;
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
 }
 
 function buildDuffelStayGuests(adults) {
@@ -916,7 +927,8 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
   const ratingRaw = accommodation?.rating;
   const rating = Number.isFinite(Number(ratingRaw)) ? Number(ratingRaw) : null;
   const hotelId = String(accommodation?.id || result?.id || "").trim();
-  const name = String(accommodation?.name || "").trim();
+  const name = sanitizeDuffelText(accommodation?.name, 300);
+  const searchResultId = sanitizeDuffelText(result?.id, 120);
   const cheapestTotal = String(
     result?.cheapest_rate_total_amount ||
       result?.cheapest_rate_public_amount ||
@@ -950,11 +962,11 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
           checkInDate: String(result?.check_in_date || checkIn || "").trim() || null,
           checkOutDate: String(result?.check_out_date || checkOut || "").trim() || null,
           adults,
-          roomType: String(room?.name || "").trim() || null,
-          roomDescription: String(rate?.description || accommodation?.description || "").trim() || null,
-          bedType: String(bed?.type || "").trim() || null,
-          boardType: String(rate?.board_type || "").trim() || null,
-          paymentType: String(rate?.payment_type || "").trim() || null,
+          roomType: sanitizeDuffelText(room?.name, 300),
+          roomDescription: sanitizeDuffelText(rate?.description || accommodation?.description),
+          bedType: sanitizeDuffelText(bed?.type, 120),
+          boardType: sanitizeDuffelText(rate?.board_type, 120),
+          paymentType: sanitizeDuffelText(rate?.payment_type, 120),
           refundable: null,
           cancellation: null,
           price: {
@@ -981,11 +993,11 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
         checkInDate: String(result?.check_in_date || checkIn || "").trim() || null,
         checkOutDate: String(result?.check_out_date || checkOut || "").trim() || null,
         adults,
-        roomType: String(roomEntry?.name || "").trim() || null,
-        roomDescription: String(rateEntry?.description || accommodation?.description || "").trim() || null,
-        bedType: String(roomBed?.type || "").trim() || null,
-        boardType: String(rateEntry?.board_type || "").trim() || null,
-        paymentType: String(rateEntry?.payment_type || "").trim() || null,
+        roomType: sanitizeDuffelText(roomEntry?.name, 300),
+        roomDescription: sanitizeDuffelText(rateEntry?.description || accommodation?.description),
+        bedType: sanitizeDuffelText(roomBed?.type, 120),
+        boardType: sanitizeDuffelText(rateEntry?.board_type, 120),
+        paymentType: sanitizeDuffelText(rateEntry?.payment_type, 120),
         refundable: null,
         cancellation: null,
         price: {
@@ -1023,6 +1035,7 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
     price,
     offer,
     offers,
+    searchResultId,
     bookingUrl: null,
     photoUrl: String(photo?.url || "").trim() || null,
   };
@@ -1063,6 +1076,7 @@ function cacheDuffelHotelPriceSnapshot(item, checkIn, nights, adults) {
   const snapshot = {
     hotelId,
     name: String(item?.name || "").trim() || null,
+    searchResultId: String(item?.searchResultId || "").trim() || null,
     price: item?.price && typeof item.price === "object"
       ? {
           total: String(item.price.total || "").trim() || null,
@@ -1071,6 +1085,7 @@ function cacheDuffelHotelPriceSnapshot(item, checkIn, nights, adults) {
       : null,
     offer: primaryOffer || allOffers[0] || null,
     offers: allOffers,
+    fullRatesFetched: item?.fullRatesFetched === true,
   };
   hotelDuffelPriceCache.set(key, snapshot, HOTEL_DUFFEL_PRICE_CACHE_TTL_MS);
   return true;
@@ -1179,6 +1194,71 @@ async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, ad
     .filter((item) => item && item.hotelId && item.name);
 
   return { ok: true, items };
+}
+
+async function fetchDuffelStayAllRates({ searchResultId, requestId }) {
+  const normalizedId = String(searchResultId || "").trim();
+  if (!normalizedId) {
+    return { ok: false, status: 400, error: "Missing searchResultId" };
+  }
+  if (!DUFFEL_STAYS_TOKEN) {
+    return { ok: false, status: 500, error: "DUFFEL_STAYS_KEY not set" };
+  }
+
+  const ratesUrl = `https://api.duffel.com/stays/search_results/${encodeURIComponent(normalizedId)}/actions/fetch_all_rates`;
+  let response;
+  let responseText = "";
+  let responseJson = {};
+  try {
+    response = await fetchWithTimeout(
+      ratesUrl,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${DUFFEL_STAYS_TOKEN}`,
+          "Duffel-Version": DUFFEL_API_VERSION,
+        },
+      },
+      15000
+    );
+    responseText = await response.text().catch(() => "");
+    responseJson = safeJsonParse(responseText);
+  } catch (e) {
+    const errMsg = e?.message ? String(e.message) : String(e || "error");
+    console.log("[Hotels DUFFEL]", "requestId=" + requestId, "step=fetch_all_rates", "error=" + truncateText(errMsg, 300));
+    return {
+      ok: false,
+      status: 502,
+      error: "Duffel rates fetch failed",
+      hint: `step=fetch_all_rates error=${truncateText(errMsg, 300)}`,
+    };
+  }
+
+  const result = responseJson?.data && typeof responseJson.data === "object" ? responseJson.data : null;
+  const rooms = Array.isArray(result?.accommodation?.rooms) ? result.accommodation.rooms : [];
+  const ratesCount = rooms.reduce((sum, room) => sum + (Array.isArray(room?.rates) ? room.rates.length : 0), 0);
+  console.log(
+    "[Hotels DUFFEL]",
+    "requestId=" + requestId,
+    "step=fetch_all_rates",
+    "status=" + String(response?.status || "unknown"),
+    "rooms=" + rooms.length,
+    "rates=" + ratesCount
+  );
+
+  if (!response.ok || !result) {
+    const bodySnippet = truncateText(responseText, 500);
+    return {
+      ok: false,
+      status: 502,
+      error: "Duffel rates fetch failed",
+      hint: `step=fetch_all_rates status=${response?.status} body=${bodySnippet}`,
+    };
+  }
+
+  return { ok: true, result };
 }
 
 app.post("/v1/hotels/search", async (req, res) => {
@@ -1345,7 +1425,7 @@ app.post("/v1/hotels/search", async (req, res) => {
     ok: true,
     cached: false,
     query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
-    items,
+    items: items.map(({ searchResultId, fullRatesFetched, ...item }) => item),
   };
 
   if (fastMode) {
@@ -1419,7 +1499,41 @@ app.post("/v1/hotels/prices", async (req, res) => {
   let unavailableCount = 0;
   let failedCount = 0;
   for (const hotelId of hotelIds) {
-    const snapshot = readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults);
+    let snapshot = readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults);
+    if (
+      snapshot &&
+      snapshot.fullRatesFetched !== true &&
+      snapshot.searchResultId &&
+      (!Array.isArray(snapshot.offers) || snapshot.offers.length <= 1)
+    ) {
+      const richerRates = await fetchDuffelStayAllRates({ searchResultId: snapshot.searchResultId, requestId });
+      if (richerRates.ok && richerRates.result) {
+        const mapped = mapDuffelStayResult(richerRates.result, adults, checkIn, checkOut, null);
+        cacheDuffelHotelPriceSnapshot(
+          {
+            ...mapped,
+            hotelId,
+            searchResultId: snapshot.searchResultId,
+            fullRatesFetched: true,
+          },
+          checkIn,
+          nights,
+          adults
+        );
+        snapshot = readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults);
+      } else {
+        cacheDuffelHotelPriceSnapshot(
+          {
+            ...snapshot,
+            fullRatesFetched: true,
+          },
+          checkIn,
+          nights,
+          adults
+        );
+        snapshot = readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults);
+      }
+    }
     if (snapshot) {
       const offers = Array.isArray(snapshot?.offers) && snapshot.offers.length > 0
         ? snapshot.offers
