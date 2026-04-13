@@ -129,6 +129,7 @@ const etaCache = makeTtlCache(); // key = rounded origin/dest + mode/traffic
 const hotelPhotoCache = makeTtlCache(); // key = hotelId or name+city
 const hotelDetailsCache = makeTtlCache(); // key = hotelId
 const hotelPhotoRefCache = makeTtlCache(); // key = hotelId
+const hotelDuffelPriceCache = makeTtlCache(); // key = hotelId+checkIn+nights+adults
 
 // Duffel search cache + inflight dedupe
 const DUFFEL_SEARCH_CACHE_TTL_MS = getEnvInt("DUFFEL_SEARCH_CACHE_TTL_MS", 60 * 1000);
@@ -252,6 +253,7 @@ const HOTEL_DETAILS_TTL_MS = 24 * 60 * 60 * 1000;
 const HOTEL_PHOTO_REF_NULL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const HOTEL_ENRICHED_PHOTO_CACHE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const HOTEL_ENRICHED_PHOTO_CACHE_MAX_REFS = 8;
+const HOTEL_DUFFEL_PRICE_CACHE_TTL_MS = getEnvInt("HOTEL_DUFFEL_PRICE_CACHE_TTL_MS", 30 * 60 * 1000);
 
 // limiters (tune later)
 const placesDetailsLimiter = makeFixedWindowLimiter({
@@ -980,6 +982,54 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
   };
 }
 
+function normalizeStaysHotelId(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeStaysNights(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(30, n);
+}
+
+function normalizeStaysAdults(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(9, n);
+}
+
+function makeDuffelHotelPriceCacheKey(hotelId, checkIn, nights, adults) {
+  const id = normalizeStaysHotelId(hotelId);
+  const checkInIso = String(checkIn || "").trim();
+  if (!id || !checkInIso) return "";
+  return `${id}|${checkInIso}|${normalizeStaysNights(nights)}|${normalizeStaysAdults(adults)}`;
+}
+
+function cacheDuffelHotelPriceSnapshot(item, checkIn, nights, adults) {
+  const hotelId = String(item?.hotelId || "").trim();
+  const key = makeDuffelHotelPriceCacheKey(hotelId, checkIn, nights, adults);
+  if (!key) return false;
+  const snapshot = {
+    hotelId,
+    name: String(item?.name || "").trim() || null,
+    price: item?.price && typeof item.price === "object"
+      ? {
+          total: String(item.price.total || "").trim() || null,
+          currency: String(item.price.currency || "").trim() || null,
+        }
+      : null,
+    offer: item?.offer && typeof item.offer === "object" ? item.offer : null,
+  };
+  hotelDuffelPriceCache.set(key, snapshot, HOTEL_DUFFEL_PRICE_CACHE_TTL_MS);
+  return true;
+}
+
+function readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults) {
+  const key = makeDuffelHotelPriceCacheKey(hotelId, checkIn, nights, adults);
+  if (!key) return null;
+  return hotelDuffelPriceCache.get(key);
+}
+
 async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, adults, max, radiusKm, requestId }) {
   if (!DUFFEL_STAYS_TOKEN) {
     return { ok: false, status: 500, error: "DUFFEL_STAYS_KEY not set" };
@@ -1223,12 +1273,19 @@ app.post("/v1/hotels/search", async (req, res) => {
   if (allowPhotos && items.length > 0) {
     items = await enrichHotelItemsWithPhotos(items, city, req);
   }
+  let cachedPriceSnapshots = 0;
+  for (const item of items) {
+    if (cacheDuffelHotelPriceSnapshot(item, checkIn, nights, adults)) {
+      cachedPriceSnapshots += 1;
+    }
+  }
 
   console.log(
     "[Hotels RESPONSE]",
     "requestId=" + requestId,
     "provider=duffel",
     "count=" + items.length,
+    "priced_cache=" + cachedPriceSnapshots,
     "elapsed_ms=" + (Date.now() - requestStartMs)
   );
 
@@ -1252,7 +1309,7 @@ app.post("/v1/hotels/search", async (req, res) => {
 });
 
 // ---------------------------------------------
-// Hotels Prices (Amadeus)
+// Hotels Prices (Duffel continuity)
 // POST /v1/hotels/prices
 // ---------------------------------------------
 app.post("/v1/hotels/prices", async (req, res) => {
@@ -1260,13 +1317,8 @@ app.post("/v1/hotels/prices", async (req, res) => {
   const requestStartMs = Date.now();
   const requestId = String(req.requestId || randomUUID());
   req.requestId = requestId;
-  const OFFERS_TIMEOUT_MS = 15000;
   const HOTEL_ID_MAX_LEN = 120;
   const HOTEL_ID_SAFE_RE = /^[A-Za-z0-9._:-]+$/;
-
-  if (!AMADEUS_CLIENT_ID || !AMADEUS_CLIENT_SECRET) {
-    return res.status(500).json({ ok: false, error: "AMADEUS creds missing" });
-  }
 
   const body = req.body || {};
   const payload = body && typeof body === "object" && body.data && typeof body.data === "object" ? body.data : body;
@@ -1310,65 +1362,53 @@ app.post("/v1/hotels/prices", async (req, res) => {
   if (adults <= 0) adults = 1;
   if (adults > 9) adults = 9;
 
-  const tokenResult = await fetchAmadeusToken(requestId);
-  if (!tokenResult.ok) {
-    return res.status(tokenResult.status).json({ ok: false, error: tokenResult.error });
-  }
-
-  const offersByHotelId = new Map();
-  const errorsByHotelId = new Map();
-  const failedByHotelId = new Map();
-  const batches = chunkArray(hotelIds, 10);
-
-  for (let i = 0; i < batches.length; i += 1) {
-    const batch = batches[i];
-    const batchLabel = `batch=${i + 1}/${batches.length}`;
-    const result = await fetchOffersBatch({
-      token: tokenResult.token,
-      requestId,
-      userId,
-      checkIn,
-      checkOut,
-      adults,
-      batchIds: batch,
-      batchLabel,
-      timeoutMs: OFFERS_TIMEOUT_MS,
-      mode: "prices",
-    });
-    if (!result.ok) {
-      const errorCode = result.errorCode || "upstream_error";
-      for (const id of batch) {
-        if (!errorsByHotelId.has(id)) errorsByHotelId.set(id, errorCode);
-        if (!failedByHotelId.has(id)) failedByHotelId.set(id, errorCode);
-      }
-      continue;
-    }
-    const offersData = result.offersData || [];
-    mergeOffersByHotelId(offersByHotelId, offersData);
-  }
-
   const items = [];
+  let pricedCount = 0;
+  let unavailableCount = 0;
+  let failedCount = 0;
   for (const hotelId of hotelIds) {
-    const offer = offersByHotelId.get(hotelId);
-    if (offer) {
-      const bestOffer = offer.bestOffer?.offer || null;
-      const offerPrice = offer.price || null;
-      const offerPayload = buildOfferPayload(bestOffer, offerPrice, adults, checkIn, checkOut, nights);
-      const price = offerPrice ? { total: offerPrice.total, currency: offerPrice.currency } : null;
-      items.push({ hotelId, ok: true, price_status: "priced", price, offer: offerPayload });
+    const snapshot = readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults);
+    if (snapshot && snapshot.offer) {
+      items.push({
+        hotelId,
+        ok: true,
+        price_status: "priced",
+        price: snapshot.price,
+        offer: snapshot.offer,
+      });
+      pricedCount += 1;
       continue;
     }
-    if (failedByHotelId.has(hotelId)) {
-      const err = errorsByHotelId.get(hotelId) || "upstream_error";
-      items.push({ hotelId, ok: false, price_status: "failed", price: null, offer: null, error: err });
-    } else {
+    if (snapshot) {
       items.push({ hotelId, ok: false, price_status: "unavailable", price: null, offer: null, error: "no_offers" });
+      unavailableCount += 1;
+    } else {
+      items.push({
+        hotelId,
+        ok: false,
+        price_status: "failed",
+        price: null,
+        offer: null,
+        error: "missing_search_context",
+      });
+      failedCount += 1;
     }
   }
+  console.log(
+    "[Hotels PRICES]",
+    "requestId=" + requestId,
+    "provider=duffel",
+    "userId=" + userId,
+    "requested=" + hotelIds.length,
+    "priced=" + pricedCount,
+    "unavailable=" + unavailableCount,
+    "failed=" + failedCount
+  );
 
   const elapsedMs = Date.now() - requestStartMs;
   return res.json({
     ok: true,
+    provider: "duffel",
     elapsed_ms: elapsedMs,
     items,
   });

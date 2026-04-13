@@ -29,37 +29,45 @@ async function main() {
   const searchJson = await searchRes.json();
   assert(searchJson.ok === true, "search ok");
   assert(Array.isArray(searchJson.items), "items array");
+  assert(searchJson.items.length > 0, "search returned at least one hotel");
 
   const items = searchJson.items || [];
+  const byId = new Map();
   for (const item of items) {
-    assert(item.price_status, "item price_status present");
-    if (item.price_status !== "priced") {
-      assert(item.price == null, "non-priced item price null");
-      assert(item.offer == null, "non-priced item offer null");
-    }
+    const hotelId = String(item?.hotelId || "").trim();
+    assert(hotelId, "search item hotelId present");
+    byId.set(hotelId, item);
+    assert(item.name, "search item name present");
   }
 
-  const unavailableIds = new Set(items.filter((i) => i.price_status === "unavailable").map((i) => i.hotelId));
-  const retryIds = searchJson?.next?.data?.hotelIds || [];
-  for (const id of retryIds) {
-    assert(!unavailableIds.has(id), "unavailable id not in next");
-  }
+  const requestedHotelIds = items.slice(0, 3).map((item) => String(item.hotelId || "").trim()).filter(Boolean);
+  assert(requestedHotelIds.length > 0, "requestedHotelIds present");
+  const pricesRes = await fetch(`${base}/v1/hotels/prices`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      hotelIds: requestedHotelIds,
+      checkIn,
+      nights: 1,
+      adults: 1,
+    }),
+  });
+  const pricesJson = await pricesRes.json();
+  assert(pricesJson.ok === true, "prices ok");
+  assert(Array.isArray(pricesJson.items), "prices items array");
+  assert(pricesJson.items.length === requestedHotelIds.length, "prices item count matches request");
+  for (const item of pricesJson.items) {
+    const hotelId = String(item?.hotelId || "").trim();
+    assert(hotelId, "prices item hotelId present");
+    assert(byId.has(hotelId), "prices item hotelId exists in search results");
+    assert(item.price_status, "prices item price_status present");
+    assert(item.error !== "missing_search_context", "search to prices continuity is preserved");
 
-  if (retryIds.length > 0 && searchJson.next?.endpoint) {
-    const pricesRes = await fetch(`${base}${searchJson.next.endpoint}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ data: searchJson.next.data }),
-    });
-    const pricesJson = await pricesRes.json();
-    assert(pricesJson.ok === true, "prices ok");
-    assert(Array.isArray(pricesJson.items), "prices items array");
-    for (const item of pricesJson.items) {
-      assert(item.price_status, "prices item price_status present");
-      if (item.price_status !== "priced") {
-        assert(item.price == null, "prices non-priced item price null");
-        assert(item.offer == null, "prices non-priced item offer null");
-      }
+    const searchItem = byId.get(hotelId);
+    if (searchItem?.offer) {
+      assert(item.price_status === "priced", "search item with offer is priced");
+      assert(item.offer && typeof item.offer === "object", "priced item offer present");
+      assert(item.price && typeof item.price === "object", "priced item price present");
     }
   }
 
