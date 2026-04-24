@@ -2,7 +2,21 @@ const express = require("express");
 const helmet = require("helmet");
 const { randomUUID } = require("crypto");
 const { Pool } = require("pg");
+const { Translate } = require("@google-cloud/translate").v2;
 const app = express();
+
+const translateClient = (() => {
+  const raw = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  if (!raw) return null;
+  try {
+    return new Translate({
+      credentials: JSON.parse(raw),
+    });
+  } catch (error) {
+    console.warn("[translate] Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON; translation disabled", error?.message || error);
+    return null;
+  }
+})();
 
 app.set("trust proxy", true);
 app.use(helmet());
