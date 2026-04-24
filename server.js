@@ -927,6 +927,33 @@ function sanitizeDuffelText(value, maxLen = 4000) {
   return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
 }
 
+function normalizeHotelTranslationLocale(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "en" || normalized.startsWith("en-")) return "en";
+  if (normalized === "es" || normalized.startsWith("es-")) return "es";
+  return null;
+}
+
+async function translateSafeHotelText(text, locale) {
+  const cleaned = sanitizeDuffelText(text);
+  const targetLocale = normalizeHotelTranslationLocale(locale);
+  if (!cleaned) return null;
+  if (!targetLocale || targetLocale === "en") return cleaned;
+  if (!translateClient) return cleaned;
+  try {
+    const [translated] = await translateClient.translate(cleaned, { to: targetLocale });
+    return sanitizeDuffelText(translated) || cleaned;
+  } catch (error) {
+    console.warn(
+      "[translate] Hotel summary translation failed",
+      "locale=" + targetLocale,
+      "error=" + String(error?.message || error || "unknown")
+    );
+    return cleaned;
+  }
+}
+
 function buildDuffelStayGuests(adults) {
   const count = Math.max(1, Math.min(9, Number(adults) || 1));
   return Array.from({ length: count }, () => ({ type: "adult" }));
@@ -936,6 +963,7 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
   const accommodation = result?.accommodation || {};
   const coords = accommodation?.location?.geographic_coordinates || {};
   const address = formatDuffelAddress(accommodation?.location?.address);
+  const summary = sanitizeDuffelText(accommodation?.description);
   const lat = Number(coords?.latitude);
   const lng = Number(coords?.longitude);
   const ratingRaw = accommodation?.rating;
@@ -1047,6 +1075,7 @@ function mapDuffelStayResult(result, adults, checkIn, checkOut, city) {
     lat: Number.isFinite(lat) ? lat : null,
     lng: Number.isFinite(lng) ? lng : null,
     address,
+    summary,
     rating,
     price,
     offer,
@@ -1113,7 +1142,7 @@ function readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults) {
   return hotelDuffelPriceCache.get(key);
 }
 
-async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, adults, max, radiusKm, requestId }) {
+async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, adults, max, radiusKm, requestId, locale }) {
   if (!DUFFEL_STAYS_TOKEN) {
     return { ok: false, status: 500, error: "DUFFEL_STAYS_KEY not set" };
   }
@@ -1204,10 +1233,20 @@ async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, ad
     };
   }
 
-  const items = results
-    .slice(0, Math.max(1, Math.min(50, Number(max) || 12)))
-    .map((result) => mapDuffelStayResult(result, adults, checkIn, checkOut, city))
-    .filter((item) => item && item.hotelId && item.name);
+  const items = (
+    await Promise.all(
+      results
+        .slice(0, Math.max(1, Math.min(50, Number(max) || 12)))
+        .map(async (result) => {
+          const item = mapDuffelStayResult(result, adults, checkIn, checkOut, city);
+          if (!item || !item.hotelId || !item.name) return null;
+          return {
+            ...item,
+            summary: await translateSafeHotelText(item.summary, locale),
+          };
+        })
+    )
+  ).filter((item) => item && item.hotelId && item.name);
 
   return { ok: true, items };
 }
@@ -1288,6 +1327,7 @@ app.post("/v1/hotels/search", async (req, res) => {
 
   const body = req.body || {};
   const data = body && typeof body === "object" ? body.data : null;
+  const locale = normalizeHotelTranslationLocale(body.locale || data?.locale);
   const fastQuery = String(req.query.fast || "").trim().toLowerCase();
   const fastFromQuery = fastQuery === "1" || fastQuery === "true";
   const fastFromBody =
@@ -1358,6 +1398,7 @@ app.post("/v1/hotels/search", async (req, res) => {
       adults: body.adults ?? null,
       max: body.max ?? null,
       radiusKm: body.radiusKm ?? null,
+      locale,
       fastMode,
     })
   );
@@ -1406,6 +1447,7 @@ app.post("/v1/hotels/search", async (req, res) => {
     max,
     radiusKm,
     requestId,
+    locale,
   });
 
   if (!duffelResult.ok) {
