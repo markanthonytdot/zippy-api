@@ -3,6 +3,8 @@ const helmet = require("helmet");
 const { randomUUID } = require("crypto");
 const { Pool } = require("pg");
 const { Translate } = require("@google-cloud/translate").v2;
+const { FLIGHT_PARSE_MODEL, mockedFlightIntentParse, parseFlightIntentWithOpenAI } = require("./lib/flightIntentParse");
+const { validateFlightIntentRequest, validateFlightIntentResult } = require("./lib/flightIntentValidate");
 const app = express();
 
 const translateClient = (() => {
@@ -2356,6 +2358,106 @@ app.get("/v1/places/photo", async (req, res) => {
   } catch (e) {
     console.log("[PlacesPhoto] error:", e?.message || e);
     return res.status(500).json({ ok: false, error: "Server error fetching photo" });
+  }
+});
+
+// ---------------------------------------------
+// Flight Intent Parse (AI fallback)
+// POST /v1/intent/flight/parse
+// ---------------------------------------------
+app.post("/v1/intent/flight/parse", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const requestId = randomUUID();
+  const validatedRequest = validateFlightIntentRequest(req.body);
+  if (!validatedRequest.ok) {
+    return res.status(400).json({
+      success: false,
+      error: validatedRequest.error,
+      request_id: requestId,
+    });
+  }
+
+  const payload = validatedRequest.data;
+  const fallbackReason = payload.fallbackReason || "unknown";
+  console.log(
+    "[FlightIntentParse]",
+    `requestId=${requestId}`,
+    `fallback_reason=${fallbackReason}`,
+    `locale=${payload.locale}`,
+    `timezone=${payload.timezone}`
+  );
+
+  const mocked = mockedFlightIntentParse(payload);
+  if (mocked) {
+    const validatedMock = validateFlightIntentResult(mocked, payload);
+    console.log(
+      "[FlightIntentParse]",
+      `requestId=${requestId}`,
+      "source=mock",
+      `confidence=${validatedMock.data.confidence}`,
+      `validation=${validatedMock.issues.join("|") || "ok"}`
+    );
+    return res.json({
+      success: true,
+      data: validatedMock.data,
+      meta: {
+        request_id: requestId,
+        source: "mock",
+      },
+    });
+  }
+
+  if (!OPENAI_API_KEY) {
+    console.log(
+      "[FlightIntentParse]",
+      `requestId=${requestId}`,
+      "source=openai",
+      "status=unavailable"
+    );
+    return res.status(503).json({
+      success: false,
+      error: "flight_parse_unavailable",
+      request_id: requestId,
+    });
+  }
+
+  try {
+    const aiParsed = await parseFlightIntentWithOpenAI({
+      payload,
+      apiKey: OPENAI_API_KEY,
+      requestId,
+    });
+    const validated = validateFlightIntentResult(aiParsed, payload);
+    console.log(
+      "[FlightIntentParse]",
+      `requestId=${requestId}`,
+      `source=openai model=${FLIGHT_PARSE_MODEL}`,
+      `confidence=${validated.data.confidence}`,
+      `validation=${validated.issues.join("|") || "ok"}`
+    );
+    return res.json({
+      success: true,
+      data: validated.data,
+      meta: {
+        request_id: requestId,
+        source: "openai",
+        model: FLIGHT_PARSE_MODEL,
+      },
+    });
+  } catch (error) {
+    console.log(
+      "[FlightIntentParse]",
+      `requestId=${requestId}`,
+      "source=openai",
+      `status=error message=${String(error?.message || "unknown").slice(0, 220)}`
+    );
+    return res.status(502).json({
+      success: false,
+      error: "flight_parse_failed",
+      request_id: requestId,
+    });
   }
 });
 
