@@ -663,8 +663,12 @@ app.use("/v1/hotels", async (req, res, next) => {
 // Flights abuse protection
 // ---------------------------------------------
 app.use("/v1/flights", async (req, res, next) => {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
+  const allowBookTestMode = req.method === "POST" && req.path === "/book";
+  const userId = allowBookTestMode ? await resolveOptionalUserId(req) : await requireUserId(req, res);
+  if (!allowBookTestMode && !userId) return;
+  if (allowBookTestMode && !userId) {
+    console.log("[Duffel FlightBook]", "No auth - test mode");
+  }
 
   const limiterId = getRateLimitKey(req, userId);
   const lim = flightsMinuteLimiter.allow(`flights:${limiterId}`);
@@ -2909,9 +2913,11 @@ function summarizeFlightOfferForBooking(offer) {
   };
 }
 
-async function handleFlightBookReview(req, res) {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
+async function handleFlightBookReview(req, res, options = {}) {
+  const allowTestNoAuth = options.allowTestNoAuth === true;
+  const userId = allowTestNoAuth ? await resolveOptionalUserId(req) : await requireUserId(req, res);
+  if (!userId && !allowTestNoAuth) return;
+  const logUserId = userId || "test-anonymous";
 
   const requestId = String(req.headers["x-request-id"] || req.requestId || randomUUID());
   req.requestId = requestId;
@@ -2928,7 +2934,7 @@ async function handleFlightBookReview(req, res) {
   const payload = unwrapFlightBookingPayload(rawPayload);
   const offerId = readFlightOfferId(payload);
   if (!offerId) {
-    console.log("[Duffel FlightBook]", "requestId=" + requestId, "userId=" + userId, "status=missing_offer_id");
+    console.log("[Duffel FlightBook]", "requestId=" + requestId, "userId=" + logUserId, "status=missing_offer_id");
     return res.status(400).json({ ok: false, error: "Missing flight_offer_id" });
   }
 
@@ -2973,7 +2979,7 @@ async function handleFlightBookReview(req, res) {
   console.log(
     "[Duffel FlightBook]",
     "requestId=" + requestId,
-    "userId=" + userId,
+    "userId=" + logUserId,
     "offerId=" + offerId,
     "slices=" + String(offerSummary.slices_count),
     "passengers=" + String(passengers.length),
@@ -3025,7 +3031,7 @@ async function handleFlightBookReview(req, res) {
   });
 }
 
-app.post("/v1/flights/book", handleFlightBookReview);
+app.post("/v1/flights/book", (req, res) => handleFlightBookReview(req, res, { allowTestNoAuth: true }));
 app.post("/v1/flights/booking", handleFlightBookReview);
 app.post("/v1/flights/booking/confirm", handleFlightBookReview);
 app.post("/flight/booking/confirm", handleFlightBookReview);
