@@ -2805,6 +2805,246 @@ app.post("/v1/flights/search", async (req, res) => {
   return res.status(result.status).json(result.body);
 });
 
+function unwrapFlightBookingPayload(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== "object") return {};
+  if (rawPayload.data && typeof rawPayload.data === "object") return rawPayload.data;
+  if (rawPayload.booking && typeof rawPayload.booking === "object") return rawPayload.booking;
+  return rawPayload;
+}
+
+function readFlightOfferId(payload) {
+  return String(
+    payload?.flight_offer_id ||
+      payload?.flightOfferId ||
+      payload?.offer_id ||
+      payload?.offerId ||
+      ""
+  ).trim();
+}
+
+function normalizeFlightBookingPassengers(payload) {
+  const raw =
+    payload?.passengers ||
+    payload?.travelers ||
+    payload?.travellers ||
+    payload?.passenger ||
+    payload?.traveler ||
+    payload?.traveller;
+  if (Array.isArray(raw)) return raw.filter((item) => item && typeof item === "object");
+  if (raw && typeof raw === "object") return [raw];
+  return [];
+}
+
+function normalizeFlightBookingPayments(payload) {
+  const raw = payload?.payments || payload?.payment;
+  if (Array.isArray(raw)) return raw.filter((item) => item && typeof item === "object");
+  if (raw && typeof raw === "object") return [raw];
+  return [];
+}
+
+function missingPassengerFields(passenger) {
+  const required = [
+    ["given_name", "first_name", "firstName"],
+    ["family_name", "last_name", "lastName"],
+    ["born_on", "date_of_birth", "dateOfBirth", "dob"],
+    ["email"],
+    ["phone_number", "phone", "phoneNumber"],
+  ];
+  return required
+    .filter((aliases) => !aliases.some((key) => String(passenger?.[key] || "").trim()))
+    .map((aliases) => aliases[0]);
+}
+
+function passengerValidationSummary(passengers) {
+  return passengers.map((passenger, index) => ({
+    index,
+    missing_fields: missingPassengerFields(passenger),
+  }));
+}
+
+function paymentValidationSummary(payments) {
+  return payments.map((payment, index) => {
+    const missing = [];
+    if (!String(payment?.type || "").trim()) missing.push("type");
+    if (!String(payment?.amount || "").trim()) missing.push("amount");
+    if (!String(payment?.currency || "").trim()) missing.push("currency");
+    return { index, missing_fields: missing };
+  });
+}
+
+async function fetchDuffelFlightOffer(offerId, timeoutMs = 15000) {
+  const url = new URL(`https://api.duffel.com/air/offers/${encodeURIComponent(offerId)}`);
+  const r = await fetchWithTimeout(
+    url.toString(),
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "Accept-Encoding": "gzip",
+        Authorization: `Bearer ${DUFFEL_FLIGHTS_TOKEN}`,
+        "Duffel-Version": DUFFEL_API_VERSION,
+      },
+    },
+    timeoutMs
+  );
+  const json = await r.json().catch(() => null);
+  return { response: r, json };
+}
+
+function summarizeFlightOfferForBooking(offer) {
+  const paymentRequirements = offer?.payment_requirements || {};
+  const slices = Array.isArray(offer?.slices) ? offer.slices : [];
+  const offerPassengers = Array.isArray(offer?.passengers) ? offer.passengers : [];
+  return {
+    id: offer?.id || null,
+    total_amount: offer?.total_amount || null,
+    total_currency: offer?.total_currency || null,
+    slices_count: slices.length,
+    offer_passengers_count: offerPassengers.length,
+    payment_requirements: {
+      requires_instant_payment: paymentRequirements.requires_instant_payment ?? null,
+      payment_required_by: paymentRequirements.payment_required_by || null,
+      price_guarantee_expires_at: paymentRequirements.price_guarantee_expires_at || null,
+    },
+  };
+}
+
+async function handleFlightBookReview(req, res) {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+
+  const requestId = String(req.headers["x-request-id"] || req.requestId || randomUUID());
+  req.requestId = requestId;
+
+  if (!DUFFEL_FLIGHTS_TOKEN) {
+    return res.status(500).json({ ok: false, error: "DUFFEL_FLIGHTS_KEY not set" });
+  }
+
+  if (!req.body || typeof req.body !== "object") {
+    return res.status(400).json({ ok: false, error: "Invalid JSON body" });
+  }
+
+  const rawPayload = req.body || {};
+  const payload = unwrapFlightBookingPayload(rawPayload);
+  const offerId = readFlightOfferId(payload);
+  if (!offerId) {
+    console.log("[Duffel FlightBook]", "requestId=" + requestId, "userId=" + userId, "status=missing_offer_id");
+    return res.status(400).json({ ok: false, error: "Missing flight_offer_id" });
+  }
+
+  const passengers = normalizeFlightBookingPassengers(payload);
+  const payments = normalizeFlightBookingPayments(payload);
+  const passengerValidation = passengerValidationSummary(passengers);
+  const paymentValidation = paymentValidationSummary(payments);
+  const orderType = String(payload?.type || payload?.order_type || payload?.orderType || "").trim().toLowerCase();
+
+  let offerResult;
+  try {
+    offerResult = await fetchDuffelFlightOffer(offerId);
+  } catch (e) {
+    console.log("[Duffel FlightBook]", "requestId=" + requestId, "offerId=" + offerId, "status=offer_fetch_failed");
+    return res.status(502).json({ ok: false, error: "Duffel offer request failed" });
+  }
+
+  const { response: offerResponse, json: offerJson } = offerResult;
+  if (!offerJson) {
+    console.log("[Duffel FlightBook]", "requestId=" + requestId, "offerId=" + offerId, "status=offer_response_invalid");
+    return res.status(502).json({ ok: false, error: "Duffel offer response invalid" });
+  }
+  if (!offerResponse.ok) {
+    console.log("[Duffel FlightBook]", "requestId=" + requestId, "offerId=" + offerId, "status=" + String(offerResponse.status));
+    return res.status(offerResponse.status).json(offerJson);
+  }
+
+  const offer = offerJson?.data;
+  const offerSummary = summarizeFlightOfferForBooking(offer);
+  const expectedPassengerCount = offerSummary.offer_passengers_count || null;
+  const passengerCountMatches = expectedPassengerCount == null || passengers.length === expectedPassengerCount;
+  const passengersComplete =
+    passengers.length > 0 &&
+    passengerCountMatches &&
+    passengerValidation.every((item) => item.missing_fields.length === 0);
+  const requiresInstantPayment = offerSummary.payment_requirements.requires_instant_payment === true;
+  const holdPossible = offerSummary.payment_requirements.requires_instant_payment === false;
+  const paymentsComplete =
+    payments.length > 0 &&
+    paymentValidation.every((item) => item.missing_fields.length === 0);
+
+  console.log(
+    "[Duffel FlightBook]",
+    "requestId=" + requestId,
+    "userId=" + userId,
+    "offerId=" + offerId,
+    "slices=" + String(offerSummary.slices_count),
+    "passengers=" + String(passengers.length),
+    "payments=" + String(payments.length),
+    "requiresInstantPayment=" + String(requiresInstantPayment),
+    "holdPossible=" + String(holdPossible),
+    "orderCreated=false"
+  );
+
+  const required = {
+    selected_offers: ["flight_offer_id"],
+    passenger_fields: ["given_name", "family_name", "born_on", "email", "phone_number"],
+    passenger_count: expectedPassengerCount,
+    payment_fields: requiresInstantPayment
+      ? ["payments[].type", "payments[].amount", "payments[].currency"]
+      : [],
+    hold_possible: holdPossible,
+    hold_requires: holdPossible ? ["order_type=hold", "complete passenger details"] : [],
+    notes: [
+      "Round-trip and one-way booking both use one Duffel offer id in selected_offers.",
+      "This review-first route does not create Duffel orders or fake payment/passenger data.",
+    ],
+  };
+
+  return res.status(428).json({
+    ok: false,
+    code: "passenger_payment_required",
+    error: "Flight offer verified. Passenger and payment or hold details are required before booking.",
+    order_created: false,
+    flight_offer_id: offerId,
+    offer: offerSummary,
+    received: {
+      order_type: orderType || null,
+      passengers_count: passengers.length,
+      payments_count: payments.length,
+      passenger_count_matches: passengerCountMatches,
+      passengers_complete: passengersComplete,
+      payments_complete: paymentsComplete,
+    },
+    missing: {
+      passenger_count: passengerCountMatches ? null : expectedPassengerCount,
+      passengers: passengerValidation.filter((item) => item.missing_fields.length > 0),
+      payments: requiresInstantPayment
+        ? paymentValidation.filter((item) => item.missing_fields.length > 0)
+        : [],
+      payment: requiresInstantPayment && payments.length === 0 ? ["payments"] : [],
+    },
+    required,
+  });
+}
+
+app.post("/v1/flights/book", handleFlightBookReview);
+app.post("/v1/flights/booking", handleFlightBookReview);
+app.post("/v1/flights/booking/confirm", handleFlightBookReview);
+app.post("/flight/booking/confirm", handleFlightBookReview);
+
+function handleFlightBookReviewFallback(req, res) {
+  const rawPayload = req.body || {};
+  const payload = unwrapFlightBookingPayload(rawPayload);
+  const type = String(rawPayload?.type || rawPayload?.bookingType || payload?.type || "").trim().toLowerCase();
+  if (type !== "flight" && !readFlightOfferId(payload)) {
+    return res.status(404).json({ ok: false, error: "Endpoint not found" });
+  }
+  return handleFlightBookReview(req, res);
+}
+
+app.post("/v1/bookings/create", handleFlightBookReviewFallback);
+app.post("/v1/bookings", handleFlightBookReviewFallback);
+app.post("/v1/checkout/book", handleFlightBookReviewFallback);
+app.post("/v1/checkout/confirm", handleFlightBookReviewFallback);
+
 // ---------------------------------------------
 // Seat Maps (Duffel proxy)
 // GET /v1/flights/seat_maps?offer_id=off_xxxxx
