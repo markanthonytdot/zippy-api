@@ -400,7 +400,6 @@ const AUTH_MODE = String(process.env.AUTH_MODE || "dev").toLowerCase();
 const JWT_SECRET = process.env.JWT_SECRET || "";
 const JWT_ISSUER = process.env.JWT_ISSUER || "zippy-api";
 const JWT_AUDIENCE = process.env.JWT_AUDIENCE || "zippy-ios";
-const DEV_AUTH_SECRET = String(process.env.DEV_AUTH_SECRET || "").trim();
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
 const APPLE_AUDIENCE = "com.heyzippi.zippi";
@@ -410,6 +409,10 @@ const GOOGLE_AUDIENCES = String(process.env.GOOGLE_CLIENT_IDS || process.env.GOO
   .split(",")
   .map((value) => String(value || "").trim())
   .filter(Boolean);
+
+function isProductionAuthRuntime() {
+  return AUTH_MODE === "prod" || String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+}
 
 function maskTraceValue(value) {
   const raw = String(value || "").trim();
@@ -484,10 +487,11 @@ async function hydrateUserIdFromAuth(req) {
         return;
       }
     } catch (_) {
-      // ignore auth errors here; real auth happens in requireUserId
+      // ignore auth errors here; protected routes re-verify with requireVerifiedUser
     }
   }
 
+  // Anonymous device id is only a telemetry/rate-limit hint. It is not auth.
   const fallbackUserId = String(req.headers["x-user-id"] || "").trim();
   if (fallbackUserId) {
     req.userId = fallbackUserId;
@@ -506,10 +510,15 @@ function rateLimitMiddleware(limiter, label) {
   };
 }
 
-function requireDevAuthSecret(req, res) {
-  const provided = String(req.headers["x-dev-auth"] || "").trim();
-  if (!DEV_AUTH_SECRET || !provided || provided !== DEV_AUTH_SECRET) {
-    res.status(401).json({ ok: false, error: "Invalid dev auth secret" });
+function requireAdminInitSecret(req, res) {
+  const expected = String(process.env.ADMIN_INIT_SECRET || "").trim();
+  const provided = String(req.headers["x-admin-secret"] || "").trim();
+  if (!expected) {
+    res.status(403).json({ ok: false, error: "Admin init disabled" });
+    return false;
+  }
+  if (!provided || provided !== expected) {
+    res.status(401).json({ ok: false, error: "Invalid admin secret" });
     return false;
   }
   return true;
@@ -664,12 +673,8 @@ app.use("/v1/hotels", async (req, res, next) => {
 // Flights abuse protection
 // ---------------------------------------------
 app.use("/v1/flights", async (req, res, next) => {
-  const allowBookTestMode = req.method === "POST" && req.path === "/book";
-  const userId = allowBookTestMode ? await resolveOptionalUserId(req) : await requireUserId(req, res);
-  if (!allowBookTestMode && !userId) return;
-  if (allowBookTestMode && !userId) {
-    console.log("[Duffel FlightBook]", "No auth - test mode");
-  }
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
 
   const limiterId = getRateLimitKey(req, userId);
   const lim = flightsMinuteLimiter.allow(`flights:${limiterId}`);
@@ -2914,11 +2919,10 @@ function summarizeFlightOfferForBooking(offer) {
   };
 }
 
-async function handleFlightBookReview(req, res, options = {}) {
-  const allowTestNoAuth = options.allowTestNoAuth === true;
-  const userId = allowTestNoAuth ? await resolveOptionalUserId(req) : await requireUserId(req, res);
-  if (!userId && !allowTestNoAuth) return;
-  const logUserId = userId || "test-anonymous";
+async function handleFlightBookReview(req, res) {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  const logUserId = userId;
 
   const requestId = String(req.headers["x-request-id"] || req.requestId || randomUUID());
   req.requestId = requestId;
@@ -3032,7 +3036,7 @@ async function handleFlightBookReview(req, res, options = {}) {
   });
 }
 
-app.post("/v1/flights/book", (req, res) => handleFlightBookReview(req, res, { allowTestNoAuth: true }));
+app.post("/v1/flights/book", handleFlightBookReview);
 app.post("/v1/flights/booking", handleFlightBookReview);
 app.post("/v1/flights/booking/confirm", handleFlightBookReview);
 app.post("/flight/booking/confirm", handleFlightBookReview);
@@ -3485,6 +3489,7 @@ app.post("/v1/places/eta", async (req, res) => {
 // One-time DB init
 // ---------------------------------------------
 app.post("/admin/init", async (req, res) => {
+  if (!requireAdminInitSecret(req, res)) return;
   if (!dbPool) {
     return res.status(500).json({ ok: false, error: "DATABASE_URL not set" });
   }
@@ -4852,54 +4857,57 @@ async function fetchAmadeusToken(requestId) {
   return { ok: true, token };
 }
 
-async function requireUserId(req, res) {
-  // 1) prefer JWT
+async function verifyBearerUserId(req) {
   const auth = String(req.headers.authorization || "");
   const m = auth.match(/^Bearer\s+(.+)$/i);
-
-  if (m && !JWT_SECRET) {
-    res.status(500).json({ ok: false, error: "JWT_SECRET not set" });
-    return null;
-  }
-
   if (req.userId && req.userIdVerified) {
     return req.userId;
   }
-
-  if (m) {
-    const token = m[1].trim();
-    try {
-      const { jwtVerify } = await getJose();
-      const encoder = new TextEncoder();
-
-      const { payload } = await jwtVerify(token, encoder.encode(JWT_SECRET), {
-        issuer: JWT_ISSUER,
-        audience: JWT_AUDIENCE,
-      });
-
-      const sub = String(payload?.sub || "").trim();
-      if (sub) {
-        req.userId = sub;
-        req.userIdVerified = true;
-        return sub;
-      }
-
-      res.status(401).json({ ok: false, error: "JWT missing sub" });
-      return null;
-    } catch (e) {
-      console.log("[Auth] jwt verify failed:", e?.message || e);
-    }
-  }
-
-  // 2) fallback: x-user-id
-  const userId = String(req.userId || req.headers["x-user-id"] || "").trim();
-  if (!userId) {
-    res.status(401).json({ ok: false, error: "Missing auth" });
+  if (!m) {
     return null;
   }
-  req.userId = userId;
-  req.userIdVerified = false;
-  return userId;
+  if (!JWT_SECRET) {
+    const err = new Error("JWT_SECRET not set");
+    err.statusCode = 500;
+    throw err;
+  }
+  const token = m[1].trim();
+  const { jwtVerify } = await getJose();
+  const encoder = new TextEncoder();
+  const { payload } = await jwtVerify(token, encoder.encode(JWT_SECRET), {
+    issuer: JWT_ISSUER,
+    audience: JWT_AUDIENCE,
+  });
+
+  const sub = String(payload?.sub || "").trim();
+  if (!sub) {
+    const err = new Error("JWT missing sub");
+    err.statusCode = 401;
+    throw err;
+  }
+
+  req.userId = sub;
+  req.userIdVerified = true;
+  return sub;
+}
+
+async function requireVerifiedUser(req, res) {
+  try {
+    const userId = await verifyBearerUserId(req);
+    if (userId) return userId;
+    res.status(401).json({ ok: false, error: "Missing verified auth" });
+    return null;
+  } catch (e) {
+    const status = e?.statusCode || 401;
+    const message = status >= 500 ? "Server misconfigured" : "Invalid auth";
+    console.log("[Auth] verified jwt failed:", e?.message || e);
+    res.status(status).json({ ok: false, error: message });
+    return null;
+  }
+}
+
+async function requireUserId(req, res) {
+  return requireVerifiedUser(req, res);
 }
 
 async function resolveOptionalUserId(req) {
@@ -4909,31 +4917,15 @@ async function resolveOptionalUserId(req) {
   }
 
   // 2) try bearer JWT if present; ignore failures for public routes
-  const auth = String(req.headers.authorization || "");
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (m && JWT_SECRET) {
-    const token = m[1].trim();
-    try {
-      const { jwtVerify } = await getJose();
-      const encoder = new TextEncoder();
-
-      const { payload } = await jwtVerify(token, encoder.encode(JWT_SECRET), {
-        issuer: JWT_ISSUER,
-        audience: JWT_AUDIENCE,
-      });
-
-      const sub = String(payload?.sub || "").trim();
-      if (sub) {
-        req.userId = sub;
-        req.userIdVerified = true;
-        return sub;
-      }
-    } catch (e) {
-      console.log("[Auth] optional jwt verify failed:", e?.message || e);
-    }
+  try {
+    const userId = await verifyBearerUserId(req);
+    if (userId) return userId;
+  } catch (e) {
+    console.log("[Auth] optional jwt verify failed:", e?.message || e);
   }
 
-  // 3) fallback: optional x-user-id
+  // 3) optional device id for anonymous telemetry/rate-limit hints only.
+  // This value must never be used as authentication or data ownership.
   const userId = String(req.userId || req.headers["x-user-id"] || "").trim();
   if (userId) {
     req.userId = userId;
@@ -4957,7 +4949,7 @@ function requireDb(req, res) {
 // Dev auth (dev mode only)
 // ---------------------------------------------
 app.post("/auth/dev", async (req, res) => {
-  if (AUTH_MODE === "prod" && process.env.ALLOW_DEV_AUTH !== "true") {
+  if (isProductionAuthRuntime()) {
     return res.status(403).json({ ok: false, error: "Dev auth disabled" });
   }
 
@@ -4987,7 +4979,7 @@ app.post("/auth/dev", async (req, res) => {
 // ---------------------------------------------
 app.post("/auth/apple", async (req, res) => {
   // DEV MODE
-  if (AUTH_MODE !== "prod") {
+  if (!isProductionAuthRuntime()) {
     const devSub = String(req.body?.devSub || "").trim();
     if (!devSub) {
       return res.status(400).json({ ok: false, error: "Missing devSub" });
@@ -5016,19 +5008,8 @@ app.post("/auth/apple", async (req, res) => {
   }
 
   const devSub = String(req.body?.devSub || "").trim();
-  if (devSub && process.env.ALLOW_DEV_AUTH === "true") {
-    if (devSub.length > 4000) {
-      return res.status(400).json({ ok: false, error: "Invalid devSub" });
-    }
-    if (!requireDevAuthSecret(req, res)) return;
-    try {
-      const token = await signZippyToken(devSub);
-      console.log("[Auth] dev token minted for sub=" + devSub + " route=/auth/apple");
-      return res.json({ ok: true, token, mode: "dev" });
-    } catch (e) {
-      console.warn("Failed to mint dev token:", e?.message || e);
-      return res.status(500).json({ ok: false, error: "Server misconfigured" });
-    }
+  if (devSub) {
+    return res.status(403).json({ ok: false, error: "Dev auth disabled" });
   }
 
   const identityToken = String(req.body?.identityToken || "").trim();
@@ -5096,7 +5077,7 @@ app.post("/auth/google", async (req, res) => {
     GOOGLE_AUDIENCES.map(maskTraceValue).join(",") || "(none)"
   );
 
-  if (AUTH_MODE !== "prod") {
+  if (!isProductionAuthRuntime()) {
     const devSub = String(req.body?.devSub || "").trim();
     if (!devSub) {
       return res.status(400).json({ ok: false, error: "Missing devSub" });
@@ -5134,19 +5115,8 @@ app.post("/auth/google", async (req, res) => {
   }
 
   const devSub = String(req.body?.devSub || "").trim();
-  if (devSub && process.env.ALLOW_DEV_AUTH === "true") {
-    if (devSub.length > 4000) {
-      return res.status(400).json({ ok: false, error: "Invalid devSub" });
-    }
-    if (!requireDevAuthSecret(req, res)) return;
-    try {
-      const token = await signZippyToken(devSub);
-      console.log("[Auth] dev token minted for sub=" + devSub + " route=/auth/google");
-      return res.json({ ok: true, token, mode: "dev" });
-    } catch (e) {
-      console.warn("Failed to mint dev token:", e?.message || e);
-      return res.status(500).json({ ok: false, error: "Server misconfigured" });
-    }
+  if (devSub) {
+    return res.status(403).json({ ok: false, error: "Dev auth disabled" });
   }
 
   const identityToken = String(req.body?.identityToken || req.body?.idToken || "").trim();
@@ -5212,7 +5182,7 @@ app.post("/auth/google", async (req, res) => {
 // List saved items
 // ---------------------------------------------
 app.get("/me/saved", async (req, res) => {
-  const userId = await requireUserId(req, res);
+  const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
@@ -5249,7 +5219,7 @@ app.get("/me/saved", async (req, res) => {
 // Save (upsert)
 // ---------------------------------------------
 app.post("/me/saved", async (req, res) => {
-  const userId = await requireUserId(req, res);
+  const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
@@ -5289,7 +5259,7 @@ app.post("/me/saved", async (req, res) => {
 // Delete (soft delete)
 // ---------------------------------------------
 app.delete("/me/saved/:kind/:externalId", async (req, res) => {
-  const userId = await requireUserId(req, res);
+  const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
@@ -5325,19 +5295,16 @@ app.delete("/me/saved/:kind/:externalId", async (req, res) => {
 // initiate account deletion in-app. Auth is stateless JWT, so this removes
 // server-side data owned by the account identities and lets the client sign out.
 app.delete("/me/account", async (req, res) => {
-  const userId = await requireUserId(req, res);
+  const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
-  const deviceUserId = String(req.headers["x-user-id"] || "").trim();
-  const userIds = Array.from(new Set([userId, deviceUserId].filter(Boolean)));
-
   try {
     const result = await dbPool.query(
-      `DELETE FROM saved_items WHERE user_id = ANY($1::text[])`,
-      [userIds]
+      `DELETE FROM saved_items WHERE user_id = $1`,
+      [userId]
     );
-    console.log(`[DELETE /me/account] userIds=${userIds.length} deletedSavedItems=${result.rowCount}`);
+    console.log(`[DELETE /me/account] verifiedUser=true deletedSavedItems=${result.rowCount}`);
     return res.json({ ok: true, deletedSavedItems: result.rowCount });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
@@ -5346,7 +5313,7 @@ app.delete("/me/account", async (req, res) => {
 
 // Hard-purge all saved items of a given kind for the authenticated user
 app.delete("/me/saved-purge/:kind", async (req, res) => {
-  const userId = await requireUserId(req, res);
+  const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
@@ -5366,7 +5333,7 @@ app.delete("/me/saved-purge/:kind", async (req, res) => {
 
 // Debug: list ALL saved items (including soft-deleted) for the authenticated user
 app.get("/me/saved-debug", async (req, res) => {
-  const userId = await requireUserId(req, res);
+  const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
@@ -5380,51 +5347,6 @@ app.get("/me/saved-debug", async (req, res) => {
       [userId]
     );
     return res.json({ ok: true, userId, count: rows.length, items: rows });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// ---------------------------------------------
-// Purge all saved items of a kind (hard delete, both identities)
-// ---------------------------------------------
-app.delete("/me/saved-purge/:kind", async (req, res) => {
-  // Get both possible user identities
-  const jwtUserId = (req.userIdVerified && req.userId) ? req.userId : null;
-  const deviceUserId = String(req.headers["x-user-id"] || "").trim() || null;
-
-  if (!jwtUserId && !deviceUserId) {
-    return res.status(401).json({ ok: false, error: "No identity provided" });
-  }
-  if (!requireDb(req, res)) return;
-
-  const kind = String(req.params.kind || "").trim();
-  if (!kind) return res.status(400).json({ ok: false, error: "kind required" });
-
-  try {
-    let totalDeleted = 0;
-
-    // Delete under JWT identity
-    if (jwtUserId) {
-      const r1 = await dbPool.query(
-        `DELETE FROM saved_items WHERE user_id = $1 AND kind = $2`,
-        [jwtUserId, kind]
-      );
-      totalDeleted += r1.rowCount;
-      console.log(`[PURGE] JWT user=${jwtUserId} kind=${kind} deleted=${r1.rowCount}`);
-    }
-
-    // Delete under device UUID identity (if different)
-    if (deviceUserId && deviceUserId !== jwtUserId) {
-      const r2 = await dbPool.query(
-        `DELETE FROM saved_items WHERE user_id = $1 AND kind = $2`,
-        [deviceUserId, kind]
-      );
-      totalDeleted += r2.rowCount;
-      console.log(`[PURGE] device user=${deviceUserId} kind=${kind} deleted=${r2.rowCount}`);
-    }
-
-    return res.json({ ok: true, deleted: totalDeleted });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
