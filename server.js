@@ -403,6 +403,12 @@ const JWT_AUDIENCE = process.env.JWT_AUDIENCE || "zippy-ios";
 const APPLE_ISSUER = "https://appleid.apple.com";
 const APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys";
 const APPLE_AUDIENCE = "com.heyzippi.zippi";
+const APPLE_TOKEN_URL = "https://appleid.apple.com/auth/token";
+const APPLE_REVOKE_URL = "https://appleid.apple.com/auth/revoke";
+const APPLE_TEAM_ID = String(process.env.APPLE_TEAM_ID || "").trim();
+const APPLE_KEY_ID = String(process.env.APPLE_KEY_ID || "").trim();
+const APPLE_PRIVATE_KEY = String(process.env.APPLE_PRIVATE_KEY || "").trim();
+const APPLE_CLIENT_ID = String(process.env.APPLE_CLIENT_ID || APPLE_AUDIENCE).trim();
 const GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"];
 const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_AUDIENCES = String(process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || "")
@@ -463,6 +469,158 @@ async function signZippyToken(subject) {
     .setIssuedAt()
     .setExpirationTime("30d")
     .sign(encoder.encode(JWT_SECRET));
+}
+
+function normalizedApplePrivateKey() {
+  return APPLE_PRIVATE_KEY.replace(/\\n/g, "\n").trim();
+}
+
+function hasAppleTokenConfig() {
+  return Boolean(APPLE_TEAM_ID && APPLE_KEY_ID && normalizedApplePrivateKey() && APPLE_CLIENT_ID);
+}
+
+async function signAppleClientSecret() {
+  if (!hasAppleTokenConfig()) return null;
+  const { SignJWT, importPKCS8 } = await getJose();
+  const privateKey = await importPKCS8(normalizedApplePrivateKey(), "ES256");
+
+  return new SignJWT({})
+    .setProtectedHeader({ alg: "ES256", kid: APPLE_KEY_ID })
+    .setIssuer(APPLE_TEAM_ID)
+    .setIssuedAt()
+    .setExpirationTime("180d")
+    .setAudience(APPLE_ISSUER)
+    .setSubject(APPLE_CLIENT_ID)
+    .sign(privateKey);
+}
+
+async function exchangeAppleAuthorizationCode(authorizationCode) {
+  const code = String(authorizationCode || "").trim();
+  if (!code) return null;
+  if (!hasAppleTokenConfig()) {
+    console.warn("[AppleAuth] token exchange skipped: missing APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY/APPLE_CLIENT_ID");
+    return null;
+  }
+
+  const clientSecret = await signAppleClientSecret();
+  if (!clientSecret) return null;
+
+  const body = new URLSearchParams();
+  body.set("client_id", APPLE_CLIENT_ID);
+  body.set("client_secret", clientSecret);
+  body.set("code", code);
+  body.set("grant_type", "authorization_code");
+
+  const response = await fetchWithTimeout(
+    APPLE_TOKEN_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    },
+    10_000
+  );
+
+  const text = await response.text();
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch (_) {
+    json = {};
+  }
+
+  if (!response.ok) {
+    const reason = String(json.error || response.status || "token_exchange_failed");
+    console.warn(`[AppleAuth] token exchange failed status=${response.status} error=${reason}`);
+    return null;
+  }
+
+  const refreshToken = String(json.refresh_token || "").trim();
+  if (!refreshToken) {
+    console.warn("[AppleAuth] token exchange returned no refresh_token");
+    return null;
+  }
+
+  return refreshToken;
+}
+
+async function storeAppleRefreshToken(userId, appleSub, refreshToken) {
+  const uid = String(userId || "").trim();
+  const sub = String(appleSub || "").trim();
+  const token = String(refreshToken || "").trim();
+  if (!uid || !sub || !token) return false;
+  if (!dbPool) {
+    console.warn("[AppleAuth] refresh token not stored: DATABASE_URL not set");
+    return false;
+  }
+
+  await ensureAppleAuthTokensTable();
+  await dbPool.query(
+    `
+    insert into apple_auth_tokens (user_id, apple_sub, refresh_token, updated_at)
+    values ($1, $2, $3, now())
+    on conflict (user_id)
+    do update set
+      apple_sub = excluded.apple_sub,
+      refresh_token = excluded.refresh_token,
+      updated_at = now()
+    `,
+    [uid, sub, token]
+  );
+  return true;
+}
+
+async function revokeAppleRefreshToken(refreshToken) {
+  const token = String(refreshToken || "").trim();
+  if (!token) return { attempted: false, ok: true, reason: "no_token" };
+  if (!hasAppleTokenConfig()) {
+    console.warn("[AppleAuth] revoke skipped: missing APPLE_TEAM_ID/APPLE_KEY_ID/APPLE_PRIVATE_KEY/APPLE_CLIENT_ID");
+    return { attempted: false, ok: true, reason: "missing_config" };
+  }
+
+  const clientSecret = await signAppleClientSecret();
+  if (!clientSecret) return { attempted: false, ok: true, reason: "missing_client_secret" };
+
+  const body = new URLSearchParams();
+  body.set("client_id", APPLE_CLIENT_ID);
+  body.set("client_secret", clientSecret);
+  body.set("token", token);
+  body.set("token_type_hint", "refresh_token");
+
+  try {
+    const response = await fetchWithTimeout(
+      APPLE_REVOKE_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      },
+      10_000
+    );
+    const text = await response.text();
+
+    if (response.ok) {
+      return { attempted: true, ok: true };
+    }
+
+    let error = "";
+    try {
+      error = String(JSON.parse(text || "{}").error || "");
+    } catch (_) {
+      error = "";
+    }
+
+    if (response.status === 400 && (error === "invalid_grant" || error === "invalid_request")) {
+      console.warn(`[AppleAuth] revoke treated as non-fatal status=${response.status} error=${error}`);
+      return { attempted: true, ok: true, reason: error || "already_invalid" };
+    }
+
+    console.warn(`[AppleAuth] revoke failed non-fatal status=${response.status} error=${error || "unknown"}`);
+    return { attempted: true, ok: false, reason: error || `http_${response.status}` };
+  } catch (e) {
+    console.warn("[AppleAuth] revoke failed non-fatal:", e?.message || e);
+    return { attempted: true, ok: false, reason: "request_failed" };
+  }
 }
 
 async function hydrateUserIdFromAuth(req) {
@@ -589,6 +747,7 @@ const dbPool = process.env.DATABASE_URL
   : null;
 
 let ensureHotelPhotoEnrichmentCacheTablePromise = null;
+let ensureAppleAuthTokensTablePromise = null;
 
 async function ensureHotelPhotoEnrichmentCacheTable() {
   if (!dbPool) return false;
@@ -614,6 +773,29 @@ async function ensureHotelPhotoEnrichmentCacheTable() {
     });
   }
   await ensureHotelPhotoEnrichmentCacheTablePromise;
+  return true;
+}
+
+async function ensureAppleAuthTokensTable() {
+  if (!dbPool) return false;
+  if (!ensureAppleAuthTokensTablePromise) {
+    ensureAppleAuthTokensTablePromise = dbPool.query(`
+      create table if not exists apple_auth_tokens (
+        user_id text primary key,
+        apple_sub text not null,
+        refresh_token text not null,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+      );
+
+      create index if not exists idx_apple_auth_tokens_apple_sub
+        on apple_auth_tokens(apple_sub);
+    `).catch((err) => {
+      ensureAppleAuthTokensTablePromise = null;
+      throw err;
+    });
+  }
+  await ensureAppleAuthTokensTablePromise;
   return true;
 }
 
@@ -3517,6 +3699,17 @@ app.post("/admin/init", async (req, res) => {
 
       create unique index if not exists uq_saved_items_user_kind_ext
         on saved_items(user_id, kind, external_id);
+
+      create table if not exists apple_auth_tokens (
+        user_id text primary key,
+        apple_sub text not null,
+        refresh_token text not null,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+      );
+
+      create index if not exists idx_apple_auth_tokens_apple_sub
+        on apple_auth_tokens(apple_sub);
     `);
 
     return res.json({ ok: true });
@@ -5019,6 +5212,10 @@ app.post("/auth/apple", async (req, res) => {
   if (identityToken.length > 4000) {
     return res.status(400).json({ ok: false, error: "Invalid identityToken" });
   }
+  const authorizationCode = String(req.body?.authorizationCode || "").trim();
+  if (authorizationCode.length > 4000) {
+    return res.status(400).json({ ok: false, error: "Invalid authorizationCode" });
+  }
 
   const rawNonce = req.body?.nonce;
   let nonce = "";
@@ -5055,6 +5252,17 @@ app.post("/auth/apple", async (req, res) => {
     const token = await signZippyToken(appleSub);
     if (!token) {
       return res.status(500).json({ ok: false, error: "Server misconfigured" });
+    }
+
+    if (authorizationCode) {
+      try {
+        const refreshToken = await exchangeAppleAuthorizationCode(authorizationCode);
+        if (refreshToken) {
+          await storeAppleRefreshToken(appleSub, appleSub, refreshToken);
+        }
+      } catch (e) {
+        console.warn("[AppleAuth] refresh token storage skipped:", e?.message || e);
+      }
     }
 
     return res.json({ ok: true, token, user: { sub: appleSub } });
@@ -5300,12 +5508,50 @@ app.delete("/me/account", async (req, res) => {
   if (!requireDb(req, res)) return;
 
   try {
-    const result = await dbPool.query(
+    let appleTokenTableReady = false;
+    let appleRefreshToken = "";
+    try {
+      await ensureAppleAuthTokensTable();
+      appleTokenTableReady = true;
+      const tokenResult = await dbPool.query(
+        `SELECT refresh_token FROM apple_auth_tokens WHERE user_id = $1`,
+        [userId]
+      );
+      appleRefreshToken = String(tokenResult.rows?.[0]?.refresh_token || "").trim();
+    } catch (e) {
+      console.warn("[DELETE /me/account] apple token lookup skipped:", e?.message || e);
+    }
+
+    const appleRevoke = appleRefreshToken
+      ? await revokeAppleRefreshToken(appleRefreshToken)
+      : { attempted: false, ok: true, reason: "no_token" };
+
+    const savedResult = await dbPool.query(
       `DELETE FROM saved_items WHERE user_id = $1`,
       [userId]
     );
-    console.log(`[DELETE /me/account] verifiedUser=true deletedSavedItems=${result.rowCount}`);
-    return res.json({ ok: true, deletedSavedItems: result.rowCount });
+    let appleTokenRows = 0;
+    if (appleTokenTableReady) {
+      try {
+        const appleTokenDelete = await dbPool.query(
+          `DELETE FROM apple_auth_tokens WHERE user_id = $1`,
+          [userId]
+        );
+        appleTokenRows = appleTokenDelete.rowCount;
+      } catch (e) {
+        console.warn("[DELETE /me/account] apple token row delete skipped:", e?.message || e);
+      }
+    }
+
+    console.log(
+      `[DELETE /me/account] verifiedUser=true deletedSavedItems=${savedResult.rowCount} ` +
+      `appleRevokeAttempted=${Boolean(appleRevoke.attempted)} appleTokenRows=${appleTokenRows}`
+    );
+    return res.json({
+      ok: true,
+      deletedSavedItems: savedResult.rowCount,
+      appleRevokeAttempted: Boolean(appleRevoke.attempted),
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
