@@ -855,8 +855,9 @@ app.use("/v1/hotels", async (req, res, next) => {
 // Flights abuse protection
 // ---------------------------------------------
 app.use("/v1/flights", async (req, res, next) => {
-  const userId = await requireVerifiedUser(req, res);
-  if (!userId) return;
+  const allowAnonymous = req.path === "/search";
+  const userId = allowAnonymous ? await resolveOptionalUserId(req) : await requireVerifiedUser(req, res);
+  if (!allowAnonymous && !userId) return;
 
   const limiterId = getRateLimitKey(req, userId);
   const lim = flightsMinuteLimiter.allow(`flights:${limiterId}`);
@@ -867,7 +868,7 @@ app.use("/v1/flights", async (req, res, next) => {
 
   console.log(
     "[Flights LIMIT]",
-    "userId=" + userId,
+    "userId=" + String(userId || "anonymous"),
     "path=" + req.path,
     "hour=" + q.hourCount + "/" + q.hourlyLimit,
     "day=" + q.dayCount + "/" + q.dailyLimit
@@ -2715,8 +2716,7 @@ app.post("/v1/responses", async (req, res) => {
 // POST /v1/flights/search
 // ---------------------------------------------
 app.post("/v1/flights/search", async (req, res) => {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
+  const userId = String(req.userId || "anonymous");
 
   const requestStartMs = Date.now();
   const requestId = String(req.headers["x-request-id"] || req.requestId || randomUUID());
