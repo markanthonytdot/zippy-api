@@ -539,6 +539,7 @@ app.use("/auth/apple", rateLimitMiddleware(authAppleLimiter, "authApple"));
 app.use("/auth/google", rateLimitMiddleware(authAppleLimiter, "authGoogle"));
 app.use("/auth/dev", rateLimitMiddleware(authAppleLimiter, "authDev"));
 app.use("/me/saved", rateLimitMiddleware(meSavedLimiter, "meSaved"));
+app.use("/me/account", rateLimitMiddleware(meSavedLimiter, "meAccount"));
 app.use("/admin/init", rateLimitMiddleware(adminInitLimiter, "adminInit"));
 
 // ---------------------------------------------
@@ -5315,6 +5316,29 @@ app.delete("/me/saved/:kind/:externalId", async (req, res) => {
       return res.status(404).json({ ok: false, error: "Item not found" });
     }
     return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Apple App Review Guideline 5.1.1(v): authenticated users must be able to
+// initiate account deletion in-app. Auth is stateless JWT, so this removes
+// server-side data owned by the account identities and lets the client sign out.
+app.delete("/me/account", async (req, res) => {
+  const userId = await requireUserId(req, res);
+  if (!userId) return;
+  if (!requireDb(req, res)) return;
+
+  const deviceUserId = String(req.headers["x-user-id"] || "").trim();
+  const userIds = Array.from(new Set([userId, deviceUserId].filter(Boolean)));
+
+  try {
+    const result = await dbPool.query(
+      `DELETE FROM saved_items WHERE user_id = ANY($1::text[])`,
+      [userIds]
+    );
+    console.log(`[DELETE /me/account] userIds=${userIds.length} deletedSavedItems=${result.rowCount}`);
+    return res.json({ ok: true, deletedSavedItems: result.rowCount });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
