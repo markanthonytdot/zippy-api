@@ -7,6 +7,7 @@ const { Translate } = require("@google-cloud/translate").v2;
 const { FLIGHT_PARSE_MODEL, mockedFlightIntentParse, parseFlightIntentWithOpenAI } = require("./lib/flightIntentParse");
 const { validateFlightIntentRequest, validateFlightIntentResult } = require("./lib/flightIntentValidate");
 const { createFlightBookingService, endpointError, normalizeAvailableServices } = require("./lib/flightBooking");
+const { buildFlightSearchContract } = require("./lib/flightSearchContract");
 const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
 const app = express();
@@ -3011,6 +3012,12 @@ app.post("/v1/flights/search", async (req, res) => {
       }
     } else if (data && typeof data === "object") {
       data.offers = fetchedOffers;
+    }
+
+    // Add the Zippi-owned client contract without changing the provider-shaped
+    // `data.offers` response consumed by existing iOS releases.
+    if (data && typeof data === "object") {
+      data.zippiFlightSearch = buildFlightSearchContract(fetchedOffers, requestData.currency);
     }
 
     const offersForCache = offerRequestWasWrapped ? json?.data?.offer_request?.offers : json?.data?.offers;
