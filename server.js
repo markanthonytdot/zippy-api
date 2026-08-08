@@ -10,6 +10,7 @@ const { createFlightBookingService, endpointError, normalizeAvailableServices } 
 const { buildFlightSearchContract } = require("./lib/flightSearchContract");
 const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
+const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
 const app = express();
 
 const translateClient = (() => {
@@ -30,6 +31,12 @@ app.use(helmet());
 app.use("/v1/flights/search", createStrictCorsMiddleware({
   allowedOrigins: process.env.FLIGHT_SEARCH_CORS_ORIGINS,
 }));
+let handleStripeWebhook = (_req, res) => res.status(503).json({ ok: false, error: "Stripe webhook is not configured" });
+app.post(
+  "/v1/webhooks/stripe",
+  express.raw({ type: "application/json", limit: "256kb" }),
+  (req, res) => handleStripeWebhook(req, res)
+);
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 // ---------------------------------------------
@@ -406,6 +413,7 @@ console.log(
 );
 const DUFFEL_API_VERSION = String(process.env.DUFFEL_API_VERSION || "v2").trim() || "v2";
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
+const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
 const stripe = STRIPE_SECRET_KEY.startsWith("sk_test_") ? new Stripe(STRIPE_SECRET_KEY) : null;
 const FLIGHT_ZIPPI_FEE_MINOR = getEnvInt("FLIGHT_ZIPPI_FEE_MINOR", 299);
 const FLIGHT_DUFFEL_ORDER_TIMEOUT_MS = getEnvInt("FLIGHT_DUFFEL_ORDER_TIMEOUT_MS", 130000);
@@ -784,6 +792,11 @@ const flightBookingService = createFlightBookingService({
   enabled: FLIGHT_TEST_BOOKING_ENABLED,
   zippiFeeMinor: FLIGHT_ZIPPI_FEE_MINOR,
   orderTimeoutMs: FLIGHT_DUFFEL_ORDER_TIMEOUT_MS,
+});
+handleStripeWebhook = createStripeWebhookHandler({
+  stripe,
+  webhookSecret: STRIPE_WEBHOOK_SECRET,
+  dbPool,
 });
 
 let ensureHotelPhotoEnrichmentCacheTablePromise = null;

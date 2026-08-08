@@ -269,12 +269,25 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
       const row = sessions.get(params[0]);
       return { rows: row && row.user_id === params[1] ? [row] : [] };
     }
+    if (normalized === "select * from flight_booking_sessions where id = $1") {
+      const row = sessions.get(params[0]);
+      return { rows: row ? [row] : [] };
+    }
     if (normalized.includes("set booking_status = 'booking_in_progress'")) {
       const row = sessions.get(params[0]);
       if (!["awaiting_payment", "payment_paid"].includes(row.booking_status)) return { rows: [] };
-      row.booking_status = "booking_in_progress";
-      row.updated_at = new Date().toISOString();
-      return { rows: [row] };
+      Object.assign(row, {
+        booking_status: "booking_in_progress",
+        booking_claim_token: params[2],
+        booking_claim_expires_at: new Date(Date.now() + Number(params[3])).toISOString(),
+        recovery_status: null,
+        failure_code: null,
+        failure_message: null,
+        updated_at: new Date().toISOString(),
+      });
+      // PostgreSQL returns a detached row snapshot; keep the claimed token stable
+      // even if another writer replaces the durable token later.
+      return { rows: [{ ...row }] };
     }
     if (normalized.includes("set booking_status = 'payment_canceled'")) {
       const row = sessions.get(params[0]);
@@ -284,25 +297,34 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
     }
     if (normalized.includes("set duffel_post_started_at = now()")) {
       const row = sessions.get(params[0]);
-      if (!row || row.user_id !== params[1] || row.booking_status !== "booking_in_progress" || row.duffel_post_started_at) return { rows: [] };
+      if (!row || row.user_id !== params[1] || row.booking_claim_token !== params[2]
+          || row.booking_status !== "booking_in_progress" || row.duffel_post_started_at) return { rows: [] };
       row.duffel_post_started_at = new Date().toISOString();
       return { rows: [row] };
     }
-    if (normalized.includes("set booking_status = 'awaiting_payment', recovery_status = 'safe_retry_ready'")) {
+    if (normalized.includes("set booking_status = 'payment_paid', recovery_status = 'safe_retry_ready'")) {
       const row = sessions.get(params[0]);
-      if (!row || row.user_id !== params[1] || row.booking_status !== "booking_in_progress" || row.duffel_post_started_at) return { rows: [] };
-      Object.assign(row, { booking_status: "awaiting_payment", recovery_status: "safe_retry_ready" });
+      const stale = row && Date.now() - Date.parse(row.updated_at) > Number(params[1]);
+      if (!row || !stale || row.booking_status !== "booking_in_progress" || row.duffel_post_started_at) return { rows: [] };
+      Object.assign(row, {
+        booking_status: "payment_paid", recovery_status: "safe_retry_ready",
+        booking_claim_token: null, booking_claim_expires_at: null,
+      });
       return { rows: [row] };
     }
     if (normalized.includes("set booking_status = 'booking_unknown', recovery_status = 'manual_reconciliation_required'")) {
       const row = sessions.get(params[0]);
-      if (!row || row.user_id !== params[1] || row.booking_status !== "booking_in_progress" || !row.duffel_post_started_at) return { rows: [] };
-      Object.assign(row, { booking_status: "booking_unknown", recovery_status: "manual_reconciliation_required" });
+      const stale = row && Date.now() - Date.parse(row.updated_at) > Number(params[1]);
+      if (!row || !stale || row.booking_status !== "booking_in_progress" || !row.duffel_post_started_at) return { rows: [] };
+      Object.assign(row, {
+        booking_status: "booking_unknown", recovery_status: "manual_reconciliation_required",
+        booking_claim_token: null, booking_claim_expires_at: null,
+      });
       return { rows: [row] };
     }
     if (normalized.includes("recovery_status = 'refund_started'")) {
       const row = sessions.get(params[0]);
-      if (!row || row.booking_status !== "booking_in_progress") return { rows: [] };
+      if (!row || row.booking_status !== "booking_in_progress" || row.booking_claim_token !== params[4]) return { rows: [] };
       Object.assign(row, {
         booking_status: "booking_failed_refund_pending",
         failure_code: params[1],
@@ -322,30 +344,48 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
       Object.assign(row, { stripe_payment_status: params[2], booking_status: params[3] });
       return { rows: [row] };
     }
+    if (normalized.startsWith("update flight_booking_sessions set stripe_payment_status = $3")) {
+      const row = sessions.get(params[0]);
+      if (!row || row.booking_claim_token !== params[1] || row.booking_status !== "booking_in_progress") return { rows: [] };
+      row.stripe_payment_status = params[2];
+      return { rows: [row] };
+    }
     if (normalized.includes("set booking_status = 'confirmed'")) {
       const row = sessions.get(params[0]);
+      if (!row || row.booking_status !== "booking_in_progress" || !row.duffel_post_started_at
+          || row.booking_claim_token !== params[5]) return { rows: [] };
       Object.assign(row, {
         booking_status: "confirmed",
         stripe_payment_status: "succeeded",
         duffel_order_id: params[1],
         duffel_booking_reference: params[2],
         confirmation_snapshot: JSON.parse(params[4]),
+        recovery_status: null,
+        failure_code: null,
+        failure_message: null,
+        booking_claim_token: null,
+        booking_claim_expires_at: null,
       });
-      return { rows: [] };
+      return { rows: [row] };
     }
-    if (normalized.startsWith("update flight_booking_sessions set booking_status = $2")) {
+    if (normalized.startsWith("update flight_booking_sessions set booking_status = $3")) {
       if (failNextRefundOutcomeUpdate) {
         failNextRefundOutcomeUpdate = false;
         throw new Error("simulated database failure after Stripe refund");
       }
       const row = sessions.get(params[0]);
+      if (!row || row.booking_claim_token !== params[1] || !params[9].includes(row.booking_status)) return { rows: [] };
       Object.assign(row, {
-        booking_status: params[1], failure_code: params[2], failure_message: params[3],
-        recovery_status: params[4] || row.recovery_status,
-        stripe_refund_id: params[5] || row.stripe_refund_id,
-        duffel_request_id: params[6] || row.duffel_request_id,
+        booking_status: params[2], failure_code: params[3], failure_message: params[4],
+        recovery_status: params[5] || row.recovery_status,
+        stripe_refund_id: params[6] || row.stripe_refund_id,
+        duffel_request_id: params[7] || row.duffel_request_id,
       });
-      return { rows: [] };
+      if (params[8]) {
+        row.booking_claim_token = null;
+        row.booking_claim_expires_at = null;
+      }
+      return { rows: [row] };
     }
     throw new Error(`Unhandled fake SQL: ${normalized}`);
   }
@@ -374,10 +414,12 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
   let orderCreateCount = 0;
   let submittedOrderPayload = null;
   let orderMode = "success";
+  let orderResponseHook = null;
   const fakeFetch = async (url, options = {}) => {
     if (options.method === "POST") {
       orderCreateCount += 1;
       submittedOrderPayload = JSON.parse(options.body);
+      if (orderResponseHook) orderResponseHook();
       if (orderMode === "transport") throw new Error("socket closed");
       if (orderMode === "status_503") return fakeResponse(503, {
         errors: [{ code: "service_unavailable", message: "Order status unavailable" }],
@@ -490,6 +532,10 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
   const stalePreStatus = await service.getBookingStatus("user_stale_pre", stalePreSetup.bookingSessionId);
   assert.equal(stalePreStatus.status, "payment_paid");
   assert.equal(stalePreStatus.recoveryStatus, "safe_retry_ready");
+  const stalePreConfirmation = await service.confirmBooking("user_stale_pre", stalePreSetup.bookingSessionId);
+  assert.equal(stalePreConfirmation.orderId, "ord_123");
+  assert.equal(sessions.get(stalePreSetup.bookingSessionId).recovery_status, null);
+  assert.equal(sessions.get(stalePreSetup.bookingSessionId).failure_code, null);
 
   const stalePostSetup = await service.paymentSetup("user_stale_post", setupPayload);
   Object.assign(sessions.get(stalePostSetup.bookingSessionId), {
@@ -547,6 +593,22 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
   refundMode = "throw";
 
   orderMode = "success";
+  const staleWriterSetup = await service.paymentSetup("user_stale_writer", setupPayload);
+  const replacementToken = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  orderResponseHook = () => {
+    sessions.get(staleWriterSetup.bookingSessionId).booking_claim_token = replacementToken;
+    orderResponseHook = null;
+  };
+  await assert.rejects(
+    service.confirmBooking("user_stale_writer", staleWriterSetup.bookingSessionId),
+    (error) => error.code === "booking_outcome_unknown"
+  );
+  const staleWriter = sessions.get(staleWriterSetup.bookingSessionId);
+  assert.equal(staleWriter.booking_claim_token, replacementToken);
+  assert.equal(staleWriter.booking_status, "booking_in_progress");
+  assert.ok(staleWriter.duffel_post_started_at, "the stale writer had already crossed the durable Duffel POST marker");
+
+  orderMode = "success";
   const paidStatus = await service.getBookingStatus("user_1", setup.bookingSessionId);
   assert.equal(paidStatus.status, "payment_paid");
   assert.equal(paidStatus.confirmation, null);
@@ -560,7 +622,7 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
 
   assert.equal(firstConfirmation.orderId, "ord_123");
   assert.deepEqual(repeatedConfirmation, firstConfirmation);
-  assert.equal(orderCreateCount, 5, "one 503, one transport failure, two definitive failures, and one successful order attempt");
+  assert.equal(orderCreateCount, 7, "one stale-claim retry, one 503, one transport failure, two definitive failures, one fenced stale writer, and one final successful order attempt");
   assert.deepEqual(submittedOrderPayload.data.selected_offers, ["off_test"]);
   assert.equal(confirmedStatus.status, "confirmed");
   assert.equal(confirmedStatus.confirmation.orderId, "ord_123");

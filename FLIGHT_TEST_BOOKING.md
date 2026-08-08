@@ -32,15 +32,24 @@ Set these environment variables on `zippy-api`:
 
 - `FLIGHT_TEST_BOOKING_ENABLED=1`
 - `STRIPE_SECRET_KEY=sk_test_...`
+- `STRIPE_WEBHOOK_SECRET=whsec_...` from the Stripe test-mode webhook endpoint
 - `DUFFEL_FLIGHTS_BOOKING_TOKEN=duffel_test_...` with offer search and order creation permission
 - `DUFFEL_FLIGHTS_KEY=duffel_test_...` should use the same Duffel test account/token for normal search when the booking switch is not enabled
 - `DATABASE_URL=postgresql://...`
 - `JWT_SECRET=...` and the existing auth settings must be present because checkout requires verified authentication
 
+Configure the Stripe test-mode endpoint as `POST /v1/webhooks/stripe`. The
+route verifies the Stripe signature against the unparsed request body, records
+each event ID once, and applies only monotonic state transitions whose payment
+intent, amount, and currency match the durable booking session. Do not reuse a
+live-mode signing secret.
+
 Optional settings:
 
-- `FLIGHT_ZIPPI_FEE_MINOR=499` keeps the configured checkout fee in minor currency units
+- `FLIGHT_ZIPPI_FEE_MINOR=299` keeps the current TEST checkout fee in minor currency units
 - `FLIGHT_DUFFEL_ORDER_TIMEOUT_MS=130000` should not be reduced below Duffel's booking guidance
+- `FLIGHT_RECOVERY_DUFFEL_TIMEOUT_MS=15000` bounds the worker's read-only order lookup
+- `FLIGHT_RECOVERY_INTERVAL_MS=30000` controls the worker polling interval
 - `FLIGHT_SEARCH_CORS_ORIGINS=https://www.heyzippi.com,https://heyzippi.com`
   overrides the strict browser origin allowlist when a controlled preview origin
   is required
@@ -87,3 +96,32 @@ Checkout claims use a short lease. A stale claim may be retried only when the
 durable Duffel POST marker was never written. Once order submission starts, an
 uncertain outcome is held for manual reconciliation and is never retried
 automatically. Stripe refunds remain pending until Stripe reports success.
+
+## Render recovery worker
+
+Run a separate Render background worker from this repository with:
+
+```sh
+npm run worker:flight-recovery
+```
+
+The worker requires the same `DATABASE_URL`, `STRIPE_SECRET_KEY`,
+`DUFFEL_FLIGHTS_BOOKING_TOKEN`, and `DUFFEL_API_VERSION` settings as the test
+booking service. Run `npm run migrate` successfully before starting it. The
+database claim lease, fencing token, and `FOR UPDATE SKIP LOCKED` claim make
+multiple worker instances safe, though one instance is sufficient initially.
+Restart repair scans recreate missing work for stale booking claims, unknown
+Duffel outcomes, and refund-pending sessions.
+
+Unknown airline outcomes use only `GET /air/orders` filtered by the exact offer
+ID. A result is confirmed only when exactly one test-mode order matches the
+session, Stripe intent, offer, currency, amount, and Zippi metadata. Absence is
+never treated as proof that no order exists; zero, ambiguous, mismatched, or
+live-mode results back off and ultimately remain in `manual_review`. The worker
+never submits a replacement Duffel order and never refunds an unknown airline
+outcome. Refund recovery uses the original deterministic Stripe idempotency key.
+
+A future Duffel `order.created` integration should use a separately configured
+signed webhook, persist event IDs, and tolerate duplicate and out-of-order
+delivery. No Duffel dashboard webhook or signing secret is configured by this
+change.

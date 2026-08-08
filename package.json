@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "migrate": "node scripts/run_migrations.js",
+    "worker:flight-recovery": "node scripts/run_flight_recovery_worker.js",
     "test": "node --test",
     "start": "node server.js"
   },
