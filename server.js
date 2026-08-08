@@ -7,6 +7,7 @@ const { Translate } = require("@google-cloud/translate").v2;
 const { FLIGHT_PARSE_MODEL, mockedFlightIntentParse, parseFlightIntentWithOpenAI } = require("./lib/flightIntentParse");
 const { validateFlightIntentRequest, validateFlightIntentResult } = require("./lib/flightIntentValidate");
 const { createFlightBookingService, endpointError, normalizeAvailableServices } = require("./lib/flightBooking");
+const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
 const app = express();
 
@@ -755,6 +756,7 @@ app.get("/version", (req, res) => {
   res.json({
     ok: true,
     service: "zippy-api",
+    deployCommit: renderDeployCommit(),
     ts: new Date().toISOString(),
   });
 });
@@ -3854,76 +3856,6 @@ app.post("/admin/init", async (req, res) => {
       create index if not exists idx_apple_auth_tokens_apple_sub
         on apple_auth_tokens(apple_sub);
 
-      create table if not exists flight_booking_sessions (
-        id uuid primary key,
-        user_id text not null,
-        checkout_fingerprint text not null,
-        duffel_offer_id text not null,
-        offer_snapshot jsonb not null,
-        payload_snapshot jsonb not null,
-        traveler_info jsonb not null,
-        contact_info jsonb not null,
-        selected_services jsonb not null default '[]'::jsonb,
-        currency text not null,
-        base_fare_minor bigint not null,
-        taxes_minor bigint,
-        offer_minor bigint not null,
-        services_minor bigint not null default 0,
-        duffel_total_minor bigint not null,
-        zippi_fee_minor bigint not null default 0,
-        charge_total_minor bigint not null,
-        stripe_payment_intent_id text unique,
-        stripe_payment_status text not null default 'not_created',
-        booking_status text not null default 'payment_setup',
-        duffel_order_id text unique,
-        duffel_booking_reference text,
-        duffel_request_id text,
-        confirmation_snapshot jsonb,
-        recovery_status text,
-        stripe_refund_id text,
-        failure_code text,
-        failure_message text,
-        duffel_attempted_at timestamptz,
-        duffel_post_started_at timestamptz,
-        confirmed_at timestamptz,
-        created_at timestamptz not null default now(),
-        updated_at timestamptz not null default now(),
-        check (booking_status in (
-          'payment_setup', 'awaiting_payment', 'payment_paid', 'booking_in_progress',
-          'booking_unknown', 'booking_failed_refunded', 'booking_failed_refund_pending', 'payment_canceled', 'confirmed'
-        ))
-      );
-
-      create index if not exists idx_flight_booking_sessions_user_created
-        on flight_booking_sessions(user_id, created_at desc);
-
-      create index if not exists idx_flight_booking_sessions_status
-        on flight_booking_sessions(booking_status, updated_at);
-
-      create index if not exists idx_flight_booking_sessions_fingerprint
-        on flight_booking_sessions(user_id, checkout_fingerprint);
-
-      alter table flight_booking_sessions
-        add column if not exists base_fare_minor bigint,
-        add column if not exists taxes_minor bigint,
-        add column if not exists duffel_post_started_at timestamptz;
-
-      update flight_booking_sessions
-      set base_fare_minor = offer_minor
-      where base_fare_minor is null;
-
-      alter table flight_booking_sessions
-        alter column base_fare_minor set not null;
-
-      alter table flight_booking_sessions
-        drop constraint if exists flight_booking_sessions_booking_status_check;
-
-      alter table flight_booking_sessions
-        add constraint flight_booking_sessions_booking_status_check check (booking_status in (
-          'payment_setup', 'awaiting_payment', 'payment_paid', 'booking_in_progress',
-          'booking_unknown', 'booking_failed_refunded', 'booking_failed_refund_pending',
-          'payment_canceled', 'confirmed'
-        ));
     `);
 
     return res.json({ ok: true });

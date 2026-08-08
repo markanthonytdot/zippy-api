@@ -4,6 +4,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
+    "migrate": "node scripts/run_migrations.js",
     "test": "node --test",
     "start": "node server.js"
   },

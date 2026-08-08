@@ -4,10 +4,29 @@ The real flight checkout remains disabled unless all test-only configuration is 
 
 ## Backend
 
-Apply `migrations/001_flight_booking_sessions.sql`,
-`migrations/002_flight_booking_quote_lines.sql`, and
-`migrations/003_flight_booking_recovery_state.sql` to the Postgres database, or
-call the existing `POST /admin/init` endpoint after deploying this version.
+Configure the Render service's **Pre-Deploy Command** as exactly:
+
+```sh
+npm run migrate
+```
+
+The command requires `DATABASE_URL`, takes a Postgres advisory lock, verifies
+the checksum ledger, and applies each unapplied file in `migrations/` in its own
+transaction. A pre-existing migration 001 is recorded only after its baseline
+schema is verified. Any checksum mismatch, partial baseline, or SQL failure must
+fail the deployment; do not bypass the runner with `POST /admin/init`.
+
+Migration 002 preserves historical accounting honestly: legacy rows did not
+store a separate Duffel base-fare/tax split, so their `base_fare_minor` is
+backfilled from the legacy `offer_minor` total and `taxes_minor` remains `NULL`.
+New booking sessions persist the provider-authored base fare and taxes as
+separate values. Do not infer zero historical tax from a `NULL` value.
+
+Rollback rule: never edit, delete, or renumber an applied migration. Roll back
+application code only when the deployed schema remains backward compatible;
+otherwise ship a new forward-only corrective migration. Restore a database
+backup only as a separately coordinated incident action, not as an automatic
+Render rollback step.
 
 Set these environment variables on `zippy-api`:
 
@@ -27,6 +46,10 @@ Optional settings:
   is required
 
 The server refuses booking if the Stripe key is not a test secret key or the Duffel booking token is not a test token.
+
+After deployment, compare `GET /version` field `deployCommit` with the expected
+Render Git commit. It is sourced only from a validated `RENDER_GIT_COMMIT` value
+and is `null` when Render does not provide a valid hexadecimal commit.
 
 ## iOS debug scheme
 
