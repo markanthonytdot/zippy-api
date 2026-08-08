@@ -2,9 +2,11 @@ const express = require("express");
 const helmet = require("helmet");
 const { randomUUID } = require("crypto");
 const { Pool } = require("pg");
+const Stripe = require("stripe");
 const { Translate } = require("@google-cloud/translate").v2;
 const { FLIGHT_PARSE_MODEL, mockedFlightIntentParse, parseFlightIntentWithOpenAI } = require("./lib/flightIntentParse");
 const { validateFlightIntentRequest, validateFlightIntentResult } = require("./lib/flightIntentValidate");
+const { createFlightBookingService, endpointError } = require("./lib/flightBooking");
 const app = express();
 
 const translateClient = (() => {
@@ -350,13 +352,22 @@ const DUFFEL_LIVE_TOKEN_READONLY = String(process.env.DUFFEL_LIVE_TOKEN_READONLY
 const DUFFEL_API_KEY = String(process.env.DUFFEL_API_KEY || "").trim();
 const DUFFEL_FLIGHTS_KEY = String(process.env.DUFFEL_FLIGHTS_KEY || "").trim();
 const DUFFEL_STAYS_KEY = String(process.env.DUFFEL_STAYS_KEY || "").trim();
-const DUFFEL_FLIGHTS_TOKEN = DUFFEL_FLIGHTS_KEY || DUFFEL_LIVE_TOKEN_READONLY;
+const DUFFEL_FLIGHTS_BOOKING_TOKEN = String(process.env.DUFFEL_FLIGHTS_BOOKING_TOKEN || "").trim();
+const FLIGHT_TEST_BOOKING_ENABLED = ["1", "true", "yes"].includes(
+  String(process.env.FLIGHT_TEST_BOOKING_ENABLED || "").trim().toLowerCase()
+);
+const DUFFEL_FLIGHTS_TOKEN =
+  (FLIGHT_TEST_BOOKING_ENABLED ? DUFFEL_FLIGHTS_BOOKING_TOKEN : "") ||
+  DUFFEL_FLIGHTS_KEY ||
+  DUFFEL_LIVE_TOKEN_READONLY;
 const DUFFEL_STAYS_TOKEN = DUFFEL_STAYS_KEY || DUFFEL_API_KEY;
-const DUFFEL_FLIGHTS_TOKEN_SOURCE = DUFFEL_FLIGHTS_KEY
-  ? "DUFFEL_FLIGHTS_KEY"
-  : DUFFEL_LIVE_TOKEN_READONLY
-    ? "DUFFEL_LIVE_TOKEN_READONLY"
-    : "MISSING";
+const DUFFEL_FLIGHTS_TOKEN_SOURCE = FLIGHT_TEST_BOOKING_ENABLED && DUFFEL_FLIGHTS_BOOKING_TOKEN
+  ? "DUFFEL_FLIGHTS_BOOKING_TOKEN"
+  : DUFFEL_FLIGHTS_KEY
+    ? "DUFFEL_FLIGHTS_KEY"
+    : DUFFEL_LIVE_TOKEN_READONLY
+      ? "DUFFEL_LIVE_TOKEN_READONLY"
+      : "MISSING";
 const DUFFEL_STAYS_TOKEN_SOURCE = DUFFEL_STAYS_KEY
   ? "DUFFEL_STAYS_KEY"
   : DUFFEL_API_KEY
@@ -388,6 +399,10 @@ console.log(
   "stays_token_prefix=" + summarizeDuffelTokenPrefix(DUFFEL_STAYS_TOKEN)
 );
 const DUFFEL_API_VERSION = String(process.env.DUFFEL_API_VERSION || "v2").trim() || "v2";
+const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
+const stripe = STRIPE_SECRET_KEY.startsWith("sk_test_") ? new Stripe(STRIPE_SECRET_KEY) : null;
+const FLIGHT_ZIPPI_FEE_MINOR = getEnvInt("FLIGHT_ZIPPI_FEE_MINOR", 299);
+const FLIGHT_DUFFEL_ORDER_TIMEOUT_MS = getEnvInt("FLIGHT_DUFFEL_ORDER_TIMEOUT_MS", 130000);
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
 const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
@@ -702,6 +717,7 @@ app.use("/v1/places/details/photos", rateLimitMiddleware(placesDetailsPhotosRout
 app.use("/v1/places/eta", rateLimitMiddleware(etaRouteLimiter, "eta"));
 app.use("/v1/hotels", rateLimitMiddleware(hotelsRouteLimiter, "hotels"));
 app.use("/v1/flights", rateLimitMiddleware(flightsRouteLimiter, "flights"));
+app.use("/flight", rateLimitMiddleware(flightsRouteLimiter, "flightCheckout"));
 app.use("/auth/apple", rateLimitMiddleware(authAppleLimiter, "authApple"));
 app.use("/auth/google", rateLimitMiddleware(authAppleLimiter, "authGoogle"));
 app.use("/auth/dev", rateLimitMiddleware(authAppleLimiter, "authDev"));
@@ -722,6 +738,10 @@ app.get("/health", (req, res) => {
     jwtAudience: String(process.env.JWT_AUDIENCE || ""),
     hasAmadeusId: !!process.env.AMADEUS_CLIENT_ID,
     hasAmadeusSecret: !!process.env.AMADEUS_CLIENT_SECRET,
+    flightTestBookingEnabled: FLIGHT_TEST_BOOKING_ENABLED,
+    hasStripeTestKey: STRIPE_SECRET_KEY.startsWith("sk_test_"),
+    hasDuffelBookingTestToken: DUFFEL_FLIGHTS_BOOKING_TOKEN.startsWith("duffel_test_"),
+    hasDatabase: !!dbPool,
   });
 });
 // ---------------------------------------------
@@ -745,6 +765,19 @@ const dbPool = process.env.DATABASE_URL
       ssl: { rejectUnauthorized: false },
     })
   : null;
+
+const flightBookingService = createFlightBookingService({
+  dbPool,
+  stripe,
+  duffelToken: DUFFEL_FLIGHTS_BOOKING_TOKEN,
+  duffelMode: classifyDuffelTokenMode(DUFFEL_FLIGHTS_BOOKING_TOKEN),
+  duffelVersion: DUFFEL_API_VERSION,
+  fetchWithTimeout,
+  randomUUID,
+  enabled: FLIGHT_TEST_BOOKING_ENABLED,
+  zippiFeeMinor: FLIGHT_ZIPPI_FEE_MINOR,
+  orderTimeoutMs: FLIGHT_DUFFEL_ORDER_TIMEOUT_MS,
+});
 
 let ensureHotelPhotoEnrichmentCacheTablePromise = null;
 let ensureAppleAuthTokensTablePromise = null;
@@ -3218,10 +3251,56 @@ async function handleFlightBookReview(req, res) {
   });
 }
 
+async function handleFlightPaymentSetup(req, res) {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+
+  try {
+    const result = await flightBookingService.paymentSetup(userId, req.body);
+    console.log("[Flight Checkout]", "requestId=" + requestId, "status=payment_ready", "sessionId=" + result.bookingSessionId);
+    return res.json(result);
+  } catch (error) {
+    const response = endpointError(error);
+    console.warn(
+      "[Flight Checkout]",
+      "requestId=" + requestId,
+      "status=payment_setup_failed",
+      "code=" + String(response.body.code || "unknown")
+    );
+    return res.status(response.status).json(response.body);
+  }
+}
+
+async function handleFlightBookingConfirm(req, res) {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+  const bookingSessionId = String(req.body?.bookingSessionId || "").trim();
+
+  try {
+    const result = await flightBookingService.confirmBooking(userId, bookingSessionId);
+    console.log("[Flight Checkout]", "requestId=" + requestId, "status=confirmed", "sessionId=" + bookingSessionId);
+    return res.json(result);
+  } catch (error) {
+    const response = endpointError(error);
+    console.warn(
+      "[Flight Checkout]",
+      "requestId=" + requestId,
+      "status=confirm_failed",
+      "sessionId=" + bookingSessionId,
+      "code=" + String(response.body.code || "unknown")
+    );
+    return res.status(response.status).json(response.body);
+  }
+}
+
 app.post("/v1/flights/book", handleFlightBookReview);
 app.post("/v1/flights/booking", handleFlightBookReview);
-app.post("/v1/flights/booking/confirm", handleFlightBookReview);
-app.post("/flight/booking/confirm", handleFlightBookReview);
+app.post("/v1/flights/payment/setup", handleFlightPaymentSetup);
+app.post("/flight/payment/setup", handleFlightPaymentSetup);
+app.post("/v1/flights/booking/confirm", handleFlightBookingConfirm);
+app.post("/flight/booking/confirm", handleFlightBookingConfirm);
 
 function handleFlightBookReviewFallback(req, res) {
   const rawPayload = req.body || {};
@@ -3710,6 +3789,52 @@ app.post("/admin/init", async (req, res) => {
 
       create index if not exists idx_apple_auth_tokens_apple_sub
         on apple_auth_tokens(apple_sub);
+
+      create table if not exists flight_booking_sessions (
+        id uuid primary key,
+        user_id text not null,
+        checkout_fingerprint text not null,
+        duffel_offer_id text not null,
+        offer_snapshot jsonb not null,
+        payload_snapshot jsonb not null,
+        traveler_info jsonb not null,
+        contact_info jsonb not null,
+        selected_services jsonb not null default '[]'::jsonb,
+        currency text not null,
+        offer_minor bigint not null,
+        services_minor bigint not null default 0,
+        duffel_total_minor bigint not null,
+        zippi_fee_minor bigint not null default 0,
+        charge_total_minor bigint not null,
+        stripe_payment_intent_id text unique,
+        stripe_payment_status text not null default 'not_created',
+        booking_status text not null default 'payment_setup',
+        duffel_order_id text unique,
+        duffel_booking_reference text,
+        duffel_request_id text,
+        confirmation_snapshot jsonb,
+        recovery_status text,
+        stripe_refund_id text,
+        failure_code text,
+        failure_message text,
+        duffel_attempted_at timestamptz,
+        confirmed_at timestamptz,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        check (booking_status in (
+          'payment_setup', 'awaiting_payment', 'payment_paid', 'booking_in_progress',
+          'booking_unknown', 'booking_failed_refunded', 'booking_failed_refund_pending', 'confirmed'
+        ))
+      );
+
+      create index if not exists idx_flight_booking_sessions_user_created
+        on flight_booking_sessions(user_id, created_at desc);
+
+      create index if not exists idx_flight_booking_sessions_status
+        on flight_booking_sessions(booking_status, updated_at);
+
+      create index if not exists idx_flight_booking_sessions_fingerprint
+        on flight_booking_sessions(user_id, checkout_fingerprint);
     `);
 
     return res.json({ ok: true });
