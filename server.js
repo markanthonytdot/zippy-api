@@ -6,7 +6,8 @@ const Stripe = require("stripe");
 const { Translate } = require("@google-cloud/translate").v2;
 const { FLIGHT_PARSE_MODEL, mockedFlightIntentParse, parseFlightIntentWithOpenAI } = require("./lib/flightIntentParse");
 const { validateFlightIntentRequest, validateFlightIntentResult } = require("./lib/flightIntentValidate");
-const { createFlightBookingService, endpointError } = require("./lib/flightBooking");
+const { createFlightBookingService, endpointError, normalizeAvailableServices } = require("./lib/flightBooking");
+const { createStrictCorsMiddleware } = require("./lib/strictCors");
 const app = express();
 
 const translateClient = (() => {
@@ -24,6 +25,9 @@ const translateClient = (() => {
 
 app.set("trust proxy", true);
 app.use(helmet());
+app.use("/v1/flights/search", createStrictCorsMiddleware({
+  allowedOrigins: process.env.FLIGHT_SEARCH_CORS_ORIGINS,
+}));
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 // ---------------------------------------------
@@ -3272,6 +3276,27 @@ async function handleFlightPaymentSetup(req, res) {
   }
 }
 
+async function handleFlightBookingQuote(req, res) {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+
+  try {
+    const result = await flightBookingService.quoteCheckout(req.body);
+    console.log("[Flight Checkout]", "requestId=" + requestId, "status=quoted", "offerId=" + result.offerId);
+    return res.json(result);
+  } catch (error) {
+    const response = endpointError(error);
+    console.warn(
+      "[Flight Checkout]",
+      "requestId=" + requestId,
+      "status=quote_failed",
+      "code=" + String(response.body.code || "unknown")
+    );
+    return res.status(response.status).json(response.body);
+  }
+}
+
 async function handleFlightBookingConfirm(req, res) {
   const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
@@ -3295,12 +3320,39 @@ async function handleFlightBookingConfirm(req, res) {
   }
 }
 
+async function handleFlightBookingStatus(req, res) {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+  const bookingSessionId = String(req.params?.bookingSessionId || "").trim();
+
+  try {
+    const result = await flightBookingService.getBookingStatus(userId, bookingSessionId);
+    console.log("[Flight Checkout]", "requestId=" + requestId, "status=status_read", "sessionId=" + bookingSessionId);
+    return res.json(result);
+  } catch (error) {
+    const response = endpointError(error);
+    console.warn(
+      "[Flight Checkout]",
+      "requestId=" + requestId,
+      "status=status_read_failed",
+      "sessionId=" + bookingSessionId,
+      "code=" + String(response.body.code || "unknown")
+    );
+    return res.status(response.status).json(response.body);
+  }
+}
+
 app.post("/v1/flights/book", handleFlightBookReview);
 app.post("/v1/flights/booking", handleFlightBookReview);
+app.post("/v1/flights/booking/quote", handleFlightBookingQuote);
+app.post("/flight/booking/quote", handleFlightBookingQuote);
 app.post("/v1/flights/payment/setup", handleFlightPaymentSetup);
 app.post("/flight/payment/setup", handleFlightPaymentSetup);
 app.post("/v1/flights/booking/confirm", handleFlightBookingConfirm);
 app.post("/flight/booking/confirm", handleFlightBookingConfirm);
+app.get("/v1/flights/booking/sessions/:bookingSessionId", handleFlightBookingStatus);
+app.get("/flight/booking/sessions/:bookingSessionId", handleFlightBookingStatus);
 
 function handleFlightBookReviewFallback(req, res) {
   const rawPayload = req.body || {};
@@ -3436,8 +3488,20 @@ app.get("/v1/flights/available_services", async (req, res) => {
     return res.status(r.status).json(json);
   }
 
-  // Return the full offer data (which includes available_services)
-  return res.json({ ok: true, data: offer });
+  const requestedType = String(req.query.type || "").trim();
+  const services = normalizeAvailableServices(availableServices, requestedType);
+
+  // `data` remains the array expected by the existing iOS baggage and CFAR
+  // decoders. The small offer envelope is additive and avoids exposing another
+  // provider-specific response shape to new clients.
+  return res.json({
+    ok: true,
+    data: services,
+    offer: {
+      id: String(offer?.id || offerId),
+      expires_at: offer?.expires_at || null,
+    },
+  });
 });
 
 // ---------------------------------------------
@@ -3801,6 +3865,8 @@ app.post("/admin/init", async (req, res) => {
         contact_info jsonb not null,
         selected_services jsonb not null default '[]'::jsonb,
         currency text not null,
+        base_fare_minor bigint not null,
+        taxes_minor bigint,
         offer_minor bigint not null,
         services_minor bigint not null default 0,
         duffel_total_minor bigint not null,
@@ -3818,12 +3884,13 @@ app.post("/admin/init", async (req, res) => {
         failure_code text,
         failure_message text,
         duffel_attempted_at timestamptz,
+        duffel_post_started_at timestamptz,
         confirmed_at timestamptz,
         created_at timestamptz not null default now(),
         updated_at timestamptz not null default now(),
         check (booking_status in (
           'payment_setup', 'awaiting_payment', 'payment_paid', 'booking_in_progress',
-          'booking_unknown', 'booking_failed_refunded', 'booking_failed_refund_pending', 'confirmed'
+          'booking_unknown', 'booking_failed_refunded', 'booking_failed_refund_pending', 'payment_canceled', 'confirmed'
         ))
       );
 
@@ -3835,6 +3902,28 @@ app.post("/admin/init", async (req, res) => {
 
       create index if not exists idx_flight_booking_sessions_fingerprint
         on flight_booking_sessions(user_id, checkout_fingerprint);
+
+      alter table flight_booking_sessions
+        add column if not exists base_fare_minor bigint,
+        add column if not exists taxes_minor bigint,
+        add column if not exists duffel_post_started_at timestamptz;
+
+      update flight_booking_sessions
+      set base_fare_minor = offer_minor
+      where base_fare_minor is null;
+
+      alter table flight_booking_sessions
+        alter column base_fare_minor set not null;
+
+      alter table flight_booking_sessions
+        drop constraint if exists flight_booking_sessions_booking_status_check;
+
+      alter table flight_booking_sessions
+        add constraint flight_booking_sessions_booking_status_check check (booking_status in (
+          'payment_setup', 'awaiting_payment', 'payment_paid', 'booking_in_progress',
+          'booking_unknown', 'booking_failed_refunded', 'booking_failed_refund_pending',
+          'payment_canceled', 'confirmed'
+        ));
     `);
 
     return res.json({ ok: true });
