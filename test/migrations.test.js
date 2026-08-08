@@ -128,6 +128,31 @@ test("adopts only a complete pre-existing migration 001 schema", () => {
     .missing.includes("constraint:booking_status_check"));
 });
 
+test("PostgreSQL 18 named NOT NULL catalog constraints do not block safe adoption", () => {
+  const postgres18Constraints = [
+    ...completeInitialSchema().constraints,
+    { name: "flight_booking_sessions_id_not_null", type: "n", definition: "NOT NULL id" },
+    { name: "flight_booking_sessions_user_id_not_null", type: "n", definition: "NOT NULL user_id" },
+    { name: "flight_booking_sessions_booking_status_not_null", type: "n", definition: "NOT NULL booking_status" },
+  ];
+  const assessment = assessInitialMigrationSchema(completeInitialSchema({
+    constraints: postgres18Constraints,
+  }));
+  assert.equal(assessment.canAdopt, true);
+  assert.deepEqual(assessment.missing, []);
+
+  const unexpectedForeignKey = {
+    name: "flight_booking_sessions_unexpected_fkey",
+    type: "f",
+    definition: "FOREIGN KEY (user_id) REFERENCES users(id)",
+  };
+  const unsafe = assessInitialMigrationSchema(completeInitialSchema({
+    constraints: [...postgres18Constraints, unexpectedForeignKey],
+  }));
+  assert.equal(unsafe.canAdopt, false);
+  assert.ok(unsafe.missing.includes("unexpected_constraint:flight_booking_sessions_unexpected_fkey"));
+});
+
 test("requires the migration ledger to be an exact contiguous prefix", () => {
   const migrations = [1, 2, 3].map((version) => ({
     filename: `00${version}_migration.sql`, checksum: String(version).repeat(64), sql: `select ${version}`,
