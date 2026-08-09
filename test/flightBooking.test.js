@@ -740,3 +740,206 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
   assert.equal(confirmedStatus.confirmation.orderId, "ord_123");
   assert.equal(sessions.get(setup.bookingSessionId).booking_status, "confirmed");
 });
+
+test("status read reconstructs a protected two-sided session without repricing drift", async () => {
+  const sessions = new Map();
+  const fakePool = {
+    async connect() {
+      return { query: fakeQuery, release() {} };
+    },
+    query: fakeQuery,
+  };
+
+  async function fakeQuery(sql, params = []) {
+    const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+    if (["begin", "commit", "rollback"].includes(normalized) || normalized.startsWith("select pg_advisory")) return { rows: [] };
+    if (normalized.includes("where user_id = $1 and checkout_fingerprint = $2")) return { rows: [] };
+    if (normalized.startsWith("insert into flight_booking_sessions")) {
+      const row = {
+        id: params[0], user_id: params[1], checkout_fingerprint: params[2], duffel_offer_id: params[3],
+        offer_snapshot: JSON.parse(params[4]), payload_snapshot: JSON.parse(params[5]), traveler_info: JSON.parse(params[6]),
+        contact_info: JSON.parse(params[7]), selected_services: JSON.parse(params[8]), currency: params[9],
+        base_fare_minor: String(params[10]), taxes_minor: params[11] == null ? null : String(params[11]),
+        offer_minor: String(params[12]), services_minor: String(params[13]), duffel_total_minor: String(params[14]),
+        zippi_fee_minor: String(params[15]), charge_total_minor: String(params[16]),
+        provider_currency: params[17], provider_offer_minor: String(params[18]), provider_services_minor: String(params[19]),
+        provider_total_minor: String(params[20]), customer_currency: params[21], customer_fx_rate: String(params[22]),
+        customer_fx_source: params[23], customer_fx_margin_bps: String(params[24]), customer_base_fare_minor: String(params[25]),
+        customer_taxes_minor: params[26] == null ? null : String(params[26]), customer_services_minor: String(params[27]),
+        customer_raw_converted_minor: String(params[28]), customer_fx_protection_minor: String(params[29]),
+        customer_converted_minor: String(params[30]), customer_zippi_markup_bps: String(params[31]),
+        customer_zippi_markup_minor: String(params[32]), customer_payment_processing_percent_bps: String(params[33]),
+        customer_payment_processing_fixed_minor: String(params[34]), customer_payment_processing_cross_border_bps: String(params[35]),
+        customer_payment_processing_effective_bps: String(params[36]), customer_payment_processing_allowance_minor: String(params[37]),
+        customer_estimated_processing_minor: String(params[38]), customer_min_margin_target_minor: String(params[39]),
+        customer_min_margin_top_up_minor: String(params[40]), customer_zippi_fee_minor: String(params[41]),
+        customer_pre_round_minor: String(params[42]), customer_rounding_increment_minor: String(params[43]),
+        customer_rounding_adjustment_minor: String(params[44]), customer_estimated_gross_margin_minor: String(params[45]),
+        customer_total_minor: String(params[46]),
+        stripe_payment_status: "not_created",
+        booking_status: "payment_setup",
+        confirmation_snapshot: null,
+        updated_at: new Date().toISOString(),
+      };
+      sessions.set(row.id, row);
+      return { rows: [row] };
+    }
+    if (normalized.includes("set stripe_payment_intent_id = $2")) {
+      const row = sessions.get(params[0]);
+      Object.assign(row, { stripe_payment_intent_id: params[1], stripe_payment_status: params[2], booking_status: "awaiting_payment" });
+      return { rows: [row] };
+    }
+    if (normalized.startsWith("select * from flight_booking_sessions where id = $1 and user_id = $2")) {
+      const row = sessions.get(params[0]);
+      return { rows: row && row.user_id === params[1] ? [row] : [] };
+    }
+    if (normalized.includes("set stripe_payment_status = $3, booking_status = $4")) {
+      const row = sessions.get(params[0]);
+      Object.assign(row, { stripe_payment_status: params[2], booking_status: params[3] });
+      return { rows: [row] };
+    }
+    throw new Error(`Unhandled fake SQL: ${normalized}`);
+  }
+
+  const offer = {
+    id: "off_cad_test",
+    expires_at: "2099-01-01T00:00:00Z",
+    total_amount: "89.63",
+    total_currency: "USD",
+    base_amount: "75.96",
+    tax_amount: "13.67",
+    slices: [{ id: "slice_outbound", segments: [{
+      departing_at: "2099-02-01T10:00:00Z",
+      origin: { iata_country_code: "US" }, destination: { iata_country_code: "US" },
+    }] }],
+    passengers: [{ id: "pas_123", type: "adult" }],
+    available_services: [],
+    owner: { name: "Duffel Airways" },
+  };
+
+  let createdIntent = null;
+  const fakeStripe = {
+    paymentIntents: {
+      create: async (payload) => {
+        createdIntent = { ...payload };
+        return {
+          id: "pi_cad_test",
+          client_secret: "pi_cad_test_secret",
+          amount: payload.amount,
+          currency: payload.currency,
+          status: "requires_payment_method",
+        };
+      },
+      retrieve: async () => ({
+        id: "pi_cad_test",
+        client_secret: "pi_cad_test_secret",
+        amount: createdIntent.amount,
+        currency: createdIntent.currency,
+        status: "requires_payment_method",
+      }),
+    },
+    refunds: { create: async () => { throw new Error("refund not expected"); } },
+  };
+
+  const service = createFlightBookingService({
+    dbPool: fakePool,
+    stripe: fakeStripe,
+    duffelToken: "duffel_test_fake",
+    duffelMode: "TEST",
+    duffelVersion: "v2",
+    fetchWithTimeout: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ data: offer }) }),
+    randomUUID: () => "22222222-2222-4222-8222-000000000001",
+    enabled: true,
+    getExchangeRates: async () => ({ base: "USD", rates: { USD: 1, CAD: 1.395557 }, source: "test" }),
+    pricingConfig: {
+      zippiFeeMinor: 499,
+      fxMarginBps: 500,
+      zippiMarkupBps: 700,
+      minGrossMarginMinor: 1599,
+      paymentProcessingPercentBps: 350,
+      paymentProcessingFixedMinor: 30,
+      paymentProcessingCrossBorderBps: 0,
+    },
+  });
+
+  const quote = await service.quoteCheckout({ offerId: "off_cad_test", currency: "CAD" });
+  const setup = await service.paymentSetup("user_cad", {
+    offerId: "off_cad_test",
+    currency: "CAD",
+    totalMinor: quote.quote.totalMinor,
+    baggageServiceIds: [],
+    travelers: [{
+      travelerType: "adult",
+      title: "Mr",
+      firstName: "Smoke",
+      middleName: null,
+      lastName: "Tester",
+      gender: "Male",
+      dateOfBirthISO: "1987-07-24",
+    }],
+    contact: { email: "smoke@example.com", phone: "+14165551234" },
+  });
+  const status = await service.getBookingStatus("user_cad", setup.bookingSessionId);
+
+  assert.equal(setup.quote.totalMinor, 15_500);
+  assert.equal(status.status, "awaiting_payment");
+  assert.equal(status.paymentStatus, "requires_payment_method");
+  assert.equal(status.quote.currency, "CAD");
+  assert.equal(status.quote.totalMinor, setup.quote.totalMinor);
+  assert.equal(status.quote.customer.lineItems.rawConvertedMinor, setup.quote.customer.lineItems.rawConvertedMinor);
+  assert.equal(status.quote.customer.lineItems.fxProtectionMinor, setup.quote.customer.lineItems.fxProtectionMinor);
+  assert.equal(status.quote.customer.lineItems.zippiMarkupMinor, setup.quote.customer.lineItems.zippiMarkupMinor);
+  assert.equal(status.quote.customer.lineItems.paymentProcessingAllowanceMinor, setup.quote.customer.lineItems.paymentProcessingAllowanceMinor);
+  assert.equal(status.quote.customer.lineItems.minMarginTopUpMinor, setup.quote.customer.lineItems.minMarginTopUpMinor);
+  assert.equal(status.quote.customer.lineItems.estimatedGrossMarginMinor, setup.quote.customer.lineItems.estimatedGrossMarginMinor);
+  assert.equal(status.quote.provider.currency, "USD");
+  assert.equal(status.quote.provider.totalMinor, 8_963);
+});
+
+test("status read keeps legacy sessions readable", async () => {
+  const legacySession = {
+    id: "33333333-3333-4333-8333-000000000001",
+    user_id: "legacy_user",
+    booking_status: "confirmed",
+    stripe_payment_status: "succeeded",
+    confirmation_snapshot: { orderId: "ord_legacy" },
+    updated_at: "2026-08-09T00:00:00.000Z",
+    currency: "USD",
+    base_fare_minor: "10000",
+    taxes_minor: "2000",
+    offer_minor: "12000",
+    services_minor: "0",
+    duffel_total_minor: "12000",
+    zippi_fee_minor: "499",
+    charge_total_minor: "12500",
+    offer_snapshot: { baseAmount: "100.00", taxAmount: "20.00" },
+  };
+  const fakePool = {
+    query: async (sql, params = []) => {
+      const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+      if (normalized.startsWith("select * from flight_booking_sessions where id = $1 and user_id = $2")) {
+        return { rows: params[0] === legacySession.id && params[1] === legacySession.user_id ? [legacySession] : [] };
+      }
+      throw new Error(`Unhandled fake SQL: ${normalized}`);
+    },
+  };
+  const service = createFlightBookingService({
+    dbPool: fakePool,
+    stripe: { paymentIntents: { retrieve: async () => { throw new Error("not expected"); } } },
+    duffelToken: "duffel_test_fake",
+    duffelMode: "TEST",
+    duffelVersion: "v2",
+    fetchWithTimeout: async () => { throw new Error("not expected"); },
+    randomUUID: () => legacySession.id,
+    enabled: true,
+  });
+
+  const status = await service.getBookingStatus("legacy_user", legacySession.id);
+  assert.equal(status.status, "confirmed");
+  assert.equal(status.paymentStatus, "succeeded");
+  assert.equal(status.quote.currency, "USD");
+  assert.equal(status.quote.provider.currency, "USD");
+  assert.equal(status.quote.totalMinor, 12_500);
+  assert.equal(status.quote.customer.lineItems.rawConvertedMinor, 12_000);
+  assert.deepEqual(status.confirmation, { orderId: "ord_legacy" });
+});
