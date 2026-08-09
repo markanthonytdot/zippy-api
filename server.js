@@ -1808,7 +1808,10 @@ app.post("/v1/hotels/search", async (req, res) => {
     ok: true,
     cached: false,
     query: { city: city || null, lat: searchLat, lng: searchLng, checkIn, nights, adults, radiusKm, max },
-    items: items.map(({ searchResultId, fullRatesFetched, ...item }) => item),
+    // searchResultId is the opaque Duffel continuity token required to fetch
+    // full room/rate data after an instance restart or cache miss. It is not a
+    // booking credential and must remain paired with the returned hotelId.
+    items: items.map(({ fullRatesFetched, ...item }) => item),
   };
 
   if (fastMode) {
@@ -1838,6 +1841,9 @@ app.post("/v1/hotels/prices", async (req, res) => {
   const body = req.body || {};
   const payload = body && typeof body === "object" && body.data && typeof body.data === "object" ? body.data : body;
   const hotelIdsRaw = Array.isArray(payload?.hotelIds) ? payload.hotelIds : [];
+  const searchResultIdsRaw = payload?.searchResultIds && typeof payload.searchResultIds === "object"
+    ? payload.searchResultIds
+    : {};
   const hotelIds = [];
   const seen = new Set();
   for (const raw of hotelIdsRaw) {
@@ -1883,6 +1889,42 @@ app.post("/v1/hotels/prices", async (req, res) => {
   let failedCount = 0;
   for (const hotelId of hotelIds) {
     let snapshot = readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults);
+    const suppliedSearchResultIdRaw = String(searchResultIdsRaw?.[hotelId] || "").trim();
+    const suppliedSearchResultId =
+      suppliedSearchResultIdRaw.length <= HOTEL_ID_MAX_LEN && HOTEL_ID_SAFE_RE.test(suppliedSearchResultIdRaw)
+        ? suppliedSearchResultIdRaw
+        : "";
+    if (!snapshot && suppliedSearchResultId) {
+      const restoredRates = await fetchDuffelStayAllRates({
+        searchResultId: suppliedSearchResultId,
+        requestId,
+      });
+      if (restoredRates.ok && restoredRates.result) {
+        const mapped = mapDuffelStayResult(restoredRates.result, adults, checkIn, checkOut, null);
+        const restoredHotelId = String(mapped?.hotelId || "").trim();
+        if (restoredHotelId === hotelId) {
+          cacheDuffelHotelPriceSnapshot(
+            {
+              ...mapped,
+              hotelId,
+              searchResultId: suppliedSearchResultId,
+              fullRatesFetched: true,
+            },
+            checkIn,
+            nights,
+            adults
+          );
+          snapshot = readDuffelHotelPriceSnapshot(hotelId, checkIn, nights, adults);
+        } else {
+          console.warn(
+            "[Hotels PRICES]",
+            "requestId=" + requestId,
+            "continuity_hotel_mismatch requested=" + hotelId,
+            "restored=" + (restoredHotelId || "missing")
+          );
+        }
+      }
+    }
     if (
       snapshot &&
       snapshot.fullRatesFetched !== true &&

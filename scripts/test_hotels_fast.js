@@ -38,6 +38,7 @@ async function main() {
     assert(hotelId, "search item hotelId present");
     byId.set(hotelId, item);
     assert(item.name, "search item name present");
+    assert(item.searchResultId, "search item continuity token present");
   }
 
   const requestedHotelIds = items.slice(0, 3).map((item) => String(item.hotelId || "").trim()).filter(Boolean);
@@ -50,6 +51,9 @@ async function main() {
       checkIn,
       nights: 1,
       adults: 1,
+      searchResultIds: Object.fromEntries(
+        requestedHotelIds.map((hotelId) => [hotelId, byId.get(hotelId)?.searchResultId])
+      ),
     }),
   });
   const pricesJson = await pricesRes.json();
