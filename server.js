@@ -7,6 +7,10 @@ const { Translate } = require("@google-cloud/translate").v2;
 const { FLIGHT_PARSE_MODEL, mockedFlightIntentParse, parseFlightIntentWithOpenAI } = require("./lib/flightIntentParse");
 const { validateFlightIntentRequest, validateFlightIntentResult } = require("./lib/flightIntentValidate");
 const { createFlightBookingService, endpointError, normalizeAvailableServices } = require("./lib/flightBooking");
+const {
+  createHotelBookingService,
+  endpointError: hotelBookingEndpointError,
+} = require("./lib/hotelBooking");
 const { buildFlightSearchContract } = require("./lib/flightSearchContract");
 const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
@@ -380,6 +384,9 @@ const DUFFEL_FLIGHTS_BOOKING_TOKEN = String(process.env.DUFFEL_FLIGHTS_BOOKING_T
 const FLIGHT_TEST_BOOKING_ENABLED = ["1", "true", "yes"].includes(
   String(process.env.FLIGHT_TEST_BOOKING_ENABLED || "").trim().toLowerCase()
 );
+const HOTEL_TEST_BOOKING_ENABLED = ["1", "true", "yes"].includes(
+  String(process.env.HOTEL_TEST_BOOKING_ENABLED || "").trim().toLowerCase()
+);
 const DUFFEL_FLIGHTS_TOKEN =
   (FLIGHT_TEST_BOOKING_ENABLED ? DUFFEL_FLIGHTS_BOOKING_TOKEN : "") ||
   DUFFEL_FLIGHTS_KEY ||
@@ -434,6 +441,7 @@ const FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS = getEnvInt("FLIGHT_PAYMENT_PROCESSI
 const FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR = getEnvInt("FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR", 30);
 const FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS = getEnvInt("FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS", 0);
 const FLIGHT_DUFFEL_ORDER_TIMEOUT_MS = getEnvInt("FLIGHT_DUFFEL_ORDER_TIMEOUT_MS", 130000);
+const HOTEL_DUFFEL_BOOKING_TIMEOUT_MS = getEnvInt("HOTEL_DUFFEL_BOOKING_TIMEOUT_MS", 130000);
 const ZIPPI_ADMIN_HOST = String(process.env.ZIPPI_ADMIN_HOST || "admin.heyzippi.com").trim().toLowerCase();
 const ZIPPI_ADMIN_SECRET = String(process.env.ZIPPI_ADMIN_SECRET || "").trim();
 const ZIPPI_ADMIN_SESSION_SECRET = String(process.env.ZIPPI_ADMIN_SESSION_SECRET || "").trim();
@@ -774,8 +782,10 @@ app.get("/health", (req, res) => {
     hasAmadeusId: !!process.env.AMADEUS_CLIENT_ID,
     hasAmadeusSecret: !!process.env.AMADEUS_CLIENT_SECRET,
     flightTestBookingEnabled: FLIGHT_TEST_BOOKING_ENABLED,
+    hotelTestBookingEnabled: HOTEL_TEST_BOOKING_ENABLED,
     hasStripeTestKey: STRIPE_SECRET_KEY.startsWith("sk_test_"),
     hasDuffelBookingTestToken: DUFFEL_FLIGHTS_BOOKING_TOKEN.startsWith("duffel_test_"),
+    hasDuffelStaysTestToken: DUFFEL_STAYS_TOKEN.startsWith("duffel_test_"),
     hasDatabase: !!dbPool,
     hasAdminAuth: Boolean(ZIPPI_ADMIN_SECRET && ZIPPI_ADMIN_SESSION_SECRET),
     adminHost: ZIPPI_ADMIN_HOST,
@@ -852,6 +862,18 @@ const flightBookingService = createFlightBookingService({
   getPricingConfig: resolveAuthoritativeFlightPricingConfig,
   pricingConfig: currentFlightPricingConfig,
   orderTimeoutMs: FLIGHT_DUFFEL_ORDER_TIMEOUT_MS,
+});
+const hotelBookingService = createHotelBookingService({
+  dbPool,
+  stripe,
+  duffelToken: DUFFEL_STAYS_TOKEN,
+  duffelMode: DUFFEL_STAYS_MODE,
+  duffelVersion: DUFFEL_API_VERSION,
+  fetchWithTimeout,
+  randomUUID,
+  enabled: HOTEL_TEST_BOOKING_ENABLED,
+  getExchangeRates: fetchExchangeRates,
+  bookingTimeoutMs: HOTEL_DUFFEL_BOOKING_TIMEOUT_MS,
 });
 handleStripeWebhook = createStripeWebhookHandler({
   stripe,
@@ -3501,6 +3523,32 @@ async function handleFlightBookingStatus(req, res) {
   }
 }
 
+async function handleHotelBooking(action, req, res) {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+  try {
+    const sessionId = String(req.params?.bookingSessionId || req.body?.bookingSessionId || "").trim();
+    const result = action === "quote"
+      ? await hotelBookingService.quoteCheckout(req.body)
+      : action === "session"
+        ? await hotelBookingService.createSession(userId, req.body)
+        : action === "guest"
+          ? await hotelBookingService.saveGuests(userId, sessionId, req.body)
+          : action === "payment"
+            ? await hotelBookingService.paymentSetup(userId, sessionId)
+            : action === "confirm"
+              ? await hotelBookingService.confirm(userId, sessionId)
+              : await hotelBookingService.getStatus(userId, sessionId);
+    console.log("[Hotel Checkout]", `requestId=${requestId}`, `action=${action}`, `sessionId=${sessionId || result?.bookingSessionId || "none"}`);
+    return res.json(result);
+  } catch (error) {
+    const response = hotelBookingEndpointError(error);
+    console.warn("[Hotel Checkout]", `requestId=${requestId}`, `action=${action}`, `code=${response.body.code || "unknown"}`);
+    return res.status(response.status).json(response.body);
+  }
+}
+
 function bookedTripText(value) {
   const normalized = String(value || "").trim();
   return normalized || null;
@@ -3700,13 +3748,72 @@ function buildFlightBookedTrip(session) {
   };
 }
 
+function buildHotelBookedTrip(session) {
+  const confirmation = bookedTripObject(session.confirmation_snapshot);
+  const hotel = bookedTripObject(confirmation.hotel || session.hotel_snapshot);
+  const room = bookedTripObject(confirmation.room || session.room_snapshot);
+  const search = bookedTripObject(confirmation.search || session.search_snapshot);
+  const customerCurrency = bookedTripText(confirmation.currency || session.customer_currency) || "USD";
+  const customerTotalMinor = Number(confirmation.totalMinor ?? session.customer_total_minor ?? 0);
+  const checkIn = bookedTripText(search.checkIn);
+  const checkOut = bookedTripText(search.checkOut);
+  const location = bookedTripText(hotel.location || hotel.address || search.destination) || "Hotel stay";
+  const roomName = bookedTripText(room.title || room.name || room.roomType);
+  const subtitle = [checkIn && checkOut ? `${checkIn} – ${checkOut}` : null, roomName, location].filter(Boolean).join(" • ");
+  const bookingReference = bookedTripText(confirmation.confirmationCode) || bookedTripText(session.duffel_booking_reference);
+  const guests = Array.isArray(confirmation.guests) ? confirmation.guests : (Array.isArray(session.guest_info) ? session.guest_info : []);
+  const travelerNames = guests.map((guest) => [guest?.firstName || guest?.given_name, guest?.lastName || guest?.family_name]
+    .map(bookedTripText).filter(Boolean).join(" ")).filter(Boolean);
+  return {
+    id: session.id,
+    reference: session.id,
+    type: "hotel",
+    booking_type: "hotel",
+    status: session.booking_status,
+    title: bookedTripText(hotel.name) || "Hotel stay",
+    subtitle,
+    price: bookedTripMoney(customerTotalMinor, customerCurrency),
+    price_text: bookedTripMoney(customerTotalMinor, customerCurrency),
+    bookingReference,
+    booking_reference: bookingReference,
+    createdAt: bookedTripIso(session.created_at),
+    updatedAt: bookedTripIso(session.updated_at || session.confirmed_at || session.created_at),
+    created_at: bookedTripIso(session.created_at),
+    updated_at: bookedTripIso(session.updated_at || session.confirmed_at || session.created_at),
+    totalMinor: customerTotalMinor,
+    currency: customerCurrency,
+    outboundDate: checkIn,
+    returnDate: checkOut,
+    travelerNames,
+    traveler_names: travelerNames,
+    itinerary: [],
+    serviceSummary: roomName ? [roomName] : [],
+    service_summary: roomName ? [roomName] : [],
+    hotel: {
+      bookingSessionId: session.id,
+      bookingId: bookedTripText(confirmation.bookingId || session.duffel_booking_id),
+      bookingReference,
+      name: bookedTripText(hotel.name),
+      address: bookedTripText(hotel.address),
+      location,
+      roomName,
+      checkIn,
+      checkOut,
+      guests: travelerNames,
+      customerCurrency,
+      customerTotalMinor,
+      cancellationTimeline: confirmation.cancellationTimeline || [],
+    },
+  };
+}
+
 async function handleBookingsList(req, res) {
   const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
   if (!requireDb(req, res)) return;
 
   try {
-    const result = await dbPool.query(
+    const [flightResult, hotelResult] = await Promise.all([dbPool.query(
       `select
          id,
          booking_status,
@@ -3729,8 +3836,16 @@ async function handleBookingsList(req, res) {
        order by coalesce(confirmed_at, updated_at, created_at) desc
        limit 50`,
       [userId]
-    );
-    const bookings = result.rows.map(buildFlightBookedTrip);
+    ), dbPool.query(
+      `select * from hotel_booking_sessions
+       where user_id = $1 and booking_status = 'confirmed'
+       order by coalesce(confirmed_at, updated_at, created_at) desc limit 50`,
+      [userId]
+    )]);
+    const bookings = [
+      ...flightResult.rows.map(buildFlightBookedTrip),
+      ...hotelResult.rows.map(buildHotelBookedTrip),
+    ].sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || ""))).slice(0, 50);
     return res.json({
       ok: true,
       bookings,
@@ -3752,6 +3867,12 @@ app.post("/v1/flights/booking/confirm", handleFlightBookingConfirm);
 app.post("/flight/booking/confirm", handleFlightBookingConfirm);
 app.get("/v1/flights/booking/sessions/:bookingSessionId", handleFlightBookingStatus);
 app.get("/flight/booking/sessions/:bookingSessionId", handleFlightBookingStatus);
+app.post("/v1/hotels/quote", (req, res) => handleHotelBooking("quote", req, res));
+app.post("/v1/hotels/booking/sessions", (req, res) => handleHotelBooking("session", req, res));
+app.post("/v1/hotels/booking/sessions/:bookingSessionId/guest", (req, res) => handleHotelBooking("guest", req, res));
+app.post("/v1/hotels/booking/sessions/:bookingSessionId/payment/setup", (req, res) => handleHotelBooking("payment", req, res));
+app.post("/v1/hotels/booking/sessions/:bookingSessionId/confirm", (req, res) => handleHotelBooking("confirm", req, res));
+app.get("/v1/hotels/booking/sessions/:bookingSessionId", (req, res) => handleHotelBooking("status", req, res));
 
 function handleFlightBookReviewFallback(req, res) {
   const rawPayload = req.body || {};

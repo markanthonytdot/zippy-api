@@ -18,6 +18,37 @@ test("Stripe normalization rejects malformed session metadata before PostgreSQL 
   });
   assert.equal(normalized.bookingSessionId, null);
   assert.equal(normalized.paymentIntentId, "pi_1");
+  assert.equal(normalized.bookingType, "flight");
+});
+
+test("Stripe normalization preserves explicit Hotel booking ownership", () => {
+  const normalized = normalizedStripeEvent({
+    id: "evt_hotel", type: "payment_intent.succeeded", created: 10,
+    data: { object: { id: "pi_hotel", status: "succeeded", metadata: { booking_session_id: SESSION_ID, booking_type: "hotel" } } },
+  });
+  assert.equal(normalized.bookingType, "hotel");
+});
+
+test("Hotel PaymentIntent webhook advances only the authoritative Hotel session", async () => {
+  let hotelStatus = "awaiting_payment";
+  const pool = { async connect() { return { async query(sql) {
+    const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+    if (["begin", "commit", "rollback"].includes(normalized)) return { rows: [] };
+    if (normalized.startsWith("insert into stripe_webhook_events")) return { rows: [{ event_id: "evt_hotel_success" }] };
+    if (normalized.startsWith("update hotel_booking_sessions")) {
+      hotelStatus = "payment_paid";
+      return { rows: [{ id: SESSION_ID, booking_status: hotelStatus }] };
+    }
+    if (normalized.startsWith("update stripe_webhook_events")) return { rows: [] };
+    throw new Error(`unexpected SQL: ${normalized}`);
+  }, release() {} }; } };
+  const result = await processStripeEvent(pool, {
+    eventId: "evt_hotel_success", eventType: "payment_intent.succeeded", eventCreated: 10,
+    objectId: "pi_hotel", bookingSessionId: SESSION_ID, bookingType: "hotel", paymentIntentId: "pi_hotel",
+    status: "succeeded", amount: 13_500, currency: "CAD",
+  });
+  assert.equal(result.result, "payment:payment_paid");
+  assert.equal(hotelStatus, "payment_paid");
 });
 
 function webhookPool() {
