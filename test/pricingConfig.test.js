@@ -1,6 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  createCurrencySettingsResolver,
+  defaultCurrencySettingsConfig,
+  mergeFlightPricingWithCurrencySettings,
+  normalizeCurrencySettingsConfig,
   createFlightPricingConfigResolver,
   normalizeFlightPricingConfig,
 } = require("../lib/pricingConfig");
@@ -25,6 +29,20 @@ function resolverFor(rows) {
       dbPool,
       environment: "test",
       fallbackConfig: fallback,
+      log: { warn: (...args) => warnings.push(args) },
+    }),
+  };
+}
+
+function currencyResolverFor(rows) {
+  const warnings = [];
+  const dbPool = { query: async () => ({ rows: typeof rows === "function" ? rows() : rows }) };
+  return {
+    warnings,
+    resolver: createCurrencySettingsResolver({
+      dbPool,
+      environment: "test",
+      fallbackConfig: defaultCurrencySettingsConfig(),
       log: { warn: (...args) => warnings.push(args) },
     }),
   };
@@ -97,4 +115,48 @@ test("rounding rules are validated as part of the authoritative config", () => {
     () => normalizeFlightPricingConfig({ ...fallback, roundingRules: { ...fallback.roundingRules, CAD: 0 } }),
     (error) => error.code === "invalid_pricing_config" && error.field === "roundingRules.CAD"
   );
+});
+
+test("currency settings resolve enabled currencies and shared rounding rules", async () => {
+  const active = {
+    currencies: {
+      CAD: { enabled: true, roundingIncrementMinor: 500 },
+      USD: { enabled: true, roundingIncrementMinor: 500 },
+      EUR: { enabled: false, roundingIncrementMinor: 500 },
+      COP: { enabled: true, roundingIncrementMinor: 50_000 },
+    },
+    defaultsByRegion: {
+      DEFAULT: "USD",
+      CA: "CAD",
+      US: "USD",
+      CO: "COP",
+      EU: "USD",
+    },
+  };
+  const { resolver } = currencyResolverFor([{ version: "2", config: active, activated_at: "2026-08-09T12:00:00Z" }]);
+  const resolved = await resolver.resolve();
+  assert.equal(resolved.source, "centralized_active");
+  assert.equal(resolved.config.currencies.EUR.enabled, false);
+  assert.equal(resolved.config.defaultsByRegion.CO, "COP");
+});
+
+test("currency settings merge becomes authoritative for final rounding", () => {
+  const currencySettings = normalizeCurrencySettingsConfig({
+    currencies: {
+      CAD: { enabled: true, roundingIncrementMinor: 1_000 },
+      USD: { enabled: true, roundingIncrementMinor: 500 },
+      EUR: { enabled: true, roundingIncrementMinor: 500 },
+      COP: { enabled: true, roundingIncrementMinor: 50_000 },
+    },
+    defaultsByRegion: {
+      DEFAULT: "USD",
+      CA: "CAD",
+      US: "USD",
+      CO: "COP",
+      EU: "EUR",
+    },
+  }, defaultCurrencySettingsConfig());
+  const merged = mergeFlightPricingWithCurrencySettings(fallback, currencySettings);
+  assert.equal(merged.roundingRules.CAD, 1_000);
+  assert.equal(merged.roundingRules.COP, 50_000);
 });

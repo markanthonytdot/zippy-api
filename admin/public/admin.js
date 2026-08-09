@@ -1,4 +1,19 @@
-const state = { config: null, draft: null, history: [], route: null, previewTimer: null };
+const supportedCurrencyCodes = ["CAD", "USD", "EUR", "COP"];
+const currencyRegions = ["CA", "US", "EU", "CO", "DEFAULT"];
+
+const state = {
+  config: null,
+  draft: null,
+  history: [],
+  currencyConfig: null,
+  currencyDraft: null,
+  currencyHistory: [],
+  currencyFx: null,
+  currencySource: null,
+  currencyVersion: null,
+  route: null,
+  previewTimer: null,
+};
 
 const pages = {
   overview: {
@@ -10,6 +25,11 @@ const pages = {
     title: "Flight pricing",
     path: "/admin/flights",
     subtitle: "Adjust the customer price model without changing live checkout until you activate a reviewed draft.",
+  },
+  currencies: {
+    title: "Currency settings",
+    path: "/admin/currencies",
+    subtitle: "Control enabled checkout currencies, defaults, and round-up behavior from one shared backend contract.",
   },
   "flight-bookings": {
     title: "Flight bookings",
@@ -31,6 +51,7 @@ const pages = {
 function routeFromPath(pathname) {
   if (pathname.includes("/flights/bookings")) return "flight-bookings";
   if (pathname.includes("/hotels/bookings")) return "hotel-bookings";
+  if (pathname.endsWith("/currencies")) return "currencies";
   if (pathname.endsWith("/flights")) return "flights";
   if (pathname.endsWith("/hotels")) return "hotels";
   return "overview";
@@ -62,6 +83,7 @@ function navigate(route, push = true) {
   document.getElementById("page-subtitle").textContent = pages[route].subtitle;
   if (push) history.pushState({ route }, "", pages[route].path);
   if (route === "overview") loadOverview();
+  if (route === "currencies") loadCurrencies();
   if (route === "flight-bookings") loadFlightBookings();
 }
 
@@ -286,8 +308,6 @@ function writeConfig(config) {
   Object.entries(configInputs).forEach(([key, [id, scale]]) => {
     document.getElementById(id).value = Number(config[key] || 0) / scale;
   });
-  document.getElementById("rounding-major").value = Number(config.roundingRules?.CAD || 500) / 100;
-  document.getElementById("rounding-cop").value = Number(config.roundingRules?.COP || 50000) / 100;
 }
 
 function readConfig() {
@@ -298,12 +318,36 @@ function readConfig() {
         Math.round(Number(document.getElementById(id).value) * scale),
       ])
     ),
-    roundingRules: {
-      CAD: Math.round(Number(document.getElementById("rounding-major").value) * 100),
-      USD: Math.round(Number(document.getElementById("rounding-major").value) * 100),
-      EUR: Math.round(Number(document.getElementById("rounding-major").value) * 100),
-      COP: Math.round(Number(document.getElementById("rounding-cop").value) * 100),
-    },
+  };
+}
+
+function writeCurrencyConfig(config) {
+  supportedCurrencyCodes.forEach((code) => {
+    document.getElementById(`currency-enabled-${code}`).checked = Boolean(config.currencies?.[code]?.enabled);
+    document.getElementById(`currency-rounding-${code}`).value = Number(config.currencies?.[code]?.roundingIncrementMinor || 0) / minorFactor(code);
+  });
+  currencyRegions.forEach((region) => {
+    document.getElementById(`currency-default-${region}`).value = config.defaultsByRegion?.[region] || "USD";
+  });
+}
+
+function readCurrencyConfig() {
+  return {
+    currencies: Object.fromEntries(
+      supportedCurrencyCodes.map((code) => [
+        code,
+        {
+          enabled: document.getElementById(`currency-enabled-${code}`).checked,
+          roundingIncrementMinor: Math.round(Number(document.getElementById(`currency-rounding-${code}`).value) * minorFactor(code)),
+        },
+      ])
+    ),
+    defaultsByRegion: Object.fromEntries(
+      currencyRegions.map((region) => [
+        region,
+        document.getElementById(`currency-default-${region}`).value,
+      ])
+    ),
   };
 }
 
@@ -312,7 +356,16 @@ async function loadConfig() {
   state.config = data.flights.values;
   state.draft = data.flights.latestDraft;
   state.history = data.flights.history || [];
+  state.currencyConfig = data.currencies?.values || null;
+  state.currencyDraft = data.currencies?.latestDraft || null;
+  state.currencyHistory = data.currencies?.history || [];
+  state.currencyFx = data.currencies?.fx || null;
+  state.currencySource = data.currencies?.source || null;
+  state.currencyVersion = data.currencies?.version ?? null;
   writeConfig(state.draft?.config || state.config);
+  if (state.currencyConfig) {
+    writeCurrencyConfig(state.currencyDraft?.config || state.currencyConfig);
+  }
   const source = document.getElementById("flight-config-source");
   source.textContent = data.flights.source === "centralized_active"
     ? "Live source: Active admin version"
@@ -326,6 +379,7 @@ async function loadConfig() {
   document.getElementById("review-active-draft").hidden = !state.draft;
   renderVersionHistory();
   updateChangedState();
+  renderCurrencyState();
   schedulePreview();
 }
 
@@ -340,6 +394,15 @@ function updateChangedState() {
   const current = readConfig();
   const changed = JSON.stringify(current) !== JSON.stringify(state.config);
   const chip = document.getElementById("changed-state");
+  chip.textContent = changed ? "Preview edited" : "Preview unchanged";
+  chip.classList.toggle("changed", changed);
+}
+
+function updateCurrencyChangedState() {
+  if (!state.currencyConfig) return;
+  const current = readCurrencyConfig();
+  const changed = JSON.stringify(current) !== JSON.stringify(state.currencyConfig);
+  const chip = document.getElementById("currency-changed-state");
   chip.textContent = changed ? "Preview edited" : "Preview unchanged";
   chip.classList.toggle("changed", changed);
 }
@@ -369,6 +432,89 @@ function renderVersionHistory() {
   container.querySelectorAll("[data-rollback-version]").forEach((button) => {
     button.addEventListener("click", () => reviewPricingAction("rollback", Number(button.dataset.rollbackVersion)));
   });
+}
+
+function renderCurrencyState() {
+  if (!state.currencyConfig) return;
+  const source = document.getElementById("currency-config-source");
+  source.textContent = state.currencySource === "centralized_active"
+    ? "Live source: Active admin version"
+    : "Live source: Render fallback";
+  document.getElementById("currency-version-label").textContent = state.currencyVersion == null
+    ? "No active admin version yet"
+    : `Active version ${state.currencyVersion}`;
+  document.getElementById("currency-draft-state").textContent = state.currencyDraft ? `Draft v${state.currencyDraft.version}` : "No draft";
+  document.getElementById("currency-draft-state").classList.toggle("draft", Boolean(state.currencyDraft));
+  document.getElementById("review-active-currency-draft").hidden = !state.currencyDraft;
+  renderCurrencyHistory();
+  renderCurrencyOperational();
+  updateCurrencyChangedState();
+}
+
+function renderCurrencyHistory() {
+  const container = document.getElementById("currency-version-history");
+  if (!state.currencyHistory.length) {
+    container.innerHTML = `<div class="empty-state">No centralized currency versions yet. Render fallback settings are still live.</div>`;
+    return;
+  }
+  container.innerHTML = state.currencyHistory.map((version) => `
+    <div class="version-row">
+      <span class="version-status ${escapeHtml(version.status)}">${escapeHtml(version.status)}</span>
+      <div>
+        <strong>Version ${integer(version.version)}</strong>
+        <p>${escapeHtml(
+          version.activated_at
+            ? `Activated ${new Date(version.activated_at).toLocaleString()}`
+            : `Saved ${new Date(version.created_at).toLocaleString()}`
+        )}${version.based_on_version ? ` · based on v${integer(version.based_on_version)}` : ""}</p>
+      </div>
+      ${version.status === "active" || version.status === "draft"
+        ? ""
+        : `<button type="button" class="rollback-button" data-currency-rollback-version="${integer(version.version)}">Restore</button>`}
+    </div>
+  `).join("");
+  container.querySelectorAll("[data-currency-rollback-version]").forEach((button) => {
+    button.addEventListener("click", () => reviewCurrencyAction("rollback", Number(button.dataset.currencyRollbackVersion)));
+  });
+}
+
+function renderCurrencyOperational() {
+  const target = document.getElementById("currency-operational");
+  if (!state.currencyFx) {
+    target.innerHTML = empty("FX status unavailable", "Operational FX health will appear here.");
+    return;
+  }
+  const representative = Object.entries(state.currencyFx.representativeRates || {}).map(([code, value]) => ({
+    code,
+    value,
+  }));
+  target.innerHTML = `
+    <div class="currency-ops-grid">
+      <div class="operation-card">
+        <span>FX source</span>
+        <strong>${escapeHtml(state.currencyFx.source || "Unavailable")}</strong>
+        <small>${state.currencyFx.stale ? "Using cached fallback rates" : "Live cached FX feed"}</small>
+      </div>
+      <div class="operation-card">
+        <span>Last successful update</span>
+        <strong>${escapeHtml(state.currencyFx.updatedAt ? new Date(state.currencyFx.updatedAt).toLocaleString() : "Unavailable")}</strong>
+        <small>Automatic refresh, no manual rate entry</small>
+      </div>
+      <div class="operation-card">
+        <span>FX service health</span>
+        <strong>${escapeHtml(state.currencyFx.stale ? "Degraded" : "Healthy")}</strong>
+        <small>${escapeHtml(state.currencyFx.stale ? "Serving cached rates until refresh succeeds" : "Cached rates are current")}</small>
+      </div>
+    </div>
+    <div class="currency-rates">
+      ${representative.map((item) => `
+        <div class="rate-pill">
+          <span>${escapeHtml(item.code)}</span>
+          <strong>${item.value == null ? "Unavailable" : escapeHtml(String(item.value))}</strong>
+        </div>
+      `).join("")}
+    </div>
+  `;
 }
 
 function pricingNarrative(customer, provider) {
@@ -456,6 +602,28 @@ async function saveDraft() {
   }
 }
 
+async function loadCurrencies() {
+  renderCurrencyState();
+}
+
+async function saveCurrencyDraft() {
+  if (!window.confirm("Save these shared currency settings as a private draft? This will not change live checkout until you activate it.")) return;
+  const button = document.getElementById("save-currency-draft");
+  button.disabled = true;
+  try {
+    const data = await api("/currencies/config/drafts", {
+      method: "POST",
+      body: JSON.stringify({ config: readCurrencyConfig(), confirmed: true }),
+    });
+    toast(`Currency draft version ${data.draft.version} saved. Live checkout did not change.`);
+    await loadConfig();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function configFieldLabel(field) {
   if (field === "fxMarginBps") return "Currency safety buffer";
   if (field === "zippiMarkupBps") return "Zippi profit markup";
@@ -464,10 +632,6 @@ function configFieldLabel(field) {
   if (field === "paymentProcessingPercentBps") return "Card processing %";
   if (field === "paymentProcessingFixedMinor") return "Card processing fixed fee";
   if (field === "paymentProcessingCrossBorderBps") return "International card buffer";
-  if (field === "roundingRules.CAD" || field === "roundingRules.USD" || field === "roundingRules.EUR") {
-    return "Round final price to";
-  }
-  if (field === "roundingRules.COP") return "Round final price to (COP)";
   return field;
 }
 
@@ -475,6 +639,36 @@ function configValue(field, value, currency = "CAD") {
   if (field.endsWith("Bps")) return `${(Number(value) / 100).toFixed(2).replace(/\.00$/, "")}%`;
   if (field.endsWith("Minor")) return money(value, currency);
   if (field.startsWith("roundingRules.")) return money(value, field.split(".")[1]);
+  return String(value);
+}
+
+function currencyFieldLabel(field) {
+  if (field.startsWith("currencies.") && field.endsWith(".enabled")) {
+    return `${field.split(".")[1]} enabled for checkout`;
+  }
+  if (field.startsWith("currencies.") && field.endsWith(".roundingIncrementMinor")) {
+    return `${field.split(".")[1]} round final price to`;
+  }
+  if (field.startsWith("defaultsByRegion.")) {
+    const region = field.split(".")[1];
+    const labelMap = {
+      CA: "Canada default",
+      US: "United States default",
+      EU: "Euro area default",
+      CO: "Colombia default",
+      DEFAULT: "Fallback default",
+    };
+    return labelMap[region] || field;
+  }
+  return field;
+}
+
+function currencyFieldValue(field, value) {
+  if (field.endsWith(".enabled")) return value ? "Enabled" : "Disabled";
+  if (field.endsWith(".roundingIncrementMinor")) {
+    const code = field.split(".")[1];
+    return money(value, code);
+  }
   return String(value);
 }
 
@@ -552,6 +746,65 @@ async function performPricingAction(action, version) {
     });
     document.getElementById("pricing-action-dialog").close();
     toast(`Pricing version ${data.active.version} is now live.`);
+    await loadConfig();
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
+}
+
+async function reviewCurrencyAction(action, version) {
+  const dialog = document.getElementById("pricing-action-dialog");
+  const detail = document.getElementById("pricing-action-detail");
+  detail.innerHTML = `<div class="pricing-review"><p class="eyebrow">Loading comparison</p><h2>Reviewing currency version...</h2></div>`;
+  dialog.showModal();
+  try {
+    const basePath = action === "activate"
+      ? `/currencies/config/drafts/${version}/review`
+      : `/currencies/config/versions/${version}/review`;
+    const review = await api(basePath, { method: "POST", body: JSON.stringify({}) });
+    const changes = review.changes.length
+      ? review.changes.map((change) => `
+        <div class="change-row">
+          <span>${escapeHtml(currencyFieldLabel(change.field))}</span>
+          <strong>${escapeHtml(currencyFieldValue(change.field, change.from))} &rarr; ${escapeHtml(currencyFieldValue(change.field, change.to))}</strong>
+        </div>
+      `).join("")
+      : `<div class="change-row"><span>Currency settings</span><strong>No numerical change</strong></div>`;
+    const actionLabel = action === "activate" ? "Activate draft" : "Restore version";
+    detail.innerHTML = `
+      <div class="pricing-review">
+        <p class="eyebrow">Explicit confirmation</p>
+        <h2>${action === "activate" ? `Activate currency draft v${version}?` : `Restore currency version v${version}?`}</h2>
+        <p>These settings will change enabled currencies, defaults, and final round-up rules for every platform that consumes the shared backend contract.</p>
+        <div class="change-list">${changes}</div>
+        <div class="action-warning">Customer price calculations stay backend-owned. Activating this draft affects future searches and quotes only.</div>
+        <div class="dialog-actions">
+          <button type="button" class="secondary-button" id="cancel-pricing-action">Cancel</button>
+          <button type="button" class="primary-button compact" id="confirm-pricing-action">${actionLabel}</button>
+        </div>
+      </div>
+    `;
+    document.getElementById("cancel-pricing-action").addEventListener("click", () => dialog.close());
+    document.getElementById("confirm-pricing-action").addEventListener("click", () => performCurrencyAction(action, version));
+  } catch (error) {
+    detail.innerHTML = `<div class="pricing-review"><h2>Review unavailable</h2><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+async function performCurrencyAction(action, version) {
+  const button = document.getElementById("confirm-pricing-action");
+  button.disabled = true;
+  try {
+    const path = action === "activate"
+      ? `/currencies/config/drafts/${version}/activate`
+      : `/currencies/config/versions/${version}/rollback`;
+    const data = await api(path, {
+      method: "POST",
+      body: JSON.stringify({ confirmed: true, reviewedVersion: version }),
+    });
+    document.getElementById("pricing-action-dialog").close();
+    toast(`Currency version ${data.active.version} is now live.`);
     await loadConfig();
   } catch (error) {
     toast(error.message);
@@ -668,13 +921,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("provider-amount").addEventListener("input", schedulePreview);
   document.getElementById("provider-currency").addEventListener("change", schedulePreview);
   document.getElementById("customer-currency").addEventListener("change", schedulePreview);
+  document.getElementById("currency-settings-form").addEventListener("input", updateCurrencyChangedState);
+  document.getElementById("currency-settings-form").addEventListener("change", updateCurrencyChangedState);
   document.getElementById("reset-flight-config").addEventListener("click", () => {
     writeConfig(state.config);
     schedulePreview();
   });
+  document.getElementById("reset-currency-config").addEventListener("click", () => {
+    writeCurrencyConfig(state.currencyConfig);
+    updateCurrencyChangedState();
+  });
   document.getElementById("save-flight-draft").addEventListener("click", saveDraft);
+  document.getElementById("save-currency-draft").addEventListener("click", saveCurrencyDraft);
   document.getElementById("review-active-draft").addEventListener("click", () => {
     if (state.draft) reviewPricingAction("activate", Number(state.draft.version));
+  });
+  document.getElementById("review-active-currency-draft").addEventListener("click", () => {
+    if (state.currencyDraft) reviewCurrencyAction("activate", Number(state.currencyDraft.version));
   });
   document.querySelector(".dialog-close").addEventListener("click", () => document.getElementById("booking-dialog").close());
   document.querySelector(".pricing-dialog-close").addEventListener("click", () => document.getElementById("pricing-action-dialog").close());

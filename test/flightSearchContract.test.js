@@ -199,3 +199,47 @@ test("does not expose a normalized price claim without a valid currency", () => 
   assert.equal(contract.offers[0].totalCurrency, null);
   assert.deepEqual(contract.offers[0].rankingEligibility, { best: false, cheapest: false, fastest: true });
 });
+
+test("includes authoritative customer pricing snapshots when shared pricing inputs are supplied", () => {
+  const priced = offer("off_priced", "200.00", ["PT3H"]);
+  priced.total_currency = "USD";
+  const contract = buildFlightSearchContract([priced], {
+    requestedCurrency: "CAD",
+    pricingConfig: {
+      fxMarginBps: 500,
+      zippiMarkupBps: 700,
+      minGrossMarginMinor: 1_599,
+      zippiFeeMinor: 499,
+      paymentProcessingPercentBps: 350,
+      paymentProcessingFixedMinor: 30,
+      paymentProcessingCrossBorderBps: 0,
+      roundingRules: { CAD: 500, USD: 500, EUR: 500, COP: 50_000 },
+    },
+    currencySettings: {
+      currencies: {
+        CAD: { enabled: true, roundingIncrementMinor: 500 },
+        USD: { enabled: true, roundingIncrementMinor: 500 },
+        EUR: { enabled: true, roundingIncrementMinor: 500 },
+        COP: { enabled: true, roundingIncrementMinor: 50_000 },
+      },
+      defaultsByRegion: {
+        DEFAULT: "USD",
+        CA: "CAD",
+        US: "USD",
+        CO: "COP",
+        EU: "EUR",
+      },
+    },
+    exchangeRates: {
+      base: "USD",
+      rates: { USD: 1, CAD: 1.35, EUR: 0.92, COP: 4_150 },
+      source: "test_rates",
+    },
+  });
+
+  assert.equal(contract.customerPricing.selectedCurrency, "CAD");
+  assert.equal(contract.rankingCurrency, "CAD");
+  assert.equal(contract.offers[0].customerPricing.selected.currency, "CAD");
+  assert.equal(contract.offers[0].customerPricing.options.COP.currency, "COP");
+  assert.ok(contract.offers[0].customerPricing.selected.totalMinor % 500 === 0);
+});

@@ -12,7 +12,16 @@ const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
 const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
 const { createAdminDashboardRouter } = require("./lib/adminDashboard");
-const { DEFAULT_ROUNDING_RULES, createFlightPricingConfigResolver } = require("./lib/pricingConfig");
+const {
+  DEFAULT_ROUNDING_RULES,
+  SUPPORTED_CUSTOMER_CURRENCIES,
+  createCurrencySettingsResolver,
+  createFlightPricingConfigResolver,
+  defaultCurrencySettingsConfig,
+  mergeFlightPricingWithCurrencySettings,
+  normalizeCurrencySettingsConfig,
+  resolveCustomerCurrency,
+} = require("./lib/pricingConfig");
 const app = express();
 
 const translateClient = (() => {
@@ -805,12 +814,30 @@ const currentFlightPricingConfig = Object.freeze({
   paymentProcessingCrossBorderBps: FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS,
   roundingRules: DEFAULT_ROUNDING_RULES,
 });
+const currentCurrencySettingsConfig = Object.freeze(defaultCurrencySettingsConfig());
 const flightPricingEnvironment = FLIGHT_TEST_BOOKING_ENABLED ? "test" : "production";
 const flightPricingConfigResolver = createFlightPricingConfigResolver({
   dbPool,
   environment: flightPricingEnvironment,
   fallbackConfig: currentFlightPricingConfig,
 });
+const currencySettingsResolver = createCurrencySettingsResolver({
+  dbPool,
+  environment: flightPricingEnvironment,
+  fallbackConfig: currentCurrencySettingsConfig,
+});
+
+async function resolveAuthoritativeFlightPricingConfig() {
+  const [pricingResolution, currencyResolution] = await Promise.all([
+    flightPricingConfigResolver.resolve(),
+    currencySettingsResolver.resolve(),
+  ]);
+  return {
+    ...pricingResolution,
+    config: mergeFlightPricingWithCurrencySettings(pricingResolution.config, currencyResolution.config),
+    currencySettings: currencyResolution,
+  };
+}
 
 const flightBookingService = createFlightBookingService({
   dbPool,
@@ -822,7 +849,7 @@ const flightBookingService = createFlightBookingService({
   randomUUID,
   enabled: FLIGHT_TEST_BOOKING_ENABLED,
   getExchangeRates: fetchExchangeRates,
-  getPricingConfig: flightPricingConfigResolver.resolve,
+  getPricingConfig: resolveAuthoritativeFlightPricingConfig,
   pricingConfig: currentFlightPricingConfig,
   orderTimeoutMs: FLIGHT_DUFFEL_ORDER_TIMEOUT_MS,
 });
@@ -907,6 +934,7 @@ app.use("/admin", createAdminDashboardRouter({
   sessionSecret: ZIPPI_ADMIN_SESSION_SECRET,
   adminActor: ZIPPI_ADMIN_ACTOR,
   pricingConfigResolver: flightPricingConfigResolver,
+  currencySettingsResolver,
   getExchangeRates: fetchExchangeRates,
 }));
 
@@ -3079,7 +3107,24 @@ app.post("/v1/flights/search", async (req, res) => {
     // Add the Zippi-owned client contract without changing the provider-shaped
     // `data.offers` response consumed by existing iOS releases.
     if (data && typeof data === "object") {
-      data.zippiFlightSearch = buildFlightSearchContract(fetchedOffers, requestData.currency);
+      const [pricingResolution, currencyResolution, exchangeRates] = await Promise.all([
+        resolveAuthoritativeFlightPricingConfig(),
+        currencySettingsResolver.resolve(),
+        fetchExchangeRates(),
+      ]);
+      const resolvedCustomerCurrency = resolveCustomerCurrency({
+        currencySettings: currencyResolution.config,
+        requestedCurrency: requestData.currency,
+        countryCode: requestCountryCode(req, requestData.country_code || requestData.countryCode),
+      });
+      data.zippiFlightSearch = buildFlightSearchContract(fetchedOffers, {
+        requestedCurrency: requestData.currency,
+        selectedCurrency: resolvedCustomerCurrency.currency,
+        countryCode: requestCountryCode(req, requestData.country_code || requestData.countryCode),
+        pricingConfig: pricingResolution.config,
+        currencySettings: currencyResolution.config,
+        exchangeRates,
+      });
     }
 
     const offersForCache = offerRequestWasWrapped ? json?.data?.offer_request?.offers : json?.data?.offers;
@@ -5816,15 +5861,87 @@ app.get("/me/saved-debug", async (req, res) => {
 // ---------------------------------------------
 // Exchange Rates (cached, refreshed hourly)
 // ---------------------------------------------
-let exchangeRatesCache = { rates: null, base: "USD", updatedAt: null, expiresAt: 0, source: null };
+let exchangeRatesCache = {
+  rates: null,
+  base: "USD",
+  updatedAt: null,
+  expiresAt: 0,
+  source: null,
+  stale: false,
+  lastAttemptedAt: null,
+  lastError: null,
+};
 const EXCHANGE_RATES_TTL_MS = 60 * 60 * 1000; // 1 hour
 const EXCHANGE_RATES_MARGIN = 0.025; // 2.5% safety margin on all rates
+
+function representativeExchangeRates(rates) {
+  const source = rates && typeof rates === "object" ? rates : {};
+  const representative = { USD: 1 };
+  for (const code of SUPPORTED_CUSTOMER_CURRENCIES) {
+    if (code === "USD") continue;
+    const value = Number(source[code]);
+    representative[code] = Number.isFinite(value) && value > 0 ? value : null;
+  }
+  return representative;
+}
+
+function exchangeRateHealthSnapshot(cache) {
+  const ageMs = cache?.updatedAt ? Math.max(0, Date.now() - Date.parse(cache.updatedAt)) : null;
+  return {
+    ok: Boolean(cache?.rates),
+    stale: Boolean(cache?.stale),
+    lastSuccessfulUpdate: cache?.updatedAt || null,
+    lastAttemptedUpdate: cache?.lastAttemptedAt || null,
+    ageSeconds: ageMs == null ? null : Math.floor(ageMs / 1000),
+    source: cache?.source || null,
+    representativeRates: representativeExchangeRates(cache?.rates),
+    error: cache?.lastError || null,
+  };
+}
+
+function requestCountryCode(req, explicitCountryCode = "") {
+  const explicit = String(explicitCountryCode || "").trim().toUpperCase();
+  if (/^[A-Z]{2}$/.test(explicit)) return explicit;
+  const headerCandidates = [
+    req.headers["x-country-code"],
+    req.headers["x-app-country-code"],
+    req.headers["cf-ipcountry"],
+    req.headers["x-vercel-ip-country"],
+  ];
+  for (const candidate of headerCandidates) {
+    const code = String(candidate || "").trim().toUpperCase();
+    if (/^[A-Z]{2}$/.test(code)) return code;
+  }
+  return "";
+}
+
+function currencySettingsPayload(resolution) {
+  const config = normalizeCurrencySettingsConfig(
+    resolution?.config,
+    currentCurrencySettingsConfig
+  );
+  return {
+    source: resolution?.source || "environment_fallback",
+    version: resolution?.version ?? null,
+    environment: resolution?.environment || flightPricingEnvironment,
+    activatedAt: resolution?.activatedAt || null,
+    selectedDefaultCurrency: config.defaultsByRegion.DEFAULT,
+    defaultsByRegion: config.defaultsByRegion,
+    currencies: SUPPORTED_CUSTOMER_CURRENCIES.map((code) => ({
+      code,
+      enabled: config.currencies[code].enabled,
+      roundingIncrementMinor: config.currencies[code].roundingIncrementMinor,
+    })),
+  };
+}
 
 async function fetchExchangeRates() {
   const now = Date.now();
   if (exchangeRatesCache.rates && exchangeRatesCache.expiresAt > now) {
     return exchangeRatesCache;
   }
+  exchangeRatesCache.lastAttemptedAt = new Date(now).toISOString();
+  exchangeRatesCache.lastError = null;
 
   // Use Open Exchange Rates free tier (USD base, 1000 req/month)
   // App ID is free — sign up at openexchangerates.org
@@ -5843,6 +5960,7 @@ async function fetchExchangeRates() {
       }
     } catch (e) {
       console.log("[ExchangeRates] openexchangerates fetch failed:", e.message);
+      exchangeRatesCache.lastError = `open_exchange_rates:${e.message}`;
     }
   }
 
@@ -5857,11 +5975,13 @@ async function fetchExchangeRates() {
       }
     } catch (e) {
       console.log("[ExchangeRates] er-api fallback failed:", e.message);
+      exchangeRatesCache.lastError = `er_api:${e.message}`;
     }
   }
 
   if (!rawRates) {
     console.log("[ExchangeRates] all sources failed, returning stale cache or null");
+    exchangeRatesCache.stale = Boolean(exchangeRatesCache.rates);
     return exchangeRatesCache;
   }
 
@@ -5879,6 +5999,9 @@ async function fetchExchangeRates() {
     expiresAt: now + EXCHANGE_RATES_TTL_MS,
     margin: EXCHANGE_RATES_MARGIN,
     source,
+    stale: false,
+    lastAttemptedAt: exchangeRatesCache.lastAttemptedAt,
+    lastError: null,
   };
 
   console.log("[ExchangeRates] refreshed", Object.keys(normalizedRates).length, "currencies, margin=", EXCHANGE_RATES_MARGIN, "source=", source);
@@ -5894,7 +6017,10 @@ app.get("/v1/exchange-rates", async (req, res) => {
     if (!cached.rates) {
       return res.status(503).json({ ok: false, error: "Exchange rates temporarily unavailable" });
     }
-    const resolvedPricing = await flightPricingConfigResolver.resolve();
+    const [resolvedPricing, resolvedCurrencies] = await Promise.all([
+      resolveAuthoritativeFlightPricingConfig(),
+      currencySettingsResolver.resolve(),
+    ]);
     return res.json({
       ok: true,
       base: cached.base,
@@ -5902,6 +6028,8 @@ app.get("/v1/exchange-rates", async (req, res) => {
       updated_at: cached.updatedAt,
       margin: cached.margin,
       source: cached.source,
+      fx_service: exchangeRateHealthSnapshot(cached),
+      customer_currencies: currencySettingsPayload(resolvedCurrencies),
       flight_pricing: {
         source: resolvedPricing.source,
         version: resolvedPricing.version,

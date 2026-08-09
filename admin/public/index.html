@@ -20,10 +20,11 @@
         <a href="/admin/overview" data-route="overview"><span class="nav-icon">01</span><span>Overview</span></a>
         <p class="nav-label">Flights</p>
         <a href="/admin/flights" data-route="flights"><span class="nav-icon">02</span><span>Flight pricing</span></a>
-        <a href="/admin/flights/bookings" data-route="flight-bookings"><span class="nav-icon">03</span><span>Flight bookings</span></a>
+        <a href="/admin/currencies" data-route="currencies"><span class="nav-icon">03</span><span>Currency settings</span></a>
+        <a href="/admin/flights/bookings" data-route="flight-bookings"><span class="nav-icon">04</span><span>Flight bookings</span></a>
         <p class="nav-label">Hotels</p>
-        <a href="/admin/hotels" data-route="hotels"><span class="nav-icon">04</span><span>Hotels</span></a>
-        <a href="/admin/hotels/bookings" data-route="hotel-bookings"><span class="nav-icon">05</span><span>Hotel bookings</span></a>
+        <a href="/admin/hotels" data-route="hotels"><span class="nav-icon">05</span><span>Hotels</span></a>
+        <a href="/admin/hotels/bookings" data-route="hotel-bookings"><span class="nav-icon">06</span><span>Hotel bookings</span></a>
       </nav>
       <form method="post" action="/admin/logout"><button class="sign-out" type="submit">Sign out</button></form>
     </aside>
@@ -71,9 +72,7 @@
               <div class="control-group"><label for="processing-percent">Card processing %</label><div class="input-unit"><input id="processing-percent" name="paymentProcessingPercentBps" type="number" min="0" max="20" step="0.01"><span>%</span></div><small>Percentage allowance for card costs.</small></div>
               <div class="control-group"><label for="processing-fixed">Card processing fixed fee</label><div class="input-unit money"><span>$</span><input id="processing-fixed" name="paymentProcessingFixedMinor" type="number" min="0" step="0.01"></div><small>Flat card-cost allowance for each booking.</small></div>
               <div class="control-group"><label for="cross-border">International card buffer</label><div class="input-unit"><input id="cross-border" name="paymentProcessingCrossBorderBps" type="number" min="0" max="20" step="0.01"><span>%</span></div><small>Optional extra buffer for international card costs.</small></div>
-              <div class="control-group"><label for="rounding-major">Round final price to</label><div class="input-unit money"><span>$</span><input id="rounding-major" type="number" min="0.01" step="0.01"></div><small>Used for CAD, USD, and EUR. The final price always rounds up.</small></div>
-              <div class="control-group"><label for="rounding-cop">Round final price to (COP)</label><div class="input-unit"><input id="rounding-cop" type="number" min="1" step="1"><span>COP</span></div><small>Stored using COP minor-unit conventions.</small></div>
-              <div class="rounding-note"><span>Direction</span><strong>Always round up, never down</strong></div>
+              <div class="rounding-note"><span>Rounding</span><strong>Now managed in Currency settings for every platform</strong></div>
               <button class="primary-button" id="save-flight-draft" type="button">Save as draft</button>
               <p class="form-note">Saving a draft does not change checkout. Only an activated version goes live.</p>
             </form>
@@ -82,8 +81,8 @@
           <article class="panel preview-panel">
             <div class="panel-heading"><div><p class="eyebrow">Private sample</p><h3>Customer checkout preview</h3></div><span class="preview-badge">Not live</span></div>
             <div class="sample-inputs">
-              <label>Supplier cost<div class="sample-field"><select id="provider-currency" aria-label="Provider currency"><option>USD</option><option>CAD</option><option>EUR</option></select><input id="provider-amount" type="number" value="200" min="1" step="0.01" aria-label="Provider cost"></div></label>
-              <label>Customer charge currency<select id="customer-currency"><option>CAD</option><option>USD</option><option>EUR</option></select></label>
+              <label>Supplier cost<div class="sample-field"><select id="provider-currency" aria-label="Provider currency"><option>USD</option><option>CAD</option><option>EUR</option><option>COP</option></select><input id="provider-amount" type="number" value="200" min="1" step="0.01" aria-label="Provider cost"></div></label>
+              <label>Customer charge currency<select id="customer-currency"><option>CAD</option><option>USD</option><option>EUR</option><option>COP</option></select></label>
             </div>
             <div id="pricing-preview" class="preview-loading">Calculating with the backend pricing engine...</div>
           </article>
@@ -91,6 +90,45 @@
         <article class="panel version-panel">
           <div class="panel-heading"><div><p class="eyebrow">Version history</p><h3>Drafts and live versions</h3></div><button class="primary-button compact" id="review-active-draft" type="button" hidden>Review draft before going live</button></div>
           <div id="pricing-version-history" class="version-history"><div class="empty-state">No centralized pricing versions yet. Environment fallback is live.</div></div>
+        </article>
+      </section>
+
+      <section class="page" data-page="currencies" hidden>
+        <div class="intro-row"><div><h2>One shared currency contract for iOS, Android, and Web.</h2><p>Enable or disable checkout currencies, set automatic defaults, and control the final round-up increment without touching daily FX rates manually.</p></div><span class="source-pill" id="currency-config-source">Loading live currency source</span></div>
+        <div class="config-state-bar" aria-live="polite"><span class="state-chip live">Shared contract</span><span class="state-chip" id="currency-draft-state">No draft</span><span class="state-chip" id="currency-changed-state">Preview unchanged</span><span id="currency-version-label">Checking active version...</span></div>
+        <div class="notice-banner"><strong>FX rates update automatically.</strong><span>Administrators control business rules here, not daily exchange-rate entries.</span></div>
+        <div class="pricing-layout">
+          <article class="panel controls-panel">
+            <div class="panel-heading"><div><p class="eyebrow">Currency settings</p><h3>Checkout currencies and defaults</h3></div><button type="button" class="text-button" id="reset-currency-config">Reset preview</button></div>
+            <form id="currency-settings-form">
+              <div class="currency-settings-grid">
+                <div class="currency-settings-header">Currency</div>
+                <div class="currency-settings-header">Enabled for checkout</div>
+                <div class="currency-settings-header">Round final price to</div>
+                <div class="currency-settings-row"><strong>CAD</strong><label class="toggle-inline"><input id="currency-enabled-CAD" type="checkbox"><span>Enabled</span></label><div class="input-unit money"><span>$</span><input id="currency-rounding-CAD" type="number" min="0.01" step="0.01"></div></div>
+                <div class="currency-settings-row"><strong>USD</strong><label class="toggle-inline"><input id="currency-enabled-USD" type="checkbox"><span>Enabled</span></label><div class="input-unit money"><span>$</span><input id="currency-rounding-USD" type="number" min="0.01" step="0.01"></div></div>
+                <div class="currency-settings-row"><strong>EUR</strong><label class="toggle-inline"><input id="currency-enabled-EUR" type="checkbox"><span>Enabled</span></label><div class="input-unit money"><span>€</span><input id="currency-rounding-EUR" type="number" min="0.01" step="0.01"></div></div>
+                <div class="currency-settings-row"><strong>COP</strong><label class="toggle-inline"><input id="currency-enabled-COP" type="checkbox"><span>Enabled</span></label><div class="input-unit"><input id="currency-rounding-COP" type="number" min="1" step="1"><span>COP</span></div></div>
+              </div>
+              <div class="control-group"><label>Automatic defaults by market</label><div class="currency-defaults-grid">
+                <label>Canada<select id="currency-default-CA"><option>CAD</option><option>USD</option><option>EUR</option><option>COP</option></select></label>
+                <label>United States<select id="currency-default-US"><option>USD</option><option>CAD</option><option>EUR</option><option>COP</option></select></label>
+                <label>Euro area<select id="currency-default-EU"><option>EUR</option><option>USD</option><option>CAD</option><option>COP</option></select></label>
+                <label>Colombia<select id="currency-default-CO"><option>COP</option><option>USD</option><option>CAD</option><option>EUR</option></select></label>
+                <label>Fallback default<select id="currency-default-DEFAULT"><option>USD</option><option>CAD</option><option>EUR</option><option>COP</option></select></label>
+              </div><small>Customers can still change their currency picker manually. These defaults only choose the starting currency.</small></div>
+              <button class="primary-button" id="save-currency-draft" type="button">Save as draft</button>
+              <p class="form-note">Saving a draft does not change live checkout. Activation updates every platform that consumes the shared backend contract.</p>
+            </form>
+          </article>
+          <article class="panel preview-panel">
+            <div class="panel-heading"><div><p class="eyebrow">Operational status</p><h3>FX source and live health</h3></div><span class="preview-badge">Read only</span></div>
+            <div id="currency-operational" class="preview-loading">Loading FX service health...</div>
+          </article>
+        </div>
+        <article class="panel version-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Version history</p><h3>Currency drafts and live versions</h3></div><button class="primary-button compact" id="review-active-currency-draft" type="button" hidden>Review draft before going live</button></div>
+          <div id="currency-version-history" class="version-history"><div class="empty-state">No centralized currency versions yet. Environment fallback is live.</div></div>
         </article>
       </section>
 
