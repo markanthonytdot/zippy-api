@@ -10,13 +10,19 @@ function required(name) {
   if (!value) throw new Error(`${name} is required`);
   return value;
 }
+
+function requiredDuffelStaysToken(environment = process.env) {
+  const value = String(environment.DUFFEL_STAYS_KEY || environment.DUFFEL_API_KEY || "").trim();
+  if (!value) throw new Error("DUFFEL_STAYS_KEY or DUFFEL_API_KEY is required");
+  return value;
+}
 async function main() {
   if (!["1", "true", "yes"].includes(String(process.env.HOTEL_TEST_BOOKING_ENABLED || "").toLowerCase())) {
     throw new Error("Hotel TEST booking must be explicitly enabled");
   }
   const databaseUrl = required("DATABASE_URL");
   const stripeKey = required("STRIPE_SECRET_KEY");
-  const duffelToken = required("DUFFEL_STAYS_KEY");
+  const duffelToken = requiredDuffelStaysToken();
   if (!stripeKey.startsWith("sk_test_")) throw new Error("Hotel recovery requires a Stripe TEST key");
   if (!duffelToken.startsWith("duffel_test_")) throw new Error("Hotel recovery requires a Duffel TEST token");
   const pool = new Pool({ connectionString: databaseUrl, ssl: databaseSSLForURL(databaseUrl), connectionTimeoutMillis: 10_000 });
@@ -39,4 +45,8 @@ async function main() {
     } while (!once && !stopping);
   } finally { await pool.end(); }
 }
-main().catch((error) => { console.error(`[hotel-recovery] failed: ${error.message}`); process.exitCode = 1; });
+if (require.main === module) {
+  main().catch((error) => { console.error(`[hotel-recovery] failed: ${error.message}`); process.exitCode = 1; });
+}
+
+module.exports = { requiredDuffelStaysToken };
