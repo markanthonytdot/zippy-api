@@ -415,7 +415,7 @@ const DUFFEL_API_VERSION = String(process.env.DUFFEL_API_VERSION || "v2").trim()
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
 const stripe = STRIPE_SECRET_KEY.startsWith("sk_test_") ? new Stripe(STRIPE_SECRET_KEY) : null;
-const FLIGHT_ZIPPI_FEE_MINOR = getEnvInt("FLIGHT_ZIPPI_FEE_MINOR", 299);
+const FLIGHT_ZIPPI_FEE_MINOR = getEnvInt("FLIGHT_ZIPPI_FEE_MINOR", 499);
 const FLIGHT_DUFFEL_ORDER_TIMEOUT_MS = getEnvInt("FLIGHT_DUFFEL_ORDER_TIMEOUT_MS", 130000);
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
@@ -790,7 +790,9 @@ const flightBookingService = createFlightBookingService({
   fetchWithTimeout,
   randomUUID,
   enabled: FLIGHT_TEST_BOOKING_ENABLED,
+  getExchangeRates: fetchExchangeRates,
   zippiFeeMinor: FLIGHT_ZIPPI_FEE_MINOR,
+  fxMarginBps: 500,
   orderTimeoutMs: FLIGHT_DUFFEL_ORDER_TIMEOUT_MS,
 });
 handleStripeWebhook = createStripeWebhookHandler({
@@ -5767,7 +5769,7 @@ app.get("/me/saved-debug", async (req, res) => {
 // ---------------------------------------------
 // Exchange Rates (cached, refreshed hourly)
 // ---------------------------------------------
-let exchangeRatesCache = { rates: null, base: "USD", updatedAt: null, expiresAt: 0 };
+let exchangeRatesCache = { rates: null, base: "USD", updatedAt: null, expiresAt: 0, source: null };
 const EXCHANGE_RATES_TTL_MS = 60 * 60 * 1000; // 1 hour
 const EXCHANGE_RATES_MARGIN = 0.025; // 2.5% safety margin on all rates
 
@@ -5782,6 +5784,7 @@ async function fetchExchangeRates() {
   const appId = process.env.OPEN_EXCHANGE_RATES_APP_ID || "";
 
   let rawRates = null;
+  let source = null;
 
   if (appId) {
     try {
@@ -5789,6 +5792,7 @@ async function fetchExchangeRates() {
       const json = await r.json();
       if (json && json.rates) {
         rawRates = json.rates;
+        source = "open_exchange_rates";
       }
     } catch (e) {
       console.log("[ExchangeRates] openexchangerates fetch failed:", e.message);
@@ -5802,6 +5806,7 @@ async function fetchExchangeRates() {
       const json = await r.json();
       if (json && json.rates) {
         rawRates = json.rates;
+        source = "er_api";
       }
     } catch (e) {
       console.log("[ExchangeRates] er-api fallback failed:", e.message);
@@ -5813,27 +5818,23 @@ async function fetchExchangeRates() {
     return exchangeRatesCache;
   }
 
-  // Apply safety margin: make foreign currencies MORE expensive for display
-  // If 1 USD = 1.36 CAD, we show 1 USD = 1.36 * (1 - 0.025) = 1.326 CAD
-  // This means we UNDER-convert: user sees a slightly lower price in foreign currency
-  // When they pay in USD, the real amount won't be more than displayed
-  // This protects the business — user never sees a price lower than what they actually pay
-  const safeRates = {};
+  const normalizedRates = {};
   for (const [code, rate] of Object.entries(rawRates)) {
     if (typeof rate === "number" && rate > 0) {
-      safeRates[code] = Math.round(rate * (1 - EXCHANGE_RATES_MARGIN) * 1000000) / 1000000;
+      normalizedRates[code] = Math.round(rate * 1000000) / 1000000;
     }
   }
 
   exchangeRatesCache = {
-    rates: safeRates,
+    rates: normalizedRates,
     base: "USD",
     updatedAt: new Date().toISOString(),
     expiresAt: now + EXCHANGE_RATES_TTL_MS,
     margin: EXCHANGE_RATES_MARGIN,
+    source,
   };
 
-  console.log("[ExchangeRates] refreshed", Object.keys(safeRates).length, "currencies, margin=", EXCHANGE_RATES_MARGIN);
+  console.log("[ExchangeRates] refreshed", Object.keys(normalizedRates).length, "currencies, margin=", EXCHANGE_RATES_MARGIN, "source=", source);
   return exchangeRatesCache;
 }
 
@@ -5852,6 +5853,11 @@ app.get("/v1/exchange-rates", async (req, res) => {
       rates: cached.rates,
       updated_at: cached.updatedAt,
       margin: cached.margin,
+      source: cached.source,
+      flight_pricing: {
+        fx_margin_bps: 500,
+        zippi_fee_minor: FLIGHT_ZIPPI_FEE_MINOR,
+      },
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });

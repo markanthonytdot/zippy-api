@@ -23,7 +23,7 @@ function validPayload(overrides = {}) {
     offerId: "off_test",
     returnOfferId: null,
     currency: "USD",
-    totalMinor: 12_299,
+    totalMinor: 12_500,
     baggageServiceIds: [],
     travelers: [{
       travelerType: "adult",
@@ -107,19 +107,53 @@ test("repeated baggage IDs preserve the selected Duffel quantity", () => {
     tax_amount: "20.00",
     total_amount: "120.00",
     total_currency: "USD",
-  }, services, 299);
+  }, services, "USD", 499, { base: "USD", rates: { USD: 1 }, source: "test" }, 500);
   assert.deepEqual(services.map(({ id, quantity }) => ({ id, quantity })), [
     { id: "ase_bag", quantity: 2 },
     { id: "ase_seat", quantity: 1 },
   ]);
-  assert.equal(pricing.duffelTotalMinor, 17_800);
-  assert.equal(pricing.chargeTotalMinor, 18_099);
+  assert.equal(pricing.providerTotalMinor, 17_800);
+  assert.equal(pricing.customerTotalMinor, 18_500);
   assert.deepEqual(buildPricingQuote(pricing).lineItems, {
     baseFareMinor: 10_000,
     taxesMinor: 2_000,
     servicesMinor: 5_800,
-    zippiFeeMinor: 299,
+    zippiFeeMinor: 499,
+    preRoundMinor: 18_299,
+    roundingAdjustmentMinor: 201,
   });
+});
+
+test("two-sided pricing converts the provider total, adds the fee, and rounds up in customer currency", () => {
+  const pricing = calculatePricing({
+    base_amount: "300.00",
+    tax_amount: "80.00",
+    total_amount: "380.00",
+    total_currency: "USD",
+  }, [], "CAD", 499, { base: "USD", rates: { USD: 1, CAD: 1.35 }, source: "test" }, 500);
+
+  assert.equal(pricing.providerCurrency, "USD");
+  assert.equal(pricing.providerTotalMinor, 38_000);
+  assert.equal(pricing.customerCurrency, "CAD");
+  assert.equal(pricing.customerFxMarginBps, 500);
+  assert.equal(pricing.customerConvertedMinor, 53_865);
+  assert.equal(pricing.customerPreRoundMinor, 54_364);
+  assert.equal(pricing.customerTotalMinor, 54_500);
+  assert.equal(pricing.customerRoundingAdjustmentMinor, 136);
+});
+
+test("exact five-unit customer totals remain unchanged after rounding", () => {
+  const pricing = calculatePricing({
+    base_amount: "95.01",
+    tax_amount: "0.00",
+    total_amount: "95.01",
+    total_currency: "USD",
+  }, [], "USD", 499, { base: "USD", rates: { USD: 1 }, source: "test" }, 500);
+
+  assert.equal(pricing.customerPreRoundMinor, 10_000);
+  assert.equal(pricing.customerTotalMinor, 10_000);
+  assert.equal(pricing.customerRoundingAdjustmentMinor, 0);
+  assert.equal(pricing.providerTotalMinor, 9_501);
 });
 
 test("traveler details are paired with Duffel offer passenger IDs", () => {
@@ -200,7 +234,7 @@ test("confirmation includes the fields displayed by iOS", () => {
       arriving_at: "2026-09-01T11:30:00Z",
       marketing_carrier_flight_number: "ZZ123",
     }] }],
-  }, { id: "session-123", currency: "USD", charge_total_minor: 12_299 });
+  }, { id: "session-123", customer_currency: "USD", charge_total_minor: 12_500, customer_total_minor: 12_500 });
 
   assert.equal(confirmation.orderId, "ord_123");
   assert.equal(confirmation.bookingSessionId, "session-123");
@@ -252,7 +286,15 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
         contact_info: JSON.parse(params[7]), selected_services: JSON.parse(params[8]), currency: params[9],
         base_fare_minor: String(params[10]), taxes_minor: params[11] == null ? null : String(params[11]),
         offer_minor: String(params[12]), services_minor: String(params[13]), duffel_total_minor: String(params[14]),
-        zippi_fee_minor: String(params[15]), charge_total_minor: String(params[16]), stripe_payment_status: "not_created",
+        zippi_fee_minor: String(params[15]), charge_total_minor: String(params[16]),
+        provider_currency: params[17], provider_offer_minor: String(params[18]), provider_services_minor: String(params[19]),
+        provider_total_minor: String(params[20]), customer_currency: params[21], customer_fx_rate: String(params[22]),
+        customer_fx_source: params[23], customer_fx_margin_bps: String(params[24]), customer_base_fare_minor: String(params[25]),
+        customer_taxes_minor: params[26] == null ? null : String(params[26]), customer_services_minor: String(params[27]),
+        customer_converted_minor: String(params[28]), customer_zippi_fee_minor: String(params[29]),
+        customer_pre_round_minor: String(params[30]), customer_rounding_increment_minor: String(params[31]),
+        customer_rounding_adjustment_minor: String(params[32]), customer_total_minor: String(params[33]),
+        stripe_payment_status: "not_created",
         booking_status: "payment_setup", confirmation_snapshot: null, duffel_post_started_at: null,
         updated_at: new Date().toISOString(),
       };
@@ -456,11 +498,11 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
     paymentIntents: {
       create: async () => {
         paymentCreateCount += 1;
-        return { id: `pi_test_${paymentCreateCount}`, client_secret: `pi_test_${paymentCreateCount}_secret`, amount: 12_299, currency: "usd", status: "requires_payment_method" };
+        return { id: `pi_test_${paymentCreateCount}`, client_secret: `pi_test_${paymentCreateCount}_secret`, amount: 12_500, currency: "usd", status: "requires_payment_method" };
       },
       retrieve: async () => {
         if (retrieveHook) retrieveHook();
-        return { id: "pi_test", client_secret: "pi_test_secret", amount: 12_299, currency: "usd", status: paymentStatus };
+        return { id: "pi_test", client_secret: "pi_test_secret", amount: 12_500, currency: "usd", status: paymentStatus };
       },
     },
     refunds: { create: async () => {
@@ -484,12 +526,13 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
       return `11111111-1111-4111-8111-${String(uuidCounter).padStart(12, "0")}`;
     },
     enabled: true,
-    zippiFeeMinor: 299,
+    getExchangeRates: async () => ({ base: "USD", rates: { USD: 1, CAD: 1.35 }, source: "test" }),
+    zippiFeeMinor: 499,
   });
 
   const quote = await service.quoteCheckout(validPayload({ returnOfferId: "off_test" }));
   assert.equal(quote.tripType, "round_trip");
-  assert.equal(quote.quote.totalMinor, 12_299);
+  assert.equal(quote.quote.totalMinor, 12_500);
   assert.equal(paymentCreateCount, 0);
   assert.equal(sessions.size, 0);
 
@@ -498,7 +541,9 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
   assert.equal(setup.paymentIntentClientSecret, "pi_test_1_secret");
   assert.equal(setup.quote.lineItems.baseFareMinor, 10_000);
   assert.equal(setup.quote.lineItems.taxesMinor, 2_000);
-  assert.equal(setup.quote.lineItems.zippiFeeMinor, 299);
+  assert.equal(setup.quote.lineItems.zippiFeeMinor, 499);
+  assert.equal(setup.quote.lineItems.preRoundMinor, 12_499);
+  assert.equal(setup.quote.lineItems.roundingAdjustmentMinor, 1);
   assert.equal(paymentCreateCount, 1);
 
   const canceledSetup = await service.paymentSetup("user_canceled", setupPayload);
