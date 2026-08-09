@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Zippi Admin</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/admin/overview" data-route="overview" aria-label="Zippi Admin overview">
+        <span class="brand-mark">Z</span><span><strong>Zippi</strong><small>Admin</small></span>
+      </a>
+      <nav aria-label="Admin sections">
+        <p class="nav-label">Workspace</p>
+        <a href="/admin/overview" data-route="overview"><span class="nav-icon">O</span>Overview</a>
+        <p class="nav-label">Flights</p>
+        <a href="/admin/flights" data-route="flights"><span class="nav-icon">F</span>Pricing</a>
+        <a href="/admin/flights/bookings" data-route="flight-bookings"><span class="nav-icon">B</span>Bookings</a>
+        <p class="nav-label">Hotels</p>
+        <a href="/admin/hotels" data-route="hotels"><span class="nav-icon">H</span>Pricing</a>
+        <a href="/admin/hotels/bookings" data-route="hotel-bookings"><span class="nav-icon">B</span>Bookings</a>
+      </nav>
+      <form method="post" action="/admin/logout"><button class="sign-out" type="submit">Sign out</button></form>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">Private control room</p><h1 id="page-title">Overview</h1></div>
+        <div class="environment"><span></span>Test environment</div>
+      </header>
+
+      <section class="page" data-page="overview">
+        <div class="intro-row"><div><h2>Booking economics, at a glance.</h2><p>Real totals from Zippi booking sessions. Currencies stay separate so nothing misleading is combined.</p></div></div>
+        <div class="metric-grid" id="overview-metrics"></div>
+        <div class="two-column overview-panels">
+          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Customer side</p><h3>Revenue and profit</h3></div></div><div id="customer-economics" class="empty-state">Loading booking economics...</div></article>
+          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Provider side</p><h3>Supplier costs</h3></div></div><div id="provider-costs" class="empty-state">Loading provider costs...</div></article>
+        </div>
+      </section>
+
+      <section class="page" data-page="flights" hidden>
+        <div class="intro-row"><div><h2>Shape a flight price.</h2><p>Edit a private preview, save it as a draft, review the impact, then explicitly activate it.</p></div><span class="source-pill" id="flight-config-source">Loading pricing source</span></div>
+        <div class="config-state-bar" aria-live="polite"><span class="state-chip live" id="live-state">Live</span><span class="state-chip" id="draft-state">No draft</span><span class="state-chip" id="changed-state">Unchanged</span><span id="config-version-label">Checking active version...</span></div>
+        <div class="pricing-layout">
+          <article class="panel controls-panel">
+            <div class="panel-heading"><div><p class="eyebrow">Flight pricing</p><h3>Protection and margin</h3></div><button type="button" class="text-button" id="reset-flight-config">Reset</button></div>
+            <form id="flight-pricing-form">
+              <div class="control-group"><label for="fx-margin">FX protection</label><div class="input-unit"><input id="fx-margin" name="fxMarginBps" type="number" min="0" max="30" step="0.01"><span>%</span></div><small>Protection against exchange-rate movement.</small></div>
+              <div class="control-group"><label for="zippi-markup">Zippi markup</label><div class="input-unit"><input id="zippi-markup" name="zippiMarkupBps" type="number" min="0" max="50" step="0.01"><span>%</span></div><small>Percentage margin on protected provider cost.</small></div>
+              <div class="control-group"><label for="min-margin">Minimum gross margin</label><div class="input-unit money"><span>$</span><input id="min-margin" name="minGrossMarginMinor" type="number" min="0" step="0.01"></div><small>Minimum margin target in the customer currency.</small></div>
+              <div class="control-group"><label for="booking-fee">Booking fee</label><div class="input-unit money"><span>$</span><input id="booking-fee" name="zippiFeeMinor" type="number" min="0" step="0.01"></div><small>Included before final rounding.</small></div>
+              <div class="control-group"><label for="processing-percent">Payment processing</label><div class="input-unit"><input id="processing-percent" name="paymentProcessingPercentBps" type="number" min="0" max="20" step="0.01"><span>%</span></div></div>
+              <div class="control-group"><label for="processing-fixed">Fixed processing cost</label><div class="input-unit money"><span>$</span><input id="processing-fixed" name="paymentProcessingFixedMinor" type="number" min="0" step="0.01"></div></div>
+              <div class="control-group"><label for="cross-border">Cross-border allowance</label><div class="input-unit"><input id="cross-border" name="paymentProcessingCrossBorderBps" type="number" min="0" max="20" step="0.01"><span>%</span></div></div>
+              <div class="control-group"><label for="rounding-major">CAD / USD / EUR rounding</label><div class="input-unit money"><span>$</span><input id="rounding-major" type="number" min="0.01" step="0.01"></div><small>Final price always rounds up to this increment.</small></div>
+              <div class="control-group"><label for="rounding-cop">COP rounding</label><div class="input-unit"><input id="rounding-cop" type="number" min="1" step="1"><span>COP</span></div><small>Stored using COP minor-unit conventions.</small></div>
+              <div class="rounding-note"><span>Direction</span><strong>Always round up, never down</strong></div>
+              <button class="primary-button" id="save-flight-draft" type="button">Save as draft</button>
+              <p class="form-note">Drafts are auditable and do not change prices in the app.</p>
+            </form>
+          </article>
+
+          <article class="panel preview-panel">
+            <div class="panel-heading"><div><p class="eyebrow">Live sample</p><h3>What the customer sees</h3></div><span class="preview-badge">Preview only</span></div>
+            <div class="sample-inputs">
+              <label>Provider cost<div class="sample-field"><select id="provider-currency" aria-label="Provider currency"><option>USD</option><option>CAD</option><option>EUR</option></select><input id="provider-amount" type="number" value="200" min="1" step="0.01" aria-label="Provider cost"></div></label>
+              <label>Customer currency<select id="customer-currency"><option>CAD</option><option>USD</option><option>EUR</option></select></label>
+            </div>
+            <div id="pricing-preview" class="preview-loading">Calculating with the backend pricing engine...</div>
+          </article>
+        </div>
+        <article class="panel version-panel">
+          <div class="panel-heading"><div><p class="eyebrow">Version history</p><h3>Activate or restore with confidence</h3></div><button class="primary-button compact" id="review-active-draft" type="button" hidden>Review draft</button></div>
+          <div id="pricing-version-history" class="version-history"><div class="empty-state">No centralized pricing versions yet. Environment fallback is live.</div></div>
+        </article>
+      </section>
+
+      <section class="page" data-page="flight-bookings" hidden>
+        <div class="intro-row"><div><h2>Flight bookings.</h2><p>A concise view of status and unit economics. Select a booking for its persisted pricing snapshot.</p></div></div>
+        <div id="flight-booking-list" class="booking-list"><div class="empty-state">Loading bookings...</div></div>
+      </section>
+
+      <section class="page" data-page="hotels" hidden>
+        <div class="intro-row"><div><h2>Hotels pricing.</h2><p>The control surface is ready, but hotel pricing will not be guessed before a shared sell-price contract exists.</p></div><span class="source-pill muted">Foundation only</span></div>
+        <article class="panel unsupported-panel"><div class="hotel-symbol">H</div><div><p class="eyebrow">Not yet authoritative</p><h3>Hotel controls are intentionally paused.</h3><p>Zippi has shared hotel search and room-rate retrieval, but no backend-owned hotel sell price, payment contract, booking session, or profit ledger yet.</p><div class="readiness-steps"><span class="done">Search and room pricing</span><span>Sell-price engine</span><span>Booking economics</span><span>Admin controls</span></div></div></article>
+      </section>
+
+      <section class="page" data-page="hotel-bookings" hidden>
+        <div class="intro-row"><div><h2>Hotel bookings.</h2><p>This page will use real hotel booking sessions once that backend contract exists.</p></div></div>
+        <div class="empty-state large"><span class="empty-icon">H</span><h3>No hotel booking ledger yet</h3><p>No fake bookings or economics are shown.</p></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="booking-dialog"><button class="dialog-close" type="button" aria-label="Close">Close</button><div id="booking-detail"></div></dialog>
+  <dialog id="pricing-action-dialog"><button class="pricing-dialog-close dialog-close" type="button" aria-label="Close">Close</button><div id="pricing-action-detail"></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/admin/assets/admin.js" defer></script>
+</body>
+</html>

@@ -11,6 +11,8 @@ const { buildFlightSearchContract } = require("./lib/flightSearchContract");
 const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
 const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
+const { createAdminDashboardRouter } = require("./lib/adminDashboard");
+const { DEFAULT_ROUNDING_RULES, createFlightPricingConfigResolver } = require("./lib/pricingConfig");
 const app = express();
 
 const translateClient = (() => {
@@ -416,12 +418,17 @@ const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
 const stripe = STRIPE_SECRET_KEY.startsWith("sk_test_") ? new Stripe(STRIPE_SECRET_KEY) : null;
 const FLIGHT_ZIPPI_FEE_MINOR = getEnvInt("FLIGHT_ZIPPI_FEE_MINOR", 499);
+const FLIGHT_FX_MARGIN_BPS = 500;
 const FLIGHT_ZIPPI_MARKUP_BPS = getEnvInt("FLIGHT_ZIPPI_MARKUP_BPS", 700);
 const FLIGHT_MIN_GROSS_MARGIN_MINOR = getEnvInt("FLIGHT_MIN_GROSS_MARGIN_MINOR", 1599);
 const FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS = getEnvInt("FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS", 350);
 const FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR = getEnvInt("FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR", 30);
 const FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS = getEnvInt("FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS", 0);
 const FLIGHT_DUFFEL_ORDER_TIMEOUT_MS = getEnvInt("FLIGHT_DUFFEL_ORDER_TIMEOUT_MS", 130000);
+const ZIPPI_ADMIN_HOST = String(process.env.ZIPPI_ADMIN_HOST || "admin.heyzippi.com").trim().toLowerCase();
+const ZIPPI_ADMIN_SECRET = String(process.env.ZIPPI_ADMIN_SECRET || "").trim();
+const ZIPPI_ADMIN_SESSION_SECRET = String(process.env.ZIPPI_ADMIN_SESSION_SECRET || "").trim();
+const ZIPPI_ADMIN_ACTOR = String(process.env.ZIPPI_ADMIN_ACTOR || "admin").trim() || "admin";
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
 const AMADEUS_CLIENT_SECRET = process.env.AMADEUS_CLIENT_SECRET || "";
@@ -761,6 +768,8 @@ app.get("/health", (req, res) => {
     hasStripeTestKey: STRIPE_SECRET_KEY.startsWith("sk_test_"),
     hasDuffelBookingTestToken: DUFFEL_FLIGHTS_BOOKING_TOKEN.startsWith("duffel_test_"),
     hasDatabase: !!dbPool,
+    hasAdminAuth: Boolean(ZIPPI_ADMIN_SECRET && ZIPPI_ADMIN_SESSION_SECRET),
+    adminHost: ZIPPI_ADMIN_HOST,
   });
 });
 // ---------------------------------------------
@@ -786,6 +795,23 @@ const dbPool = process.env.DATABASE_URL
     })
   : null;
 
+const currentFlightPricingConfig = Object.freeze({
+  fxMarginBps: FLIGHT_FX_MARGIN_BPS,
+  zippiMarkupBps: FLIGHT_ZIPPI_MARKUP_BPS,
+  minGrossMarginMinor: FLIGHT_MIN_GROSS_MARGIN_MINOR,
+  zippiFeeMinor: FLIGHT_ZIPPI_FEE_MINOR,
+  paymentProcessingPercentBps: FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS,
+  paymentProcessingFixedMinor: FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR,
+  paymentProcessingCrossBorderBps: FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS,
+  roundingRules: DEFAULT_ROUNDING_RULES,
+});
+const flightPricingEnvironment = FLIGHT_TEST_BOOKING_ENABLED ? "test" : "production";
+const flightPricingConfigResolver = createFlightPricingConfigResolver({
+  dbPool,
+  environment: flightPricingEnvironment,
+  fallbackConfig: currentFlightPricingConfig,
+});
+
 const flightBookingService = createFlightBookingService({
   dbPool,
   stripe,
@@ -796,15 +822,8 @@ const flightBookingService = createFlightBookingService({
   randomUUID,
   enabled: FLIGHT_TEST_BOOKING_ENABLED,
   getExchangeRates: fetchExchangeRates,
-  pricingConfig: {
-    zippiFeeMinor: FLIGHT_ZIPPI_FEE_MINOR,
-    fxMarginBps: 500,
-    zippiMarkupBps: FLIGHT_ZIPPI_MARKUP_BPS,
-    minGrossMarginMinor: FLIGHT_MIN_GROSS_MARGIN_MINOR,
-    paymentProcessingPercentBps: FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS,
-    paymentProcessingFixedMinor: FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR,
-    paymentProcessingCrossBorderBps: FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS,
-  },
+  getPricingConfig: flightPricingConfigResolver.resolve,
+  pricingConfig: currentFlightPricingConfig,
   orderTimeoutMs: FLIGHT_DUFFEL_ORDER_TIMEOUT_MS,
 });
 handleStripeWebhook = createStripeWebhookHandler({
@@ -880,6 +899,22 @@ app.get("/health/db", async (req, res) => {
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+app.use("/admin", createAdminDashboardRouter({
+  dbPool,
+  adminSecret: ZIPPI_ADMIN_SECRET,
+  sessionSecret: ZIPPI_ADMIN_SESSION_SECRET,
+  adminActor: ZIPPI_ADMIN_ACTOR,
+  pricingConfigResolver: flightPricingConfigResolver,
+  getExchangeRates: fetchExchangeRates,
+}));
+
+app.get("/", (req, res, next) => {
+  if (String(req.hostname || "").toLowerCase() === ZIPPI_ADMIN_HOST) {
+    return res.redirect(302, "/admin/");
+  }
+  return next();
 });
 
 // ---------------------------------------------
@@ -5859,6 +5894,7 @@ app.get("/v1/exchange-rates", async (req, res) => {
     if (!cached.rates) {
       return res.status(503).json({ ok: false, error: "Exchange rates temporarily unavailable" });
     }
+    const resolvedPricing = await flightPricingConfigResolver.resolve();
     return res.json({
       ok: true,
       base: cached.base,
@@ -5867,19 +5903,17 @@ app.get("/v1/exchange-rates", async (req, res) => {
       margin: cached.margin,
       source: cached.source,
       flight_pricing: {
-        fx_margin_bps: 500,
-        zippi_fee_minor: FLIGHT_ZIPPI_FEE_MINOR,
-        zippi_markup_bps: FLIGHT_ZIPPI_MARKUP_BPS,
-        min_gross_margin_minor: FLIGHT_MIN_GROSS_MARGIN_MINOR,
-        payment_processing_percent_bps: FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS,
-        payment_processing_fixed_minor: FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR,
-        payment_processing_cross_border_bps: FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS,
-        rounding: {
-          CAD: 500,
-          USD: 500,
-          EUR: 500,
-          COP: 500,
-        },
+        source: resolvedPricing.source,
+        version: resolvedPricing.version,
+        environment: resolvedPricing.environment,
+        fx_margin_bps: resolvedPricing.config.fxMarginBps,
+        zippi_fee_minor: resolvedPricing.config.zippiFeeMinor,
+        zippi_markup_bps: resolvedPricing.config.zippiMarkupBps,
+        min_gross_margin_minor: resolvedPricing.config.minGrossMarginMinor,
+        payment_processing_percent_bps: resolvedPricing.config.paymentProcessingPercentBps,
+        payment_processing_fixed_minor: resolvedPricing.config.paymentProcessingFixedMinor,
+        payment_processing_cross_border_bps: resolvedPricing.config.paymentProcessingCrossBorderBps,
+        rounding: resolvedPricing.config.roundingRules,
       },
     });
   } catch (e) {
