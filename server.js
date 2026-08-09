@@ -3501,6 +3501,247 @@ async function handleFlightBookingStatus(req, res) {
   }
 }
 
+function bookedTripText(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+function bookedTripObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function bookedTripArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function bookedTripMinor(value, fallback = 0) {
+  const parsed = Number.parseInt(String(value ?? fallback), 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function bookedTripCurrency(value, fallback = "USD") {
+  return bookedTripText(value)?.toUpperCase() || fallback;
+}
+
+function bookedTripMoney(minor, currency) {
+  const safeCurrency = bookedTripCurrency(currency);
+  const amount = bookedTripMinor(minor) / 100;
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: safeCurrency,
+      currencyDisplay: "symbol",
+    }).format(amount);
+  } catch (_) {
+    return `${safeCurrency} ${amount.toFixed(2)}`;
+  }
+}
+
+function bookedTripIso(value) {
+  if (!value) return null;
+  try {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toISOString();
+  } catch (_) {
+    return null;
+  }
+}
+
+function bookedTripDateFromISO(iso) {
+  const normalized = bookedTripText(iso);
+  return normalized ? normalized.slice(0, 10) : null;
+}
+
+function bookedTripRouteSummary(tripType, itinerary) {
+  const outbound = itinerary[0] || {};
+  const origin = bookedTripText(outbound.origin) || "Flight";
+  const destination = bookedTripText(outbound.destination) || "Trip";
+  const arrow = tripType === "round_trip_single_offer" ? "⇄" : "→";
+  return `${origin} ${arrow} ${destination}`;
+}
+
+function bookedTripTravelers(session, confirmation) {
+  const confirmedTravelers = bookedTripArray(confirmation.travelers)
+    .map((value) => bookedTripText(value))
+    .filter(Boolean);
+  if (confirmedTravelers.length) return confirmedTravelers;
+  return bookedTripArray(session.traveler_info)
+    .map((traveler) => {
+      const record = bookedTripObject(traveler);
+      return [record.firstName, record.lastName].map(bookedTripText).filter(Boolean).join(" ");
+    })
+    .filter(Boolean);
+}
+
+function bookedTripServiceDetails(session) {
+  const payload = bookedTripObject(session.payload_snapshot);
+  const carryOnBags = bookedTripMinor(payload.carryOnBags, 0);
+  const checkedBags = bookedTripMinor(payload.checkedBags, 0);
+  const selectedSeat = bookedTripText(payload.selectedSeat);
+  const selectedFareTierName = bookedTripText(payload.selectedFareTierName);
+  const baggageServiceIds = bookedTripArray(payload.baggageServiceIds)
+    .map((value) => bookedTripText(value))
+    .filter(Boolean);
+  const cfarEnabled = Boolean(payload.cfarServiceId);
+  const lines = [];
+  if (selectedFareTierName) lines.push(`Fare: ${selectedFareTierName}`);
+  if (carryOnBags > 0) lines.push(`Carry-on bags: ${carryOnBags}`);
+  if (checkedBags > 0) lines.push(`Checked bags: ${checkedBags}`);
+  if (selectedSeat) lines.push(`Seat: ${selectedSeat}`);
+  if (cfarEnabled) lines.push("Protection: enabled");
+  return {
+    carryOnBags,
+    checkedBags,
+    selectedSeat,
+    selectedFareTierName,
+    baggageServiceIds,
+    cfarEnabled,
+    lines,
+  };
+}
+
+function buildFlightBookedTrip(session) {
+  const confirmation = bookedTripObject(session.confirmation_snapshot);
+  const itinerary = bookedTripArray(confirmation.itinerary).map((item) => bookedTripObject(item));
+  const tripType = bookedTripText(session.trip_type) || bookedTripText(confirmation.tripType) || "one_way";
+  const bookingReferences = bookedTripArray(confirmation.bookingReferences)
+    .map((value) => bookedTripText(value))
+    .filter(Boolean);
+  const bookingReference = bookedTripText(session.duffel_booking_reference)
+    || bookedTripText(confirmation.confirmationCode)
+    || bookingReferences[0]
+    || null;
+  const outboundDate = bookedTripDateFromISO(itinerary[0]?.departingAt);
+  const returnDate = bookedTripDateFromISO(itinerary[1]?.departingAt);
+  const route = bookedTripRouteSummary(tripType, itinerary);
+  const airline = bookedTripText(confirmation.airline);
+  const travelers = bookedTripTravelers(session, confirmation);
+  const customerCurrency = bookedTripCurrency(session.customer_currency || session.currency);
+  const customerTotalMinor = bookedTripMinor(session.customer_total_minor ?? session.charge_total_minor, 0);
+  const serviceDetails = bookedTripServiceDetails(session);
+  const subtitleParts = [];
+  if (outboundDate) subtitleParts.push(outboundDate);
+  if (returnDate) subtitleParts.push(returnDate);
+  if (airline) subtitleParts.push(airline);
+  const subtitle = subtitleParts.join(" • ");
+
+  const richPayload = {
+    id: session.id,
+    reference: session.id,
+    booking_reference: bookingReference,
+    booking_type: "flight",
+    trip_type: tripType,
+    status: session.booking_status,
+    title: route,
+    subtitle,
+    route,
+    route_display: route,
+    outbound_date: outboundDate,
+    return_date: returnDate,
+    airline,
+    total_price: bookedTripMoney(customerTotalMinor, customerCurrency),
+    total_amount: customerTotalMinor,
+    currency: customerCurrency,
+    passenger_names: travelers,
+    passenger_summary: travelers.join(", "),
+    selected_fare: serviceDetails.selectedFareTierName,
+    bags_summary: serviceDetails.lines.filter((line) => line.toLowerCase().includes("bag")).join(" • "),
+    seat_summary: serviceDetails.selectedSeat,
+    booking_references: bookingReferences,
+    order_id: bookedTripText(confirmation.orderId) || bookedTripText(session.duffel_order_id),
+    itinerary,
+    traveler_names: travelers,
+    service_summary: serviceDetails.lines,
+  };
+
+  return {
+    id: session.id,
+    reference: session.id,
+    type: "flight",
+    booking_type: "flight",
+    status: session.booking_status,
+    title: route,
+    subtitle,
+    price: bookedTripMoney(customerTotalMinor, customerCurrency),
+    price_text: bookedTripMoney(customerTotalMinor, customerCurrency),
+    bookingReference,
+    booking_reference: bookingReference,
+    createdAt: bookedTripIso(session.created_at),
+    updatedAt: bookedTripIso(session.updated_at || session.confirmed_at || session.created_at),
+    created_at: bookedTripIso(session.created_at),
+    updated_at: bookedTripIso(session.updated_at || session.confirmed_at || session.created_at),
+    totalMinor: customerTotalMinor,
+    currency: customerCurrency,
+    tripType,
+    airline,
+    outboundDate,
+    returnDate,
+    travelerNames: travelers,
+    traveler_names: travelers,
+    itinerary,
+    serviceSummary: serviceDetails.lines,
+    service_summary: serviceDetails.lines,
+    flight: {
+      bookingSessionId: session.id,
+      orderId: bookedTripText(confirmation.orderId) || bookedTripText(session.duffel_order_id),
+      tripType,
+      airline,
+      bookingReference,
+      bookingReferences,
+      itinerary,
+      travelers,
+      customerCurrency,
+      customerTotalMinor,
+      serviceSummary: serviceDetails.lines,
+      serviceDetails,
+    },
+    ...richPayload,
+  };
+}
+
+async function handleBookingsList(req, res) {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  if (!requireDb(req, res)) return;
+
+  try {
+    const result = await dbPool.query(
+      `select
+         id,
+         booking_status,
+         duffel_booking_reference,
+         duffel_order_id,
+         confirmation_snapshot,
+         traveler_info,
+         payload_snapshot,
+         customer_currency,
+         customer_total_minor,
+         currency,
+         charge_total_minor,
+         trip_type,
+         confirmed_at,
+         created_at,
+         updated_at
+       from flight_booking_sessions
+       where user_id = $1
+         and booking_status = 'confirmed'
+       order by coalesce(confirmed_at, updated_at, created_at) desc
+       limit 50`,
+      [userId]
+    );
+    const bookings = result.rows.map(buildFlightBookedTrip);
+    return res.json({
+      ok: true,
+      bookings,
+      items: bookings,
+      trips: bookings,
+    });
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: error.message || "Failed to load bookings" });
+  }
+}
+
 app.post("/v1/flights/book", handleFlightBookReview);
 app.post("/v1/flights/booking", handleFlightBookReview);
 app.post("/v1/flights/booking/quote", handleFlightBookingQuote);
@@ -3526,6 +3767,9 @@ app.post("/v1/bookings/create", handleFlightBookReviewFallback);
 app.post("/v1/bookings", handleFlightBookReviewFallback);
 app.post("/v1/checkout/book", handleFlightBookReviewFallback);
 app.post("/v1/checkout/confirm", handleFlightBookReviewFallback);
+app.get("/v1/bookings", handleBookingsList);
+app.get("/v1/bookings/list", handleBookingsList);
+app.get("/v1/trips", handleBookingsList);
 
 // ---------------------------------------------
 // Seat Maps (Duffel proxy)
