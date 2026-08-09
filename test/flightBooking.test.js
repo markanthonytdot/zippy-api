@@ -287,18 +287,41 @@ test("confirmation includes the fields displayed by iOS", () => {
     booking_reference: "ABC123",
     owner: { name: "Duffel Airways" },
     passengers: [{ given_name: "Test", family_name: "Traveler" }],
-    slices: [{ segments: [{
-      origin: { iata_code: "YYZ" },
-      destination: { iata_code: "JFK" },
-      departing_at: "2026-09-01T10:00:00Z",
-      arriving_at: "2026-09-01T11:30:00Z",
-      marketing_carrier_flight_number: "ZZ123",
-    }] }],
-  }, { id: "session-123", customer_currency: "USD", charge_total_minor: 12_500, customer_total_minor: 12_500 });
+    slices: [
+      { segments: [{
+        origin: { iata_code: "YYZ", name: "Toronto Pearson" },
+        destination: { iata_code: "JFK", name: "John F Kennedy" },
+        departing_at: "2026-09-01T10:00:00Z",
+        arriving_at: "2026-09-01T11:30:00Z",
+        marketing_carrier: { name: "Duffel Airways", iata_code: "ZZ" },
+        marketing_carrier_flight_number: "123",
+      }] },
+      { segments: [{
+        origin: { iata_code: "JFK", name: "John F Kennedy" },
+        destination: { iata_code: "YYZ", name: "Toronto Pearson" },
+        departing_at: "2026-09-08T15:00:00Z",
+        arriving_at: "2026-09-08T16:30:00Z",
+        marketing_carrier: { name: "Duffel Airways", iata_code: "ZZ" },
+        marketing_carrier_flight_number: "456",
+      }] },
+    ],
+  }, {
+    id: "session-123",
+    customer_currency: "USD",
+    charge_total_minor: 12_500,
+    customer_total_minor: 12_500,
+    trip_type: "round_trip_single_offer",
+  });
 
   assert.equal(confirmation.orderId, "ord_123");
   assert.equal(confirmation.bookingSessionId, "session-123");
+  assert.equal(confirmation.tripType, "round_trip_single_offer");
+  assert.deepEqual(confirmation.bookingReferences, ["ABC123"]);
+  assert.equal(confirmation.itinerary[0].title, "Outbound");
   assert.equal(confirmation.itinerary[0].origin, "YYZ");
+  assert.deepEqual(confirmation.itinerary[0].airlines, ["Duffel Airways", "ZZ"]);
+  assert.deepEqual(confirmation.itinerary[0].flightNumbers, ["ZZ123"]);
+  assert.equal(confirmation.itinerary[1].title, "Return");
   assert.deepEqual(confirmation.travelers, ["Test Traveler"]);
 });
 
@@ -360,7 +383,7 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
         customer_min_margin_top_up_minor: String(params[40]), customer_zippi_fee_minor: String(params[41]),
         customer_pre_round_minor: String(params[42]), customer_rounding_increment_minor: String(params[43]),
         customer_rounding_adjustment_minor: String(params[44]), customer_estimated_gross_margin_minor: String(params[45]),
-        customer_total_minor: String(params[46]),
+        customer_total_minor: String(params[46]), trip_type: params[50],
         stripe_payment_status: "not_created",
         booking_status: "payment_setup", confirmation_snapshot: null, duffel_post_started_at: null,
         updated_at: new Date().toISOString(),
@@ -544,7 +567,24 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
           booking_reference: "ABC123",
           owner: { name: "Duffel Airways" },
           passengers: [{ given_name: "Test", family_name: "Traveler" }],
-          slices: [],
+          slices: [
+            { segments: [{
+              origin: { iata_code: "YYZ", name: "Toronto Pearson" },
+              destination: { iata_code: "JFK", name: "John F Kennedy" },
+              departing_at: "2099-02-01T10:00:00Z",
+              arriving_at: "2099-02-01T12:00:00Z",
+              marketing_carrier: { name: "Duffel Airways", iata_code: "ZZ" },
+              marketing_carrier_flight_number: "123",
+            }] },
+            { segments: [{
+              origin: { iata_code: "JFK", name: "John F Kennedy" },
+              destination: { iata_code: "YYZ", name: "Toronto Pearson" },
+              departing_at: "2099-02-08T14:00:00Z",
+              arriving_at: "2099-02-08T16:00:00Z",
+              marketing_carrier: { name: "Duffel Airways", iata_code: "ZZ" },
+              marketing_carrier_flight_number: "456",
+            }] },
+          ],
         },
         meta: { request_id: "duffel_request_1" },
       });
@@ -598,7 +638,7 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
   });
 
   const quote = await service.quoteCheckout(validPayload({ returnOfferId: "off_test" }));
-  assert.equal(quote.tripType, "round_trip");
+  assert.equal(quote.tripType, "round_trip_single_offer");
   assert.equal(quote.quote.totalMinor, 12_500);
   assert.equal(paymentCreateCount, 0);
   assert.equal(sessions.size, 0);
@@ -612,6 +652,7 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
   assert.equal(setup.quote.lineItems.preRoundMinor, 12_499);
   assert.equal(setup.quote.lineItems.roundingAdjustmentMinor, 1);
   assert.equal(paymentCreateCount, 1);
+  assert.equal(sessions.get(setup.bookingSessionId).trip_type, "round_trip_single_offer");
 
   const canceledSetup = await service.paymentSetup("user_canceled", setupPayload);
   paymentStatus = "canceled";
@@ -733,6 +774,8 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
   const confirmedStatus = await service.getBookingStatus("user_1", setup.bookingSessionId);
 
   assert.equal(firstConfirmation.orderId, "ord_123");
+  assert.equal(firstConfirmation.tripType, "round_trip_single_offer");
+  assert.equal(firstConfirmation.itinerary.length, 2);
   assert.deepEqual(repeatedConfirmation, firstConfirmation);
   assert.equal(orderCreateCount, 7, "one stale-claim retry, one 503, one transport failure, two definitive failures, one fenced stale writer, and one final successful order attempt");
   assert.deepEqual(submittedOrderPayload.data.selected_offers, ["off_test"]);
@@ -775,7 +818,7 @@ test("status read reconstructs a protected two-sided session without repricing d
         customer_min_margin_top_up_minor: String(params[40]), customer_zippi_fee_minor: String(params[41]),
         customer_pre_round_minor: String(params[42]), customer_rounding_increment_minor: String(params[43]),
         customer_rounding_adjustment_minor: String(params[44]), customer_estimated_gross_margin_minor: String(params[45]),
-        customer_total_minor: String(params[46]),
+        customer_total_minor: String(params[46]), trip_type: params[50],
         stripe_payment_status: "not_created",
         booking_status: "payment_setup",
         confirmation_snapshot: null,
@@ -894,6 +937,7 @@ test("status read reconstructs a protected two-sided session without repricing d
   assert.equal(status.quote.customer.lineItems.estimatedGrossMarginMinor, setup.quote.customer.lineItems.estimatedGrossMarginMinor);
   assert.equal(status.quote.provider.currency, "USD");
   assert.equal(status.quote.provider.totalMinor, 8_963);
+  assert.equal(status.tripType, "one_way");
 });
 
 test("status read keeps legacy sessions readable", async () => {
