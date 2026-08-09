@@ -49,6 +49,30 @@ test("Hotel recovery never treats missing or duplicate Duffel matches as confirm
   }
 });
 
+test("Hotel unknown-outcome reconciliation paginates without losing session identity", async () => {
+  const booking = { id: "bok_page_2", metadata: { zippi_booking_session_id: session.id } };
+  const urls = [];
+  const lookup = createHotelDuffelBookingLookup({
+    token: "duffel_test_token",
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      const after = new URL(url).searchParams.get("after");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => after
+          ? ({ data: [booking], meta: { request_id: "req_second" } })
+          : ({ data: [{ id: "bok_other", metadata: {} }], meta: { after: "cursor_2" } }),
+      };
+    },
+  });
+  const result = await lookup.findBookingForSession(session);
+  assert.equal(result.status, "found");
+  assert.equal(result.booking.id, booking.id);
+  assert.equal(urls.length, 2);
+  assert.equal(new URL(urls[1]).searchParams.get("after"), "cursor_2");
+});
+
 test("Hotel refund reconciliation requires the full authoritative Stripe refund", () => {
   assert.equal(validateRefund({ id: "re_test", status: "succeeded", payment_intent: "pi_test", currency: "cad", amount: 13500,
     metadata: { booking_session_id: session.id } }, session), true);
