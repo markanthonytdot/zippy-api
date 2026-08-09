@@ -201,3 +201,68 @@ test("Stripe webhook verifies the signature against the untouched raw body", asy
   assert.equal(response.statusCode, 400);
   assert.equal(response.payload.error, "Invalid Stripe webhook signature");
 });
+
+test("Stripe webhook rejects test events on the live endpoint before database processing", async () => {
+  const event = {
+    id: "evt_test_on_live",
+    type: "payment_intent.succeeded",
+    created: 10,
+    data: { object: { id: "pi_1", livemode: false, status: "succeeded", amount: 12_299, currency: "usd" } },
+  };
+  const stripe = { webhooks: { constructEvent() { return event; } } };
+  const dbPool = { connect() { throw new Error("database must not be reached"); } };
+  const handler = createStripeWebhookHandler({ stripe, webhookSecret: "whsec_live", dbPool, bookingMode: "live" });
+  const response = responseRecorder();
+  await handler({ body: Buffer.from("{}"), headers: { "stripe-signature": "valid" } }, response);
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.payload.error, "Stripe webhook mode mismatch");
+});
+
+test("charge events ingest the actual Stripe fee from the balance transaction", async () => {
+  let captured;
+  const dbPool = {
+    async connect() {
+      return {
+        async query(sql, params = []) {
+          const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+          if (["begin", "commit", "rollback"].includes(normalized)) return { rows: [] };
+          if (normalized.startsWith("insert into stripe_webhook_events")) return { rows: [{ event_id: params[0] }] };
+          if (normalized.startsWith("update flight_booking_sessions") && normalized.includes("stripe_actual_processing_minor")) {
+            captured = params;
+            return { rows: [{ id: SESSION_ID }] };
+          }
+          if (normalized.startsWith("update stripe_webhook_events")) return { rows: [] };
+          throw new Error(`unexpected SQL: ${normalized}`);
+        },
+        release() {},
+      };
+    },
+  };
+  const event = {
+    id: "evt_charge",
+    type: "charge.succeeded",
+    created: 20,
+    data: { object: {
+      id: "ch_1", livemode: false, payment_intent: "pi_1", balance_transaction: "txn_1",
+      status: "succeeded", amount: 12_299, currency: "usd",
+    } },
+  };
+  const stripe = {
+    webhooks: { constructEvent() { return event; } },
+    balanceTransactions: { async retrieve(id) {
+      assert.equal(id, "txn_1");
+      return { fee: 461, currency: "usd" };
+    } },
+  };
+  const handler = createStripeWebhookHandler({ stripe, webhookSecret: "whsec_test", dbPool, bookingMode: "test" });
+  const response = responseRecorder();
+  await handler({ body: Buffer.from("{}"), headers: { "stripe-signature": "valid" } }, response);
+  assert.equal(response.statusCode, 200);
+  assert.equal(captured[0], "pi_1");
+  assert.equal(captured[1], "ch_1");
+  assert.equal(captured[2], "txn_1");
+  assert.equal(captured[3], 461);
+  assert.equal(captured[4], "USD");
+  assert.equal(captured[6], 12_299);
+  assert.equal(captured[7], "USD");
+});

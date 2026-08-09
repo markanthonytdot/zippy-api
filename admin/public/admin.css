@@ -258,6 +258,30 @@ main {
   animation: rise 0.3s ease both;
 }
 
+.attention-panel { margin-bottom: 24px; border-color: rgba(255, 207, 117, 0.28); }
+.attention-list { display: grid; gap: 10px; }
+.attention-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1.3fr repeat(3, minmax(130px, 1fr));
+  gap: 16px;
+  align-items: center;
+  padding: 15px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--text);
+  background: rgba(255, 207, 117, 0.05);
+  text-align: left;
+  cursor: pointer;
+}
+.attention-card:hover { border-color: var(--line-strong); }
+.attention-card strong, .attention-card small { display: block; }
+.attention-card small { margin-top: 4px; color: var(--muted); }
+
+@media (max-width: 900px) {
+  .attention-card { grid-template-columns: 1fr 1fr; }
+}
+
 @keyframes rise {
   from {
     opacity: 0;

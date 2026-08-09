@@ -821,7 +821,11 @@ function statusLabel(status) {
 async function loadFlightBookings() {
   const container = document.getElementById("flight-booking-list");
   try {
-    const data = await api("/flights/bookings");
+    const [data, attention] = await Promise.all([
+      api("/flights/bookings"),
+      api("/flights/attention"),
+    ]);
+    renderAttentionBookings(attention.bookings || []);
     if (!data.bookings.length) {
       container.innerHTML = empty("No flight booking sessions", "Real bookings will appear here as they are created.");
       return;
@@ -866,11 +870,36 @@ async function loadFlightBookings() {
   }
 }
 
+function renderAttentionBookings(bookings) {
+  const container = document.getElementById("flight-attention-list");
+  document.getElementById("attention-count").textContent = bookings.length ? `${bookings.length} open` : "All clear";
+  if (!bookings.length) {
+    container.innerHTML = empty("No bookings need attention", "Unknown bookings, refund failures, and paid sessions without a confirmed airline order will appear here.");
+    return;
+  }
+  container.innerHTML = bookings.map((booking) => `
+    <button class="attention-card" type="button" data-booking-id="${escapeHtml(booking.id)}">
+      <span><strong>${escapeHtml(booking.route)}</strong><small>${escapeHtml(statusLabel(booking.status))}</small></span>
+      <span><strong>${money(booking.customer.totalMinor, booking.customer.currency)}</strong><small>Customer charge</small></span>
+      <span><strong>${escapeHtml(booking.recoveryStatus || booking.failure?.code || "Review required")}</strong><small>Recovery state</small></span>
+      <span><strong>${new Date(booking.updatedAt).toLocaleString()}</strong><small>Last updated</small></span>
+    </button>
+  `).join("");
+  container.querySelectorAll("[data-booking-id]").forEach((button) => {
+    button.addEventListener("click", () => openBooking(button.dataset.bookingId));
+  });
+}
+
 async function openBooking(id) {
   try {
     const data = await api(`/flights/bookings/${encodeURIComponent(id)}`);
     const booking = data.booking;
     const e = booking.economics;
+    const support = booking.support || {};
+    const travelerNames = (support.travelers || []).map((traveler) =>
+      [traveler.title, traveler.firstName, traveler.middleName, traveler.lastName].filter(Boolean).join(" ")
+    ).join(", ") || "Not available";
+    const contact = support.contact || {};
     const fields = [
       ["Status", booking.status],
       ["Customer paid", money(booking.customer.totalMinor, booking.customer.currency)],
@@ -881,12 +910,21 @@ async function openBooking(id) {
       ["Zippi booking fee", money(e.customer_zippi_fee_minor, booking.customer.currency)],
       ["Card processing allowance", money(e.customer_payment_processing_allowance_minor, booking.customer.currency)],
       ["Estimated card processing cost", money(e.customer_estimated_processing_minor, booking.customer.currency)],
+      ["Actual card processing cost", e.stripe_actual_processing_minor == null ? "Awaiting Stripe settlement data" : money(e.stripe_actual_processing_minor, e.stripe_actual_processing_currency || booking.customer.currency)],
       ["Minimum profit target top-up", money(e.customer_min_margin_top_up_minor, booking.customer.currency)],
       ["Round-up adjustment", money(e.customer_rounding_adjustment_minor, booking.customer.currency)],
       ["Estimated Zippi profit", money(e.customer_estimated_gross_margin_minor, booking.customer.currency)],
       ["Pricing source", booking.pricingConfig.source],
       ["Pricing version", booking.pricingConfig.version == null ? "Legacy or environment fallback" : `Version ${booking.pricingConfig.version}`],
       ["Booking reference", booking.bookingReference || "Not assigned"],
+      ["Duffel order ID", support.duffelOrderId || "Not assigned"],
+      ["Duffel offer ID", support.duffelOfferId || "Not assigned"],
+      ["Stripe PaymentIntent", support.stripePaymentIntentId || "Not created"],
+      ["Stripe refund", support.stripeRefundId || "None"],
+      ["Recovery state", support.recoveryStatus || "None"],
+      ["Travelers", travelerNames],
+      ["Contact email", contact.email || "Not available"],
+      ["Contact phone", contact.phone || "Not available"],
       ["Session ID", booking.id],
     ];
     document.getElementById("booking-detail").innerHTML = `
@@ -901,6 +939,7 @@ async function openBooking(id) {
             </div>
           `).join("")}
         </div>
+        <div class="action-warning">Manage booking is not connected yet. Airline changes and cancellations require manual support through Duffel.</div>
       </div>
     `;
     document.getElementById("booking-dialog").showModal();

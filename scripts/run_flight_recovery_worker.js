@@ -5,6 +5,7 @@ const { databaseSSLForURL } = require("../lib/databaseConfig");
 const { buildConfirmation } = require("../lib/flightBooking");
 const { createFlightRecoveryService } = require("../lib/flightRecovery");
 const { createDuffelOrderLookup } = require("../lib/duffelOrderLookup");
+const { resolveFlightBookingMode } = require("../lib/flightBookingMode");
 
 function requiredEnvironment(name) {
   const value = String(process.env[name] || "").trim();
@@ -14,10 +15,15 @@ function requiredEnvironment(name) {
 
 async function main() {
   const databaseUrl = requiredEnvironment("DATABASE_URL");
-  const stripeKey = requiredEnvironment("STRIPE_SECRET_KEY");
-  const duffelToken = requiredEnvironment("DUFFEL_FLIGHTS_BOOKING_TOKEN");
-  if (!stripeKey.startsWith("sk_test_")) throw new Error("Flight recovery requires a Stripe test secret key");
-  if (!duffelToken.startsWith("duffel_test_")) throw new Error("Flight recovery requires a Duffel test token");
+  const mode = resolveFlightBookingMode(process.env);
+  if (!mode.checkoutEnabled) throw new Error(`Flight recovery is not safely configured: ${mode.issues.join(",")}`);
+  if (!mode.publicCheckoutEnabled && !["1", "true", "yes"].includes(
+    String(process.env.FLIGHT_RECOVERY_WORKER_ENABLED || "").trim().toLowerCase()
+  )) {
+    throw new Error("Flight recovery worker is not explicitly enabled");
+  }
+  const stripeKey = mode.stripeKey;
+  const duffelToken = mode.duffelToken;
   const pool = new Pool({
     connectionString: databaseUrl,
     ssl: databaseSSLForURL(databaseUrl),
@@ -32,6 +38,7 @@ async function main() {
       timeoutMs: Math.max(1000, Number(process.env.FLIGHT_RECOVERY_DUFFEL_TIMEOUT_MS || 15_000)),
     }),
     buildConfirmation,
+    bookingMode: mode.mode,
   });
   const workerId = String(process.env.RENDER_INSTANCE_ID || `flight-recovery-${process.pid}-${randomUUID()}`);
   const runOnce = process.env.FLIGHT_RECOVERY_RUN_ONCE === "1";
@@ -42,7 +49,7 @@ async function main() {
   try {
     do {
       const result = await service.runOnce({ workerId });
-      console.log(`[flight-recovery] claimed=${result.claimed}`);
+      console.log(`[flight-recovery] mode=${mode.mode} claimed=${result.claimed}`);
       if (!runOnce && !stopping) await new Promise((resolve) => setTimeout(resolve, intervalMs));
     } while (!runOnce && !stopping);
   } finally {

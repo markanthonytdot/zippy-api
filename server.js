@@ -15,6 +15,7 @@ const { buildFlightSearchContract } = require("./lib/flightSearchContract");
 const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
 const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
+const { resolveFlightBookingMode } = require("./lib/flightBookingMode");
 const { createAdminDashboardRouter } = require("./lib/adminDashboard");
 const {
   DEFAULT_ROUNDING_RULES,
@@ -381,6 +382,7 @@ const DUFFEL_API_KEY = String(process.env.DUFFEL_API_KEY || "").trim();
 const DUFFEL_FLIGHTS_KEY = String(process.env.DUFFEL_FLIGHTS_KEY || "").trim();
 const DUFFEL_STAYS_KEY = String(process.env.DUFFEL_STAYS_KEY || "").trim();
 const DUFFEL_FLIGHTS_BOOKING_TOKEN = String(process.env.DUFFEL_FLIGHTS_BOOKING_TOKEN || "").trim();
+const flightBookingMode = resolveFlightBookingMode(process.env);
 const FLIGHT_TEST_BOOKING_ENABLED = ["1", "true", "yes"].includes(
   String(process.env.FLIGHT_TEST_BOOKING_ENABLED || "").trim().toLowerCase()
 );
@@ -388,12 +390,17 @@ const HOTEL_TEST_BOOKING_ENABLED = ["1", "true", "yes"].includes(
   String(process.env.HOTEL_TEST_BOOKING_ENABLED || "").trim().toLowerCase()
 );
 const DUFFEL_FLIGHTS_TOKEN =
+  (flightBookingMode.mode !== "disabled" ? flightBookingMode.duffelToken : "") ||
   (FLIGHT_TEST_BOOKING_ENABLED ? DUFFEL_FLIGHTS_BOOKING_TOKEN : "") ||
   DUFFEL_FLIGHTS_KEY ||
   DUFFEL_LIVE_TOKEN_READONLY;
 const DUFFEL_STAYS_TOKEN = DUFFEL_STAYS_KEY || DUFFEL_API_KEY;
 const DUFFEL_FLIGHTS_TOKEN_SOURCE = FLIGHT_TEST_BOOKING_ENABLED && DUFFEL_FLIGHTS_BOOKING_TOKEN
   ? "DUFFEL_FLIGHTS_BOOKING_TOKEN"
+  : flightBookingMode.mode === "test" && flightBookingMode.duffelToken
+    ? "DUFFEL_FLIGHTS_TEST_BOOKING_TOKEN"
+    : flightBookingMode.mode === "live" && flightBookingMode.duffelToken
+      ? "DUFFEL_FLIGHTS_LIVE_BOOKING_TOKEN"
   : DUFFEL_FLIGHTS_KEY
     ? "DUFFEL_FLIGHTS_KEY"
     : DUFFEL_LIVE_TOKEN_READONLY
@@ -432,7 +439,8 @@ console.log(
 const DUFFEL_API_VERSION = String(process.env.DUFFEL_API_VERSION || "v2").trim() || "v2";
 const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
-const stripe = STRIPE_SECRET_KEY.startsWith("sk_test_") ? new Stripe(STRIPE_SECRET_KEY) : null;
+const flightStripe = flightBookingMode.stripeKey ? new Stripe(flightBookingMode.stripeKey) : null;
+const hotelStripe = STRIPE_SECRET_KEY.startsWith("sk_test_") ? new Stripe(STRIPE_SECRET_KEY) : null;
 const FLIGHT_ZIPPI_FEE_MINOR = getEnvInt("FLIGHT_ZIPPI_FEE_MINOR", 499);
 const FLIGHT_FX_MARGIN_BPS = 500;
 const FLIGHT_ZIPPI_MARKUP_BPS = getEnvInt("FLIGHT_ZIPPI_MARKUP_BPS", 700);
@@ -782,9 +790,18 @@ app.get("/health", (req, res) => {
     hasAmadeusId: !!process.env.AMADEUS_CLIENT_ID,
     hasAmadeusSecret: !!process.env.AMADEUS_CLIENT_SECRET,
     flightTestBookingEnabled: FLIGHT_TEST_BOOKING_ENABLED,
+    flightBookingMode: flightBookingMode.mode,
+    flightBookingConfigured: flightBookingMode.configured,
+    flightBookingEnabled: flightBookingMode.checkoutEnabled,
+    flightBookingConfigurationIssues: flightBookingMode.issues,
+    flightPublicCheckoutEnabled: flightBookingMode.publicCheckoutEnabled,
+    flightInternalLiveBookingEnabled: flightBookingMode.internalLiveEnabled,
     hotelTestBookingEnabled: HOTEL_TEST_BOOKING_ENABLED,
-    hasStripeTestKey: STRIPE_SECRET_KEY.startsWith("sk_test_"),
-    hasDuffelBookingTestToken: DUFFEL_FLIGHTS_BOOKING_TOKEN.startsWith("duffel_test_"),
+    hasStripeTestKey: flightBookingMode.stripeCredentialMode === "test" || STRIPE_SECRET_KEY.startsWith("sk_test_"),
+    hasFlightStripeCredential: flightBookingMode.stripeCredentialMode === flightBookingMode.mode,
+    hasFlightStripeWebhookSecret: Boolean(flightBookingMode.webhookSecret),
+    hasDuffelBookingTestToken: flightBookingMode.duffelCredentialMode === "test" || DUFFEL_FLIGHTS_BOOKING_TOKEN.startsWith("duffel_test_"),
+    hasFlightDuffelBookingCredential: flightBookingMode.duffelCredentialMode === flightBookingMode.mode,
     hasDuffelStaysTestToken: DUFFEL_STAYS_TOKEN.startsWith("duffel_test_"),
     hasDatabase: !!dbPool,
     hasAdminAuth: Boolean(ZIPPI_ADMIN_SECRET && ZIPPI_ADMIN_SESSION_SECRET),
@@ -825,7 +842,7 @@ const currentFlightPricingConfig = Object.freeze({
   roundingRules: DEFAULT_ROUNDING_RULES,
 });
 const currentCurrencySettingsConfig = Object.freeze(defaultCurrencySettingsConfig());
-const flightPricingEnvironment = FLIGHT_TEST_BOOKING_ENABLED ? "test" : "production";
+const flightPricingEnvironment = flightBookingMode.mode === "live" ? "production" : "test";
 const flightPricingConfigResolver = createFlightPricingConfigResolver({
   dbPool,
   environment: flightPricingEnvironment,
@@ -851,13 +868,14 @@ async function resolveAuthoritativeFlightPricingConfig() {
 
 const flightBookingService = createFlightBookingService({
   dbPool,
-  stripe,
-  duffelToken: DUFFEL_FLIGHTS_BOOKING_TOKEN,
-  duffelMode: classifyDuffelTokenMode(DUFFEL_FLIGHTS_BOOKING_TOKEN),
+  stripe: flightStripe,
+  bookingMode: flightBookingMode.mode,
+  duffelToken: flightBookingMode.duffelToken,
+  duffelMode: classifyDuffelTokenMode(flightBookingMode.duffelToken),
   duffelVersion: DUFFEL_API_VERSION,
   fetchWithTimeout,
   randomUUID,
-  enabled: FLIGHT_TEST_BOOKING_ENABLED,
+  enabled: flightBookingMode.checkoutEnabled,
   getExchangeRates: fetchExchangeRates,
   getPricingConfig: resolveAuthoritativeFlightPricingConfig,
   pricingConfig: currentFlightPricingConfig,
@@ -865,7 +883,7 @@ const flightBookingService = createFlightBookingService({
 });
 const hotelBookingService = createHotelBookingService({
   dbPool,
-  stripe,
+  stripe: hotelStripe,
   duffelToken: DUFFEL_STAYS_TOKEN,
   duffelMode: DUFFEL_STAYS_MODE,
   duffelVersion: DUFFEL_API_VERSION,
@@ -876,9 +894,21 @@ const hotelBookingService = createHotelBookingService({
   bookingTimeoutMs: HOTEL_DUFFEL_BOOKING_TIMEOUT_MS,
 });
 handleStripeWebhook = createStripeWebhookHandler({
-  stripe,
-  webhookSecret: STRIPE_WEBHOOK_SECRET,
   dbPool,
+  configurations: [
+    {
+      stripe: flightStripe,
+      webhookSecret: flightBookingMode.webhookSecret,
+      bookingMode: flightBookingMode.mode,
+      bookingTypes: ["flight"],
+    },
+    {
+      stripe: hotelStripe,
+      webhookSecret: STRIPE_WEBHOOK_SECRET,
+      bookingMode: "test",
+      bookingTypes: ["hotel"],
+    },
+  ],
 });
 
 let ensureHotelPhotoEnrichmentCacheTablePromise = null;
@@ -948,6 +978,88 @@ app.get("/health/db", async (req, res) => {
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+async function probeDuffelBookingCredential() {
+  if (!["test", "live"].includes(flightBookingMode.mode) || !flightBookingMode.duffelToken) {
+    return { ok: false, reason: "credential_not_configured" };
+  }
+  try {
+    const response = await fetchWithTimeout("https://api.duffel.com/air/orders?limit=1", {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${flightBookingMode.duffelToken}`,
+        "Duffel-Version": DUFFEL_API_VERSION,
+      },
+    }, 10_000);
+    return response.ok
+      ? { ok: true, capability: "authenticated_read", writeCapability: "operational_verification_required" }
+      : { ok: false, reason: `duffel_http_${response.status}` };
+  } catch (_) {
+    return { ok: false, reason: "duffel_unreachable" };
+  }
+}
+
+app.get("/health/flights/readiness", async (req, res) => {
+  const checks = {
+    bookingMode: flightBookingMode.mode,
+    internalLiveEnabled: flightBookingMode.internalLiveEnabled,
+    publicCheckoutDisabled: !flightBookingMode.publicCheckoutEnabled,
+    stripeCredential: flightBookingMode.stripeCredentialMode === flightBookingMode.mode,
+    stripePublishableContract: flightBookingMode.publishableConfigured,
+    stripeWebhook: Boolean(flightBookingMode.webhookSecret),
+    duffelCredential: flightBookingMode.duffelCredentialMode === flightBookingMode.mode,
+    recoveryWorker: ["1", "true", "yes"].includes(String(process.env.FLIGHT_RECOVERY_WORKER_ENABLED || "").trim().toLowerCase()),
+    database: false,
+    pricingConfig: false,
+    currencyConfig: false,
+  };
+  try {
+    if (dbPool) {
+      await dbPool.query("select 1");
+      checks.database = true;
+      const [pricing, currencies] = await Promise.all([
+        resolveAuthoritativeFlightPricingConfig(),
+        currencySettingsResolver.resolve(),
+      ]);
+      checks.pricingConfig = Boolean(pricing?.config);
+      checks.currencyConfig = Boolean(currencies?.config);
+    }
+  } catch (_) {
+    // Individual false checks are intentionally returned without internal errors.
+  }
+  const probeRequested = String(req.query.probe || "") === "1";
+  const duffelProbe = probeRequested ? await probeDuffelBookingCredential() : { ok: null, reason: "not_requested" };
+  const ready = flightBookingMode.mode === "live"
+    && flightBookingMode.checkoutEnabled
+    && Object.values(checks).every((value) => value === true || value === "live")
+    && (!probeRequested || duffelProbe.ok === true);
+  return res.status(ready ? 200 : 503).json({
+    ok: ready,
+    target: "controlled_live_test",
+    checks,
+    duffelProbe,
+    duffelBalance: { status: "operational_verification_required" },
+    requiredStripeEvents: [
+      "payment_intent.succeeded", "payment_intent.payment_failed", "payment_intent.canceled",
+      "charge.succeeded", "refund.created", "refund.updated", "refund.failed",
+    ],
+  });
+});
+
+app.get("/v1/flights/booking/config", async (req, res) => {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  if (!flightBookingMode.checkoutEnabled || !flightBookingMode.publishableConfigured) {
+    return res.status(503).json({ ok: false, error: "flight_booking_not_configured" });
+  }
+  return res.json({
+    ok: true,
+    bookingMode: flightBookingMode.mode,
+    stripePublishableKey: flightBookingMode.publishableKey,
+    publicCheckoutEnabled: false,
+  });
 });
 
 app.use("/admin", createAdminDashboardRouter({
@@ -3523,6 +3635,18 @@ async function handleFlightBookingStatus(req, res) {
   }
 }
 
+async function handleFlightRecoverableSessions(req, res) {
+  const userId = await requireVerifiedUser(req, res);
+  if (!userId) return;
+  try {
+    const result = await flightBookingService.listRecoverableSessions(userId);
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    const response = endpointError(error);
+    return res.status(response.status).json(response.body);
+  }
+}
+
 async function handleHotelBooking(action, req, res) {
   const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
@@ -3865,6 +3989,7 @@ app.post("/v1/flights/payment/setup", handleFlightPaymentSetup);
 app.post("/flight/payment/setup", handleFlightPaymentSetup);
 app.post("/v1/flights/booking/confirm", handleFlightBookingConfirm);
 app.post("/flight/booking/confirm", handleFlightBookingConfirm);
+app.get("/v1/flights/booking/sessions", handleFlightRecoverableSessions);
 app.get("/v1/flights/booking/sessions/:bookingSessionId", handleFlightBookingStatus);
 app.get("/flight/booking/sessions/:bookingSessionId", handleFlightBookingStatus);
 app.post("/v1/hotels/quote", (req, res) => handleHotelBooking("quote", req, res));

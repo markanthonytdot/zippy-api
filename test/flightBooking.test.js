@@ -564,6 +564,7 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
       return fakeResponse(201, {
         data: {
           id: "ord_123",
+          live_mode: false,
           booking_reference: "ABC123",
           owner: { name: "Duffel Airways" },
           passengers: [{ given_name: "Test", family_name: "Traveler" }],
