@@ -39,6 +39,19 @@ function validPayload(overrides = {}) {
   };
 }
 
+function pricingConfig(overrides = {}) {
+  return {
+    zippiFeeMinor: 499,
+    fxMarginBps: 500,
+    zippiMarkupBps: 0,
+    minGrossMarginMinor: 0,
+    paymentProcessingPercentBps: 0,
+    paymentProcessingFixedMinor: 0,
+    paymentProcessingCrossBorderBps: 0,
+    ...overrides,
+  };
+}
+
 test("converts provider decimal prices without floating point arithmetic", () => {
   assert.equal(decimalToMinor("120.00", "USD"), 12_000);
   assert.equal(decimalToMinor("120", "JPY"), 120);
@@ -107,7 +120,7 @@ test("repeated baggage IDs preserve the selected Duffel quantity", () => {
     tax_amount: "20.00",
     total_amount: "120.00",
     total_currency: "USD",
-  }, services, "USD", 499, { base: "USD", rates: { USD: 1 }, source: "test" }, 500);
+  }, services, "USD", pricingConfig(), { base: "USD", rates: { USD: 1 }, source: "test" });
   assert.deepEqual(services.map(({ id, quantity }) => ({ id, quantity })), [
     { id: "ase_bag", quantity: 2 },
     { id: "ase_seat", quantity: 1 },
@@ -130,7 +143,7 @@ test("two-sided pricing converts the provider total, adds the fee, and rounds up
     tax_amount: "80.00",
     total_amount: "380.00",
     total_currency: "USD",
-  }, [], "CAD", 499, { base: "USD", rates: { USD: 1, CAD: 1.35 }, source: "test" }, 500);
+  }, [], "CAD", pricingConfig(), { base: "USD", rates: { USD: 1, CAD: 1.35 }, source: "test" });
 
   assert.equal(pricing.providerCurrency, "USD");
   assert.equal(pricing.providerTotalMinor, 38_000);
@@ -148,12 +161,59 @@ test("exact five-unit customer totals remain unchanged after rounding", () => {
     tax_amount: "0.00",
     total_amount: "95.01",
     total_currency: "USD",
-  }, [], "USD", 499, { base: "USD", rates: { USD: 1 }, source: "test" }, 500);
+  }, [], "USD", pricingConfig(), { base: "USD", rates: { USD: 1 }, source: "test" });
 
   assert.equal(pricing.customerPreRoundMinor, 10_000);
   assert.equal(pricing.customerTotalMinor, 10_000);
   assert.equal(pricing.customerRoundingAdjustmentMinor, 0);
   assert.equal(pricing.providerTotalMinor, 9_501);
+});
+
+test("pricing protection layer adds markup, processing allowance, and minimum-margin enforcement", () => {
+  const pricing = calculatePricing({
+    base_amount: "200.00",
+    tax_amount: "0.00",
+    total_amount: "200.00",
+    total_currency: "USD",
+  }, [], "USD", pricingConfig({
+    zippiMarkupBps: 700,
+    minGrossMarginMinor: 1_599,
+    paymentProcessingPercentBps: 350,
+    paymentProcessingFixedMinor: 30,
+  }), { base: "USD", rates: { USD: 1 }, source: "test" });
+
+  assert.equal(pricing.customerRawConvertedMinor, 20_000);
+  assert.equal(pricing.customerFxProtectionMinor, 0);
+  assert.equal(pricing.customerZippiMarkupMinor, 1_400);
+  assert.equal(pricing.customerMinMarginTopUpMinor, 0);
+  assert.equal(pricing.customerPaymentProcessingAllowanceMinor, 826);
+  assert.equal(pricing.customerPreRoundMinor, 22_725);
+  assert.equal(pricing.customerTotalMinor, 23_000);
+  assert.equal(pricing.customerEstimatedProcessingMinor, 835);
+  assert.equal(pricing.customerEstimatedGrossMarginMinor, 2_165);
+});
+
+test("cross-currency pricing keeps FX protection separate from markup and processing coverage", () => {
+  const pricing = calculatePricing({
+    base_amount: "200.00",
+    tax_amount: "0.00",
+    total_amount: "200.00",
+    total_currency: "USD",
+  }, [], "CAD", pricingConfig({
+    zippiMarkupBps: 700,
+    minGrossMarginMinor: 1_599,
+    paymentProcessingPercentBps: 350,
+    paymentProcessingFixedMinor: 30,
+  }), { base: "USD", rates: { USD: 1, CAD: 1.4 }, source: "test" });
+
+  assert.equal(pricing.customerRawConvertedMinor, 28_000);
+  assert.equal(pricing.customerFxProtectionMinor, 1_400);
+  assert.equal(pricing.customerConvertedMinor, 29_400);
+  assert.equal(pricing.customerZippiMarkupMinor, 2_058);
+  assert.equal(pricing.customerMinMarginTopUpMinor, 0);
+  assert.equal(pricing.customerPaymentProcessingAllowanceMinor, 1_191);
+  assert.equal(pricing.customerTotalMinor, 33_500);
+  assert.equal(pricing.customerEstimatedGrossMarginMinor, 2_897);
 });
 
 test("traveler details are paired with Duffel offer passenger IDs", () => {
@@ -291,9 +351,16 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
         provider_total_minor: String(params[20]), customer_currency: params[21], customer_fx_rate: String(params[22]),
         customer_fx_source: params[23], customer_fx_margin_bps: String(params[24]), customer_base_fare_minor: String(params[25]),
         customer_taxes_minor: params[26] == null ? null : String(params[26]), customer_services_minor: String(params[27]),
-        customer_converted_minor: String(params[28]), customer_zippi_fee_minor: String(params[29]),
-        customer_pre_round_minor: String(params[30]), customer_rounding_increment_minor: String(params[31]),
-        customer_rounding_adjustment_minor: String(params[32]), customer_total_minor: String(params[33]),
+        customer_raw_converted_minor: String(params[28]), customer_fx_protection_minor: String(params[29]),
+        customer_converted_minor: String(params[30]), customer_zippi_markup_bps: String(params[31]),
+        customer_zippi_markup_minor: String(params[32]), customer_payment_processing_percent_bps: String(params[33]),
+        customer_payment_processing_fixed_minor: String(params[34]), customer_payment_processing_cross_border_bps: String(params[35]),
+        customer_payment_processing_effective_bps: String(params[36]), customer_payment_processing_allowance_minor: String(params[37]),
+        customer_estimated_processing_minor: String(params[38]), customer_min_margin_target_minor: String(params[39]),
+        customer_min_margin_top_up_minor: String(params[40]), customer_zippi_fee_minor: String(params[41]),
+        customer_pre_round_minor: String(params[42]), customer_rounding_increment_minor: String(params[43]),
+        customer_rounding_adjustment_minor: String(params[44]), customer_estimated_gross_margin_minor: String(params[45]),
+        customer_total_minor: String(params[46]),
         stripe_payment_status: "not_created",
         booking_status: "payment_setup", confirmation_snapshot: null, duffel_post_started_at: null,
         updated_at: new Date().toISOString(),
@@ -527,7 +594,7 @@ test("mocked quote, CAS races, uncertain orders, and confirmation preserve durab
     },
     enabled: true,
     getExchangeRates: async () => ({ base: "USD", rates: { USD: 1, CAD: 1.35 }, source: "test" }),
-    zippiFeeMinor: 499,
+    pricingConfig: pricingConfig(),
   });
 
   const quote = await service.quoteCheckout(validPayload({ returnOfferId: "off_test" }));

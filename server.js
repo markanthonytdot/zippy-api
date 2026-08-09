@@ -416,6 +416,11 @@ const STRIPE_SECRET_KEY = String(process.env.STRIPE_SECRET_KEY || "").trim();
 const STRIPE_WEBHOOK_SECRET = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
 const stripe = STRIPE_SECRET_KEY.startsWith("sk_test_") ? new Stripe(STRIPE_SECRET_KEY) : null;
 const FLIGHT_ZIPPI_FEE_MINOR = getEnvInt("FLIGHT_ZIPPI_FEE_MINOR", 499);
+const FLIGHT_ZIPPI_MARKUP_BPS = getEnvInt("FLIGHT_ZIPPI_MARKUP_BPS", 700);
+const FLIGHT_MIN_GROSS_MARGIN_MINOR = getEnvInt("FLIGHT_MIN_GROSS_MARGIN_MINOR", 1599);
+const FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS = getEnvInt("FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS", 350);
+const FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR = getEnvInt("FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR", 30);
+const FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS = getEnvInt("FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS", 0);
 const FLIGHT_DUFFEL_ORDER_TIMEOUT_MS = getEnvInt("FLIGHT_DUFFEL_ORDER_TIMEOUT_MS", 130000);
 // Amadeus config (server-only)
 const AMADEUS_CLIENT_ID = process.env.AMADEUS_CLIENT_ID || "";
@@ -791,8 +796,15 @@ const flightBookingService = createFlightBookingService({
   randomUUID,
   enabled: FLIGHT_TEST_BOOKING_ENABLED,
   getExchangeRates: fetchExchangeRates,
-  zippiFeeMinor: FLIGHT_ZIPPI_FEE_MINOR,
-  fxMarginBps: 500,
+  pricingConfig: {
+    zippiFeeMinor: FLIGHT_ZIPPI_FEE_MINOR,
+    fxMarginBps: 500,
+    zippiMarkupBps: FLIGHT_ZIPPI_MARKUP_BPS,
+    minGrossMarginMinor: FLIGHT_MIN_GROSS_MARGIN_MINOR,
+    paymentProcessingPercentBps: FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS,
+    paymentProcessingFixedMinor: FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR,
+    paymentProcessingCrossBorderBps: FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS,
+  },
   orderTimeoutMs: FLIGHT_DUFFEL_ORDER_TIMEOUT_MS,
 });
 handleStripeWebhook = createStripeWebhookHandler({
@@ -5857,6 +5869,17 @@ app.get("/v1/exchange-rates", async (req, res) => {
       flight_pricing: {
         fx_margin_bps: 500,
         zippi_fee_minor: FLIGHT_ZIPPI_FEE_MINOR,
+        zippi_markup_bps: FLIGHT_ZIPPI_MARKUP_BPS,
+        min_gross_margin_minor: FLIGHT_MIN_GROSS_MARGIN_MINOR,
+        payment_processing_percent_bps: FLIGHT_PAYMENT_PROCESSING_PERCENT_BPS,
+        payment_processing_fixed_minor: FLIGHT_PAYMENT_PROCESSING_FIXED_MINOR,
+        payment_processing_cross_border_bps: FLIGHT_PAYMENT_PROCESSING_CROSS_BORDER_BPS,
+        rounding: {
+          CAD: 500,
+          USD: 500,
+          EUR: 500,
+          COP: 500,
+        },
       },
     });
   } catch (e) {
