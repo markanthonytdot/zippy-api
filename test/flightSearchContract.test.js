@@ -39,6 +39,10 @@ function offer(id, amount, durations) {
     slices: durations.map((duration, index) => ({ duration, segments: [index ? inbound : outbound] })),
     cabin_class: "economy",
     fare_brand_name: "Standard",
+    conditions: {
+      change_before_departure: { allowed: false },
+      refund_before_departure: { allowed: true, penalty_amount: "50.00", penalty_currency: "USD" },
+    },
   };
 }
 
@@ -60,6 +64,10 @@ test("normalizes provider offers while preserving canonical atomic round trips",
     minimumPersonalItemsPerTraveler: 0,
     complete: true,
     heterogeneous: false,
+  });
+  assert.deepEqual(contract.offers[0].conditions, {
+    changeBeforeDeparture: { allowed: false, penaltyAmount: null, penaltyCurrency: null },
+    refundBeforeDeparture: { allowed: true, penaltyAmount: "50.00", penaltyCurrency: "USD" },
   });
   assert.deepEqual(contract.rankings, {
     best: [raw.id], cheapest: [raw.id], fastest: [raw.id],

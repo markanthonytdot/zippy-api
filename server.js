@@ -6,7 +6,14 @@ const Stripe = require("stripe");
 const { Translate } = require("@google-cloud/translate").v2;
 const { FLIGHT_PARSE_MODEL, mockedFlightIntentParse, parseFlightIntentWithOpenAI } = require("./lib/flightIntentParse");
 const { validateFlightIntentRequest, validateFlightIntentResult } = require("./lib/flightIntentValidate");
-const { createFlightBookingService, endpointError, normalizeAvailableServices } = require("./lib/flightBooking");
+const {
+  calculatePricing,
+  createFlightBookingService,
+  decimalToMinor,
+  endpointError,
+  minorToDecimal,
+  normalizeAvailableServices,
+} = require("./lib/flightBooking");
 const {
   createHotelBookingService,
   endpointError: hotelBookingEndpointError,
@@ -44,7 +51,13 @@ const translateClient = (() => {
 
 app.set("trust proxy", true);
 app.use(helmet());
-app.use(["/v1/flights/search", "/v1/exchange-rates"], createStrictCorsMiddleware({
+app.use([
+  "/v1/flights/search",
+  "/v1/flights/available_services",
+  "/v1/flights/seat_maps",
+  "/v1/flights/selection/quote",
+  "/v1/exchange-rates",
+], createStrictCorsMiddleware({
   allowedOrigins: process.env.FLIGHT_SEARCH_CORS_ORIGINS,
   allowedMethods: "GET, POST, OPTIONS",
 }));
@@ -1120,7 +1133,10 @@ app.use("/v1/hotels", async (req, res, next) => {
 // Flights abuse protection
 // ---------------------------------------------
 app.use("/v1/flights", async (req, res, next) => {
-  const allowAnonymous = req.path === "/search";
+  const allowAnonymous = req.path === "/search"
+    || req.path === "/available_services"
+    || req.path === "/seat_maps"
+    || req.path === "/selection/quote";
   const userId = allowAnonymous ? await resolveOptionalUserId(req) : await requireVerifiedUser(req, res);
   if (!allowAnonymous && !userId) return;
 
@@ -3590,6 +3606,31 @@ async function handleFlightBookingQuote(req, res) {
   }
 }
 
+async function handleFlightSelectionQuote(req, res) {
+  const requestId = String(req.headers["x-request-id"] || randomUUID());
+
+  try {
+    const result = await flightBookingService.quoteCheckout(req.body);
+    console.log("[Flight Selection]", "requestId=" + requestId, "status=quoted", "offerId=" + result.offerId);
+    return res.json({
+      offerId: result.offerId,
+      tripType: result.tripType,
+      expiresAt: result.expiresAt,
+      quote: result.quote,
+      selectedServices: result.selectedServices,
+    });
+  } catch (error) {
+    const response = endpointError(error);
+    console.warn(
+      "[Flight Selection]",
+      "requestId=" + requestId,
+      "status=quote_failed",
+      "code=" + String(response.body.code || "unknown")
+    );
+    return res.status(response.status).json(response.body);
+  }
+}
+
 async function handleFlightBookingConfirm(req, res) {
   const userId = await requireVerifiedUser(req, res);
   if (!userId) return;
@@ -3984,6 +4025,7 @@ async function handleBookingsList(req, res) {
 
 app.post("/v1/flights/book", handleFlightBookReview);
 app.post("/v1/flights/booking", handleFlightBookReview);
+app.post("/v1/flights/selection/quote", handleFlightSelectionQuote);
 app.post("/v1/flights/booking/quote", handleFlightBookingQuote);
 app.post("/flight/booking/quote", handleFlightBookingQuote);
 app.post("/v1/flights/payment/setup", handleFlightPaymentSetup);
@@ -4023,8 +4065,7 @@ app.get("/v1/trips", handleBookingsList);
 // GET /v1/flights/seat_maps?offer_id=off_xxxxx
 // ---------------------------------------------
 app.get("/v1/flights/seat_maps", async (req, res) => {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
+  const userId = await resolveOptionalUserId(req);
 
   const requestId = String(req.headers["x-request-id"] || randomUUID());
 
@@ -4072,6 +4113,36 @@ app.get("/v1/flights/seat_maps", async (req, res) => {
 
   console.log("[Duffel SeatMaps]", "requestId=" + requestId, "status=" + r.status, "segments=" + (Array.isArray(json?.data) ? json.data.length : 0));
 
+  if (r.ok && req.query.currency) {
+    try {
+      const offerUrl = new URL(`https://api.duffel.com/air/offers/${encodeURIComponent(offerId)}`);
+      offerUrl.searchParams.set("return_available_services", "true");
+      const offerResponse = await fetchWithTimeout(
+        offerUrl.toString(),
+        {
+          method: "GET",
+          headers: {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "Authorization": `Bearer ${DUFFEL_FLIGHTS_TOKEN}`,
+            "Duffel-Version": DUFFEL_API_VERSION,
+          },
+        },
+        15000
+      );
+      const offerJson = await offerResponse.json().catch(() => null);
+      if (offerResponse.ok && offerJson?.data) {
+        json = {
+          ...json,
+          data: await withSeatMapCustomerPricing(json.data, offerJson.data, req.query.currency),
+        };
+      }
+    } catch (_) {
+      // Seat maps remain usable with provider-priced services if customer-price
+      // enrichment is temporarily unavailable.
+    }
+  }
+
   return res.status(r.status).json(json);
 });
 
@@ -4079,9 +4150,86 @@ app.get("/v1/flights/seat_maps", async (req, res) => {
 // Available Services / Baggage (Duffel proxy)
 // GET /v1/flights/available_services?offer_id=off_xxxxx
 // ---------------------------------------------
+async function withFlightServiceCustomerPricing(offer, services, customerCurrency) {
+  const currency = String(customerCurrency || "").trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency) || !Array.isArray(services) || !services.length) return services;
+
+  let pricingConfigResolution;
+  let exchangeRates;
+  try {
+    [pricingConfigResolution, exchangeRates] = await Promise.all([
+      resolveAuthoritativeFlightPricingConfig(),
+      fetchExchangeRates(),
+    ]);
+  } catch (_) {
+    return services;
+  }
+  if (!pricingConfigResolution?.config || !exchangeRates?.rates) return services;
+
+  let baseCustomerTotalMinor = null;
+  try {
+    baseCustomerTotalMinor = calculatePricing(
+      offer,
+      [],
+      currency,
+      pricingConfigResolution.config,
+      exchangeRates
+    ).customerTotalMinor;
+  } catch (_) {
+    return services;
+  }
+
+  return services.map((service) => {
+    try {
+      const providerCurrency = String(service?.total_currency || "").trim().toUpperCase();
+      if (!/^[A-Z]{3}$/.test(providerCurrency)) return service;
+      const maximumQuantity = Number(service?.maximum_quantity ?? 1);
+      const quantity = Number.isInteger(maximumQuantity) && maximumQuantity > 0 ? 1 : 1;
+      const unitMinor = decimalToMinor(service.total_amount, providerCurrency);
+      const selected = [{ id: String(service.id || ""), quantity, currency: providerCurrency, unitMinor, totalMinor: unitMinor * quantity }];
+      const pricing = calculatePricing(
+        offer,
+        selected,
+        currency,
+        pricingConfigResolution.config,
+        exchangeRates
+      );
+      const deltaMinor = Math.max(0, pricing.customerTotalMinor - baseCustomerTotalMinor);
+      return {
+        ...service,
+        customer_price: {
+          currency,
+          total_amount: minorToDecimal(deltaMinor, currency),
+          total_minor: deltaMinor,
+          source: "zippi_authoritative_delta",
+        },
+      };
+    } catch (_) {
+      return service;
+    }
+  });
+}
+
+async function withSeatMapCustomerPricing(node, offer, customerCurrency) {
+  if (!node || typeof node !== "object") return node;
+  if (Array.isArray(node)) {
+    return Promise.all(node.map((item) => withSeatMapCustomerPricing(item, offer, customerCurrency)));
+  }
+  const output = { ...node };
+  if (Array.isArray(output.available_services)) {
+    output.available_services = await withFlightServiceCustomerPricing(offer, output.available_services, customerCurrency);
+  }
+  for (const [key, value] of Object.entries(output)) {
+    if (key === "available_services") continue;
+    if (value && typeof value === "object") {
+      output[key] = await withSeatMapCustomerPricing(value, offer, customerCurrency);
+    }
+  }
+  return output;
+}
+
 app.get("/v1/flights/available_services", async (req, res) => {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
+  const userId = await resolveOptionalUserId(req);
 
   const requestId = String(req.headers["x-request-id"] || randomUUID());
 
@@ -4138,7 +4286,11 @@ app.get("/v1/flights/available_services", async (req, res) => {
   }
 
   const requestedType = String(req.query.type || "").trim();
-  const services = normalizeAvailableServices(availableServices, requestedType);
+  const services = await withFlightServiceCustomerPricing(
+    offer,
+    normalizeAvailableServices(availableServices, requestedType),
+    req.query.currency
+  );
 
   // `data` remains the array expected by the existing iOS baggage and CFAR
   // decoders. The small offer envelope is additive and avoids exposing another
