@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createStrictCorsMiddleware, parseAllowedOrigins } = require("../lib/strictCors");
 
-function runMiddleware({ origin, method = "OPTIONS", allowedOrigins } = {}) {
+function runMiddleware({ origin, method = "OPTIONS", allowedOrigins, allowedMethods } = {}) {
   const headers = new Map();
   const req = { method, headers: origin ? { origin } : {} };
   const result = { next: false, status: null, body: null, ended: false, headers };
@@ -13,7 +13,7 @@ function runMiddleware({ origin, method = "OPTIONS", allowedOrigins } = {}) {
     json(value) { result.body = value; return this; },
     end() { result.ended = true; return this; },
   };
-  createStrictCorsMiddleware({ allowedOrigins })(req, res, () => { result.next = true; });
+  createStrictCorsMiddleware({ allowedOrigins, allowedMethods })(req, res, () => { result.next = true; });
   return result;
 }
 
@@ -28,6 +28,18 @@ test("flight search CORS defaults to only canonical Zippi web origins", () => {
   const denied = runMiddleware({ origin: "https://evil.example" });
   assert.equal(denied.status, 403);
   assert.equal(denied.headers.has("access-control-allow-origin"), false);
+});
+
+test("CORS can expose centralized exchange-rate reads to Web staging", () => {
+  const allowed = runMiddleware({
+    origin: "https://test.heyzippi-website-test.pages.dev",
+    method: "GET",
+    allowedOrigins: "https://www.heyzippi.com,https://heyzippi-website-test.pages.dev",
+    allowedMethods: "GET, POST, OPTIONS",
+  });
+  assert.equal(allowed.next, true);
+  assert.equal(allowed.headers.get("access-control-allow-origin"), "https://test.heyzippi-website-test.pages.dev");
+  assert.equal(allowed.headers.get("access-control-allow-methods"), "GET, POST, OPTIONS");
 });
 
 test("CORS allows configured origins and does not interfere with non-browser requests", () => {

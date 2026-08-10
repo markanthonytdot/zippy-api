@@ -44,8 +44,9 @@ const translateClient = (() => {
 
 app.set("trust proxy", true);
 app.use(helmet());
-app.use("/v1/flights/search", createStrictCorsMiddleware({
+app.use(["/v1/flights/search", "/v1/exchange-rates"], createStrictCorsMiddleware({
   allowedOrigins: process.env.FLIGHT_SEARCH_CORS_ORIGINS,
+  allowedMethods: "GET, POST, OPTIONS",
 }));
 let handleStripeWebhook = (_req, res) => res.status(503).json({ ok: false, error: "Stripe webhook is not configured" });
 app.post(
