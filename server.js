@@ -2832,6 +2832,7 @@ app.get("/v1/places/photo", async (req, res) => {
   const cached = getCachedPhoto(cacheKey);
   if (cached) {
     res.setHeader("Content-Type", cached.contentType || "image/jpeg");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
     res.setHeader("Cache-Control", "public, max-age=86400, s-maxage=86400"); // 1 day cache hint
     return res.send(cached.buf);
   }
@@ -2874,6 +2875,7 @@ app.get("/v1/places/photo", async (req, res) => {
     });
 
     res.setHeader("Content-Type", contentType);
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
     res.setHeader("Cache-Control", "public, max-age=86400, s-maxage=86400"); // 1 day cache hint
     return res.send(buf);
   } catch (e) {
