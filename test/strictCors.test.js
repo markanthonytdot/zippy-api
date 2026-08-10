@@ -23,7 +23,7 @@ test("flight search CORS defaults to only canonical Zippi web origins", () => {
   assert.equal(allowed.status, 204);
   assert.equal(allowed.ended, true);
   assert.equal(allowed.headers.get("access-control-allow-origin"), "https://www.heyzippi.com");
-  assert.equal(allowed.headers.get("access-control-allow-headers"), "Content-Type, X-Request-ID");
+  assert.equal(allowed.headers.get("access-control-allow-headers"), "Content-Type, X-Request-ID, X-User-ID");
 
   const denied = runMiddleware({ origin: "https://evil.example" });
   assert.equal(denied.status, 403);
@@ -46,6 +46,7 @@ test("CORS allows configured origins and does not interfere with non-browser req
   const configured = runMiddleware({ origin: "https://preview.heyzippi.com", method: "POST", allowedOrigins: "https://preview.heyzippi.com" });
   assert.equal(configured.next, true);
   assert.equal(configured.headers.get("access-control-allow-origin"), "https://preview.heyzippi.com");
+  assert.match(configured.headers.get("access-control-allow-headers"), /X-User-ID/);
 
   const noOrigin = runMiddleware({ method: "POST" });
   assert.equal(noOrigin.next, true);
