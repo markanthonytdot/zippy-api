@@ -57,6 +57,9 @@ app.use([
   "/v1/flights/seat_maps",
   "/v1/flights/selection/quote",
   "/v1/exchange-rates",
+  "/v1/hotels/search",
+  "/v1/hotels/prices",
+  "/v1/hotels/photo",
 ], createStrictCorsMiddleware({
   allowedOrigins: process.env.FLIGHT_SEARCH_CORS_ORIGINS,
   allowedMethods: "GET, POST, OPTIONS",
@@ -1108,7 +1111,10 @@ app.get("/", (req, res) => {
 // Hotels abuse protection
 // ---------------------------------------------
 app.use("/v1/hotels", async (req, res, next) => {
-  const allowAnonymous = req.path === "/search" || req.path === "/ping";
+  const allowAnonymous = req.path === "/search"
+    || req.path === "/prices"
+    || req.path === "/photo"
+    || req.path === "/ping";
   const userId = allowAnonymous ? await resolveOptionalUserId(req) : await requireUserId(req, res);
   if (!allowAnonymous && !userId) return;
 
@@ -2171,8 +2177,7 @@ app.post("/v1/hotels/prices", async (req, res) => {
 // GET /v1/hotels/photo?hotelId=...&maxWidth=...&photoIndex=...
 // ---------------------------------------------
 app.get("/v1/hotels/photo", async (req, res) => {
-  const userId = await requireUserId(req, res);
-  if (!userId) return;
+  const userId = await resolveOptionalUserId(req);
 
   const hotelIdRaw = String(req.query.hotelId || "").trim();
   if (!hotelIdRaw) {
