@@ -39,3 +39,24 @@ test("CORS allows configured origins and does not interfere with non-browser req
   assert.equal(noOrigin.next, true);
   assert.equal(noOrigin.headers.has("access-control-allow-origin"), false);
 });
+
+test("CORS maps the bare Pages test hostname to the private branch preview origin", () => {
+  assert.deepEqual([...parseAllowedOrigins("https://www.heyzippi.com,https://heyzippi-website-test.pages.dev")], [
+    "https://www.heyzippi.com",
+    "https://main.heyzippi-website-test.pages.dev",
+  ]);
+
+  const privatePreview = runMiddleware({
+    origin: "https://main.heyzippi-website-test.pages.dev",
+    allowedOrigins: "https://www.heyzippi.com,https://heyzippi-website-test.pages.dev",
+  });
+  assert.equal(privatePreview.status, 204);
+  assert.equal(privatePreview.headers.get("access-control-allow-origin"), "https://main.heyzippi-website-test.pages.dev");
+
+  const bareProjectHost = runMiddleware({
+    origin: "https://heyzippi-website-test.pages.dev",
+    allowedOrigins: "https://www.heyzippi.com,https://heyzippi-website-test.pages.dev",
+  });
+  assert.equal(bareProjectHost.status, 403);
+  assert.equal(bareProjectHost.headers.has("access-control-allow-origin"), false);
+});
