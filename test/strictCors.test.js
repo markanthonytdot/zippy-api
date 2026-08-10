@@ -44,14 +44,22 @@ test("CORS maps the bare Pages test hostname to the private branch preview origi
   assert.deepEqual([...parseAllowedOrigins("https://www.heyzippi.com,https://heyzippi-website-test.pages.dev")], [
     "https://www.heyzippi.com",
     "https://main.heyzippi-website-test.pages.dev",
+    "https://test.heyzippi-website-test.pages.dev",
   ]);
 
-  const privatePreview = runMiddleware({
+  const mainPreview = runMiddleware({
     origin: "https://main.heyzippi-website-test.pages.dev",
     allowedOrigins: "https://www.heyzippi.com,https://heyzippi-website-test.pages.dev",
   });
-  assert.equal(privatePreview.status, 204);
-  assert.equal(privatePreview.headers.get("access-control-allow-origin"), "https://main.heyzippi-website-test.pages.dev");
+  assert.equal(mainPreview.status, 204);
+  assert.equal(mainPreview.headers.get("access-control-allow-origin"), "https://main.heyzippi-website-test.pages.dev");
+
+  const testPreview = runMiddleware({
+    origin: "https://test.heyzippi-website-test.pages.dev",
+    allowedOrigins: "https://www.heyzippi.com,https://heyzippi-website-test.pages.dev",
+  });
+  assert.equal(testPreview.status, 204);
+  assert.equal(testPreview.headers.get("access-control-allow-origin"), "https://test.heyzippi-website-test.pages.dev");
 
   const bareProjectHost = runMiddleware({
     origin: "https://heyzippi-website-test.pages.dev",
