@@ -68,3 +68,18 @@ test("CORS maps the bare Pages test hostname to the private branch preview origi
   assert.equal(bareProjectHost.status, 403);
   assert.equal(bareProjectHost.headers.has("access-control-allow-origin"), false);
 });
+
+test("CORS keeps protected staging aliases together when one alias is configured", () => {
+  assert.deepEqual([...parseAllowedOrigins("https://www.heyzippi.com,https://main.heyzippi-website-test.pages.dev")], [
+    "https://www.heyzippi.com",
+    "https://main.heyzippi-website-test.pages.dev",
+    "https://test.heyzippi-website-test.pages.dev",
+  ]);
+
+  const testPreview = runMiddleware({
+    origin: "https://test.heyzippi-website-test.pages.dev",
+    allowedOrigins: "https://www.heyzippi.com,https://main.heyzippi-website-test.pages.dev",
+  });
+  assert.equal(testPreview.status, 204);
+  assert.equal(testPreview.headers.get("access-control-allow-origin"), "https://test.heyzippi-website-test.pages.dev");
+});
