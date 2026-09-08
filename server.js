@@ -19,6 +19,7 @@ const {
   endpointError: hotelBookingEndpointError,
 } = require("./lib/hotelBooking");
 const { buildFlightSearchContract } = require("./lib/flightSearchContract");
+const { createHotelDiscoveryPricingHandler } = require("./lib/hotelDiscoveryPricing");
 const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
 const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
@@ -1791,6 +1792,7 @@ async function fetchDuffelStayAllRates({ searchResultId, requestId }) {
       ok: false,
       status: 502,
       error: "Duffel rates fetch failed",
+      providerStatus: response?.status || null,
       hint: `step=fetch_all_rates status=${response?.status} body=${bodySnippet}`,
     };
   }
@@ -1987,7 +1989,19 @@ app.post("/v1/hotels/search", async (req, res) => {
 // Hotels Prices (Duffel continuity)
 // POST /v1/hotels/prices
 // ---------------------------------------------
+const handleHotelDiscoveryPricing = createHotelDiscoveryPricingHandler({
+  fetchRates: fetchDuffelStayAllRates,
+  getEnabledCurrencies: async () => {
+    const { config } = await currencySettingsResolver.resolve();
+    return SUPPORTED_CUSTOMER_CURRENCIES.filter((code) => config.currencies[code]?.enabled === true);
+  },
+});
+
 app.post("/v1/hotels/prices", async (req, res) => {
+  const discoveryPayload = req.body?.data && typeof req.body.data === "object" ? req.body.data : req.body;
+  if (discoveryPayload && Object.prototype.hasOwnProperty.call(discoveryPayload, "discoveryPricing")) {
+    return handleHotelDiscoveryPricing(req, res);
+  }
   const userId = String(req.userId || "unknown");
   const requestStartMs = Date.now();
   const requestId = String(req.requestId || randomUUID());
