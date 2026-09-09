@@ -17,8 +17,13 @@ partners, install on a device, upload to TestFlight or publish an app.
 
 ## Isolated Render resources
 
-Create a separate API `zippi-partner-staging` and Postgres
-`zippi-partner-staging-db` / database `zippi_partner_staging`, in Virginia. The
+The staging API is live at `https://zippi-partner-staging.onrender.com`, service
+`srv-dagq12ht0dsc73a7dm40`, deployed from
+`93d9e4f0a6bcf96935b425b69075745c3ce3ff38`. Its separate Postgres is
+`zippi-partner-staging-db`, ID `dpg-dagpide1egvs73au4k20-a`, database
+`zippi_partner_staging`, PostgreSQL 18, in Virginia. Public database inbound access
+is blocked; the API uses the new private connection. The free database expires
+**October 9, 2026**. The
 existing API uses `zippy_social_db` in Production, and the test-named hotel worker
 shares that database. Neither is a staging target. Do not use any existing shared
 Zippi database or change existing Render services.
@@ -34,7 +39,16 @@ Use `npm ci`, then `npm run migrate` against only the new database before
 `node server.js`. On a free instance without a pre-deploy command, use
 `npm run migrate && node server.js` as the start command. Existing migrations
 serialize and verify checksums. Use manual deployment from the feature branch.
+Auto-deploy is Off and health check is `/health/db`. All 13 migrations succeeded.
 Never copy a production database connection, signing key or admin secret.
+
+Fresh-database bootstrap exposed legacy tables (`saved_items` and
+`apple_auth_tokens`) that are not created by numbered migrations. On this new
+staging database only, the existing protected `POST /admin/init` was run once with
+an authenticated admin session and a temporary independent `ADMIN_INIT_SECRET`.
+The secret was then removed and the service redeployed. Authenticated initialization
+now returns **403, Admin init disabled**. Synthetic account deletion then passed.
+Do not enable this route on production or leave its temporary secret configured.
 
 ## Required staging environment
 
@@ -57,9 +71,19 @@ documentation, screenshots, shell history or reports.
 | `ZIPPI_PARTNER_MAIL_ADAPTER` | `resend` |
 | `RESEND_API_KEY` | Resend sending key, preferably restricted to heyzippi.com |
 | `ZIPPI_PARTNER_EMAIL_FROM` | `Zippi Partner Preview <preview@heyzippi.com>` after verification |
+| `FLIGHT_BOOKING_MODE` | `disabled` |
+| `FLIGHT_PUBLIC_CHECKOUT_ENABLED` | `false` |
+| `FLIGHT_INTERNAL_LIVE_BOOKING_ENABLED` | `false` |
+| `FLIGHT_TEST_BOOKING_ENABLED` | `false` |
+| `HOTEL_TEST_BOOKING_ENABLED` | `false` |
 
-Preserve normal JWT issuer/audience contracts. Review required provider/search
-settings separately before claiming flight/hotel live acceptance. Do not enable
+The user explicitly approved copying only `DUFFEL_LIVE_TOKEN_READONLY`,
+`DUFFEL_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_PLACES_API_KEY` and
+`GOOGLE_DIRECTIONS_API_KEY` into this staging service. These are configured; no
+values are recorded here. Flights retain live read-only search and Hotels retain
+the source service's test credential mode. No payment credentials were copied.
+
+Preserve normal JWT issuer/audience contracts. Do not enable
 checkout or provision/copy payment credentials merely to configure Partner Access.
 The iOS production default URL and travel behavior remain unchanged in source;
 only the eventual build-specific staging configuration changes its environment.
@@ -72,9 +96,14 @@ The development adapter is refused in production mode; do not use it on staging.
 
 ## Resend sender verification
 
-The authenticated heyzippi workspace initially had only `proproval.com` verified.
-A `heyzippi.com` domain setup is prepared in Resend, North Virginia, sending on and
-receiving off. Resend requests the following DNS records (TTL Auto):
+The authenticated heyzippi workspace now has **heyzippi.com verified**, domain ID
+`f5ba5136-e3b4-48d9-920d-e627f468b9b7`, North Virginia, sending on and receiving off.
+The user completed DNS ownership approval. DKIM, SPF and sending MX are verified.
+A dedicated `zippi-partner-staging` API key has Sending access restricted to
+heyzippi.com and was placed directly in Render. Existing Proproval resources were
+unchanged. The initial unused key was revoked before its replacement was configured.
+
+The sending records are (TTL Auto):
 
 | Type | Name within heyzippi.com | Content | Priority |
 | --- | --- | --- | --- |
@@ -83,9 +112,9 @@ receiving off. Resend requests the following DNS records (TTL Auto):
 | TXT | `send` | `v=spf1 include:amazonses.com ~all` | — |
 
 DNS ownership/approval remains with the user. Do not change root MX, receiving or
-existing domain records. Check the current provider screen before applying records;
-verify status in Resend before setting the sender ready. Configuration presence or
-mocked tests cannot prove delivery. Use the user's own approved QA address only.
+existing domain records. Exactly one real OTP was sent to the user's approved QA
+inbox on September 9. Resend reported Delivered, the user confirmed receipt, and
+verification succeeded. The code was consumed; do not resend for this checkpoint.
 
 ## Deployment and hosted acceptance
 
@@ -103,9 +132,35 @@ mocked tests cannot prove delivery. Use the user's own approved QA address only.
 5. Verify the code once, status/refresh, checkout denied, feature edits, revoke,
    restore, extend and server expiry. Retain only sanitized status/expiry/feature
    evidence. Never record the code, JWT, cookie or API key. Hosted lifecycle and
-   inbox delivery remain pending until actually exercised.
+   inbox delivery must be tested separately from mocked delivery.
 
-## First QA invitation — prepared, not created
+Hosted acceptance is now complete: config 200 (`ok:true`, `required:true`,
+`no-store`); health, isolated database and deployed revision pass; unauthorized
+admin/status/travel/checkout return 401; an unapproved request stays generic (202)
+without delivery and verification returns 401. Admin login/list and same-origin
+writes succeed; cross-origin writes return 403.
+
+The real QA OTP verified once and reuse returned 401. Active status, feature refresh,
+Combined denial/re-enable, revoke, restore and extension all passed on the same
+session. Checkout stays 403. A short-lived synthetic `.test` fixture proved actual
+server expiry disables every feature and denies travel; extension restored that
+session. The fixture was deleted successfully, leaving only the real QA person.
+No email was sent to the synthetic fixture. An empty smoke-test organization remains.
+
+Non-booking travel smoke passed: YYZ–YVR flight search returned 201 with 189 offers;
+Miami hotel search returned 200 with 10 hotels and images; the three-hotel price
+follow-up returned 200 with 108 rows and intact search-context continuity.
+The prior `/partner-access/config` 404 is gone on this staging target. Production
+was not changed and no claim is made that its older endpoint was deployed.
+
+## First QA invitation — active and verified
+
+Only the user-approved QA address was invited under `Zippi Internal QA`.
+The one-day invitation starts September 9 at 18:16:39 UTC. The extension smoke added
+one minute, so its current expiry is **September 10, 2026 at 18:17:38.915 UTC**
+(2:17 PM Toronto). It is active, iOS-only, Flights/Hotels/Combined Trip on and
+Checkout off. Recheck expiry before physical acceptance; extension never needs a
+new app build. Do not create another invitation or send another email automatically.
 
 In the staging admin choose an internal QA organization, then add only the approved
 email. Choose **1 day**, iOS checked, Android unchecked, Flights/Hotels/Combined
@@ -138,12 +193,17 @@ extending alone never reverses revocation.
 ## iOS acceptance boundary
 
 App Store Connect's authenticated audit confirms **1.3 (10) is used** and expired.
-Build **11** was unused at that inspection; recheck before preparing **1.3 (11)**.
+Build **11** remained unused in the September 9 activation recheck, with no newer
+processing upload. The local candidate uses **1.3 (11)**.
 Existing external groups have no current builds and review metadata needs updating.
 No upload, group creation, invitation or metadata change is authorized here.
 
 After hosted staging passes, build standard `Zippy` / `Release`, optimized arm64,
-with signing and a build-specific Info.plist pointing to the verified staging URL.
+with signing. In the iOS repository, `scripts/build-partner-preview.sh archive`
+sets `ZIPPI_API_BASE_URL=https://zippi-partner-staging.onrender.com/` at build time;
+`ZIPPY_API_BASE_URL` in the app Info.plist expands this setting. The normal project's
+default remains the production URL. The script verifies version/build, effective
+staging URL and signature. Use its `debug` mode for the signed Debug validation.
 Do not patch an already-signed app or change the public default URL. Inspect the
 result's effective URL, version/build, entitlements and signature. Stop before
 physical installation. The old development-signed Release archive points at
