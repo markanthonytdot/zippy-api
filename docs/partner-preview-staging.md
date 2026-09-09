@@ -1,88 +1,123 @@
 # Partner Preview staging activation — September 9, 2026
 
-## Verified checkpoint and environment boundaries
+## Current scope and source checkpoint
 
-The backend and existing protected admin are one coupled checkpoint on
-`codex/partner-preview-staging`. `node --test` with an isolated PostgreSQL database
-passed 162 tests, zero failures/skips. Tests create and remove random schemas on
-`127.0.0.1:55432`; the verified data directory is
-`/private/tmp/zippi-partner-pg/data`. No hosted database was used.
+Use `codex/partner-preview-staging`, never `main`, for the isolated Partner Preview
+backend. The Resend follow-up passes **174 tests, zero failures/skips**, including
+mail mocks, PostgreSQL OTP/rate-limit/admin lifecycles, existing auth, pricing,
+flight/hotel and Stripe tests. Tests use temporary schemas on isolated localhost
+PostgreSQL (`127.0.0.1:55432`, data `/private/tmp/zippi-partner-pg/data`).
+Automated tests never send real mail or use a hosted database.
 
-The iOS Debug, InternalLive and Release configurations currently read
-`ZIPPY_API_BASE_URL` from the shared `Zippy-Info.plist`:
-`https://zippy-api-6c59.onrender.com/`. This is the existing production target,
-not an approved staging target. The last read-only Partner Access configuration
-probe returned HTTP 404. A localhost development runner is available, but it
-does not qualify as hosted SMTP or provider acceptance.
+The user superseded the Postmark/SMTP setup with Resend HTTPS. Keep Render as the
+backend, database and environment-secret host; Resend only delivers transactional
+email. Keep SMTP support optional and local deterministic delivery unchanged.
+Do not create Postmark resources. Do not merge to main, deploy production, invite
+partners, install on a device, upload to TestFlight or publish an app.
 
-The repository runs Express/PostgreSQL using `npm start`, installs from
-`package-lock.json` using `npm ci`, and applies numbered, checksum-verified
-migrations with `npm run migrate`. Migration 013 contains Partner Access tables.
-Render hosts the configured endpoint. The actual service branch, deployment
-commands, environment groups, hosted database and SMTP values require access to
-the Render account; no local Render credentials or CLI are available. GitHub
-lists no Actions workflows, environments, repository secret names or deployment
-records for this repository. These facts do not prove staging does not exist.
+## Isolated Render resources
 
-Render and App Store Connect opened at sign-in screens. No production deployment,
-database migration, environment change, real invitation, email, physical install,
-TestFlight upload or App Store publication is part of this checkpoint.
+Create a separate API `zippi-partner-staging` and Postgres
+`zippi-partner-staging-db` / database `zippi_partner_staging`, in Virginia. The
+existing API uses `zippy_social_db` in Production, and the test-named hotel worker
+shares that database. Neither is a staging target. Do not use any existing shared
+Zippi database or change existing Render services.
 
-## Resume the authorized staging rollout
+Resend uses HTTPS port 443, so SMTP port 465/587 access is no longer a prerequisite.
+A free web instance is suitable for initial QA with cold-start limits. Free Render
+Postgres is limited to 1 GB, expires after 30 days and has no backups; it is only a
+temporary QA environment. Paid always-on resources can be selected after explicit
+billing approval. The previously prepared $6.30/month database was not approved
+or created. Do not infer paid approval from the user's Resend steering.
 
-1. Inspect the authenticated Render account for an existing test web service and
-   separate test PostgreSQL database. Record their non-secret IDs, URLs, linked
-   branch and deployment commands. Verify database identity before migrations.
-   If there is no suitable test service, report that before any production change;
-   the current authorization does not permit a production fallback.
-2. Use the validated feature branch. Preserve the service's existing provider,
-   search and pricing settings; do not copy production credentials or databases
-   blindly. Keep checkout/provider execution in test-safe configuration.
-3. Configure the existing staging secret store. Required Partner Access dependencies
-   are `DATABASE_URL`, a staging `JWT_SECRET`, and existing admin authentication
-   through `ZIPPI_ADMIN_SECRET` / `ZIPPI_ADMIN_SESSION_SECRET`. Preserve configured
-   JWT issuer/audience. Use `ZIPPI_PARTNER_ACCESS_REQUIRED=true` for the intended
-   first-launch preview gate; existing verified normal accounts remain a separate
-   supported path. Admin host routing must match the staging service's hostname.
-4. Install dependencies and run `npm run migrate` against the verified staging
-   database before starting the new server. Use the existing service's deployment
-   mechanism, then confirm the deployed commit and `GET /partner-access/config`
-   returns HTTP 200 with `ok:true, required:true` and no-store caching.
-5. Verify protected admin authentication and read-only flight/hotel smoke routes.
-   Run the real-code lifecycle only with the separately approved QA recipient.
-   Local integration evidence covers request-code, verification, lease refresh,
-   expiry, revocation, restoration and feature/platform changes; it must not be
-   reported as a hosted or delivered-email pass.
+Use `npm ci`, then `npm run migrate` against only the new database before
+`node server.js`. On a free instance without a pre-deploy command, use
+`npm run migrate && node server.js` as the start command. Existing migrations
+serialize and verify checksums. Use manual deployment from the feature branch.
+Never copy a production database connection, signing key or admin secret.
 
-## Authenticated SMTP values required
+## Required staging environment
 
-Enter these in the staging service's secret manager, never in source or chat:
+Enter secrets directly in Render environment fields. Never store them in source,
+documentation, screenshots, shell history or reports.
 
-| Setting | Required value |
+| Variable | Configuration |
 | --- | --- |
-| `ZIPPI_PARTNER_MAIL_ADAPTER` | `smtp` |
-| `ZIPPI_PARTNER_SMTP_HOST` | Provider's SMTP hostname |
-| `ZIPPI_PARTNER_SMTP_PORT` | `465` for implicit TLS or `587` for required STARTTLS |
-| `ZIPPI_PARTNER_SMTP_USER` | Provider's SMTP username |
-| `ZIPPI_PARTNER_SMTP_PASSWORD` | SMTP password or provider-issued SMTP credential |
-| `ZIPPI_PARTNER_SMTP_FROM` | Provider-approved From address |
+| `NODE_ENV` | `production` |
+| `AUTH_MODE` | `prod` |
+| `DATABASE_URL` | New staging database's private connection URL only |
+| `JWT_SECRET` | New independent staging signing secret |
+| `JWT_ISSUER` | `zippy-api` |
+| `JWT_AUDIENCE` | `zippy-ios` |
+| `ZIPPI_ADMIN_SECRET` | New independent staging operator secret |
+| `ZIPPI_ADMIN_SESSION_SECRET` | New independent staging session secret |
+| `ZIPPI_ADMIN_HOST` | Actual new staging API hostname |
+| `ZIPPI_ADMIN_ACTOR` | Staging QA operator label |
+| `ZIPPI_PARTNER_ACCESS_REQUIRED` | `true` |
+| `ZIPPI_PARTNER_MAIL_ADAPTER` | `resend` |
+| `RESEND_API_KEY` | Resend sending key, preferably restricted to heyzippi.com |
+| `ZIPPI_PARTNER_EMAIL_FROM` | `Zippi Partner Preview <preview@heyzippi.com>` after verification |
 
-The selected provider must have an approved sender/domain and permit delivery to
-the user's QA address. Complete its sender/domain verification and sandbox-recipient
-approval if applicable. No usable credentials have been found locally; hosted
-configuration remains unverified pending account access. Do not use the development
-mail adapter on a hosted production-mode process. Missing SMTP fails closed.
+Preserve normal JWT issuer/audience contracts. Review required provider/search
+settings separately before claiming flight/hotel live acceptance. Do not enable
+checkout or provision/copy payment credentials merely to configure Partner Access.
+The iOS production default URL and travel behavior remain unchanged in source;
+only the eventual build-specific staging configuration changes its environment.
+
+Legacy SMTP variables are **optional and unused with `resend`**:
+`ZIPPI_PARTNER_SMTP_HOST`, `ZIPPI_PARTNER_SMTP_PORT`, `ZIPPI_PARTNER_SMTP_USER`,
+`ZIPPI_PARTNER_SMTP_PASSWORD`, `ZIPPI_PARTNER_SMTP_FROM`. They are required only
+when explicitly selecting `smtp`. No fallback from failed Resend to SMTP exists.
+The development adapter is refused in production mode; do not use it on staging.
+
+## Resend sender verification
+
+The authenticated heyzippi workspace initially had only `proproval.com` verified.
+A `heyzippi.com` domain setup is prepared in Resend, North Virginia, sending on and
+receiving off. Resend requests the following DNS records (TTL Auto):
+
+| Type | Name within heyzippi.com | Content | Priority |
+| --- | --- | --- | --- |
+| TXT | `resend._domainkey` | Exact DKIM public key displayed by Resend | — |
+| MX | `send` | `feedback-smtp.us-east-1.amazonses.com` | 10 |
+| TXT | `send` | `v=spf1 include:amazonses.com ~all` | — |
+
+DNS ownership/approval remains with the user. Do not change root MX, receiving or
+existing domain records. Check the current provider screen before applying records;
+verify status in Resend before setting the sender ready. Configuration presence or
+mocked tests cannot prove delivery. Use the user's own approved QA address only.
+
+## Deployment and hosted acceptance
+
+1. Verify the exact new database identity and selected feature-branch SHA before
+   migration. Configure the environment without logging secret values.
+2. Confirm deployed SHA, `/health`, `/health/db` and `GET /partner-access/config`:
+   HTTP 200, `ok:true`, `required:true`, `Cache-Control: no-store`.
+3. Confirm `/admin/partner-access` requires the existing admin login and its API
+   rejects unauthorized/cross-origin writes. Verify anonymous protected flight/
+   hotel routes remain gated. Run existing non-booking flight/hotel smoke checks
+   after their staging provider settings are reviewed.
+4. Once Resend is verified/configured, ask only for the exact QA email the user
+   personally controls. Create that invitation, then request one real OTP. Do not
+   use an address merely because it was visible in a dashboard.
+5. Verify the code once, status/refresh, checkout denied, feature edits, revoke,
+   restore, extend and server expiry. Retain only sanitized status/expiry/feature
+   evidence. Never record the code, JWT, cookie or API key. Hosted lifecycle and
+   inbox delivery remain pending until actually exercised.
 
 ## First QA invitation — prepared, not created
 
-After the user explicitly approves one email they control, sign in to the staging
-`/admin/partner-access` using existing admin authentication. Create or select an
-internal QA organization. Add that exact address, select three days, and explicitly
-uncheck Android (the generic form defaults both platforms on). Set:
+In the staging admin choose an internal QA organization, then add only the approved
+email. Choose **1 day**, iOS checked, Android unchecked, Flights/Hotels/Combined
+Trip checked, Checkout unchecked. The form's generic default remains 7 days and
+both platforms, so make these selections explicitly.
+
+The 1-day shortcut uses existing custom `expiresAt`, based on server time or a
+chosen future start. Extension adds a day from the later of server time and current
+expiry. Existing 3/7/14 API presets and entitlement semantics are unchanged.
 
 ```json
 {
-  "durationDays": 3,
   "platforms": ["ios"],
   "features": {
     "flights": true,
@@ -93,31 +128,24 @@ uncheck Android (the generic form defaults both platforms on). Set:
 }
 ```
 
-The wire key is `combinedTrip`, not `combined_trip`. The form also supplies the
-approved email and chosen organization ID. Adding the invitation sends no mail;
-delivery occurs only when the user requests a code. Duration starts at the selected
-start time (now by default), not first verification. Do not invite partner companies.
+The wire key is `combinedTrip`, not `combined_trip`. The form also supplies email,
+organization and calculated custom expiry. Adding a person sends no mail; code
+request triggers delivery. Expiry starts at the chosen start, not verification.
+Revoke applies on the next server request; native UI locks on refresh or lease
+expiry (at most 60 seconds while active). Restore preserves flags and platforms;
+extending alone never reverses revocation.
 
-After email acceptance, use Revoke, Restore, then Extend on this same person.
-Keep the verified app account signed in. Revoke applies to server requests
-immediately; native content locks on refresh or lease expiry (at most 60 seconds
-while active), and foreground triggers refresh. Restore preserves platforms and
-features; extending alone does not reverse revocation. Capture only HTTP statuses,
-access, expiry and flags, never JWTs or OTPs.
+## iOS acceptance boundary
 
-## Physical iOS acceptance boundary
+App Store Connect's authenticated audit confirms **1.3 (10) is used** and expired.
+Build **11** was unused at that inspection; recheck before preparing **1.3 (11)**.
+Existing external groups have no current builds and review metadata needs updating.
+No upload, group creation, invitation or metadata change is authorized here.
 
-After hosted smoke passes, inspect App Store Connect read-only to verify whether
-version 1.3 build 10 is unused. Do not infer availability from the Xcode project.
-Build standard `Zippy` / `Release`, optimized arm64, with normal device signing.
-Supply a build-specific Info.plist containing the verified staging URL via
-`INFOPLIST_FILE`; do not patch an already-signed app or change the public default
-URL. Inspect the built app's effective URL, bundle/version/build, entitlements and
-signature before the authorized iPhone 15 Pro install.
-
-The previously validated Release archive still contains the production URL and
-must not be installed for this staging task. No new physical install can proceed
-until the staging URL, backend smoke and build-number check are resolved. After
-installation, stop for the user's real-email acceptance. A future App Store Connect
-distribution archive/export and external TestFlight review remain separate from
-this development-signed physical acceptance; no upload is authorized.
+After hosted staging passes, build standard `Zippy` / `Release`, optimized arm64,
+with signing and a build-specific Info.plist pointing to the verified staging URL.
+Do not patch an already-signed app or change the public default URL. Inspect the
+result's effective URL, version/build, entitlements and signature. Stop before
+physical installation. The old development-signed Release archive points at
+production and is not a staging candidate. TestFlight distribution signing/export,
+review and upload are later steps requiring their stated authorization.

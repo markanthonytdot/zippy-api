@@ -127,7 +127,17 @@ function openPerson(mode, person = null) {
   byId("person-dialog").showModal();
 }
 
-function durationBody(form) {
+async function durationBody(form) {
+  if (form.elements.duration.value === "1") {
+    // Use the existing custom-expiry contract; the server retains all validation.
+    const { serverTime } = await partnerApi();
+    const now = new Date(serverTime).getTime();
+    const start = partnerState.mode === "extend"
+      ? Math.max(now, new Date(partnerState.selected.expiresAt).getTime())
+      : form.elements.startsAt.value ? new Date(form.elements.startsAt.value).getTime() : now;
+    if (!Number.isFinite(now) || !Number.isFinite(start)) throw new Error("Refresh the list and choose a valid start time.");
+    return { expiresAt: new Date(start + 86400000).toISOString() };
+  }
   if (form.elements.duration.value !== "custom") return { durationDays: Number(form.elements.duration.value) };
   const date = new Date(form.elements.expiresAt.value);
   if (!Number.isFinite(date.getTime())) throw new Error("Choose a valid custom expiry.");
@@ -171,7 +181,7 @@ document.addEventListener("DOMContentLoaded", () => {
     event.preventDefault(); const form = event.currentTarget;
     withPartnerSubmission(form, "person-error", async () => {
       const mode = partnerState.mode;
-      let body = mode === "edit" ? {} : durationBody(form);
+      let body = mode === "edit" ? {} : await durationBody(form);
       if (mode !== "extend") {
         body.platforms = ["ios", "android"].filter((p) => form.elements[p].checked);
         if (!body.platforms.length) throw new Error("Choose at least one platform.");

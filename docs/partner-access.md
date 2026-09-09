@@ -4,7 +4,9 @@ The implementation and admin tooling are checkpointed together on feature branch
 `codex/partner-preview-staging`, based on
 `18dcdac2131e147a2f077790030ef38e1f4893b7`. The September 9 activation checkpoint
 reran all 162 tests against isolated localhost PostgreSQL: zero failures/skips.
-This checkpoint is not evidence of a hosted deployment or real SMTP delivery.
+The Resend follow-up passes 174 tests, zero failures/skips, with mocked HTTPS
+delivery and the same isolated database. Neither checkpoint proves hosted deployment
+or real email delivery.
 The authorized rollout is test/staging only; no main merge or production change.
 See [staging activation and QA runbook](partner-preview-staging.md) for remaining
 external prerequisites and the approved first-invite configuration. Historical
@@ -87,26 +89,51 @@ travel data in partner audit metadata. Account deletion removes the partner
 email and verification records, anonymizes person references in audit records,
 and makes retained partner JWTs unavailable, including expired/revoked users.
 
-No transactional email provider existed. The implementation adds the small
-provider-neutral Nodemailer SMTP transport; it does not choose a vendor or create
-an account. `ZIPPI_PARTNER_MAIL_ADAPTER=smtp` requires:
+`createPartnerMailAdapter` in `lib/partnerAccessMail.js` selects an explicit adapter
+with the existing `{ configured, send(message) }` contract. The lifecycle service
+still owns approved-email checks, random code generation, keyed storage, expiry,
+attempts, rate limits and generic responses. `server.js` constructs the adapter
+once; no provider logic was added to routes or native clients.
+
+Resend HTTPS is the preferred staging/production-capable delivery adapter:
+
+- `ZIPPI_PARTNER_MAIL_ADAPTER=resend`
+- `RESEND_API_KEY`: server-side secret, entered directly into Render environment
+- `ZIPPI_PARTNER_EMAIL_FROM`: approved sender, preferably
+  `Zippi Partner Preview <preview@heyzippi.com>`
+
+`lib/partnerAccessResendMail.js` uses native fetch to POST plain-text mail to
+`https://api.resend.com/emails` with bearer authentication, a 15-second timeout,
+redirect rejection and no retries. It accepts only successful responses containing
+a nonempty message ID. It never logs/forwards provider errors or credentials and
+never falls back to another adapter. No npm dependency is added. The subject is
+“Your Zippi Partner Preview code”; the body contains the code, 10-minute expiry
+and an instruction to ignore an unrequested email. Verify `heyzippi.com` in Resend
+before using its sender; configuration presence alone cannot prove delivery.
+
+SMTP remains supported and tested as an optional legacy path. Only when explicitly
+selecting `ZIPPI_PARTNER_MAIL_ADAPTER=smtp`, configure:
 
 - `ZIPPI_PARTNER_SMTP_HOST`
 - `ZIPPI_PARTNER_SMTP_PORT` (`465` implicit TLS, or `587` required STARTTLS)
 - `ZIPPI_PARTNER_SMTP_USER`
 - `ZIPPI_PARTNER_SMTP_PASSWORD`
-- `ZIPPI_PARTNER_SMTP_FROM` (an approved sender at the selected mail service)
+- `ZIPPI_PARTNER_SMTP_FROM` (provider-approved sender)
 
-Certificate verification, TLS 1.2+, delivery timeouts and disabled transport
-debug/file/URL access are enforced. Transport is tested with an injected fake;
-no real email was sent. Missing configuration fails closed with 503 for every
-request, independently of invitation membership. Individual delivery failures
-retain the generic request response, invalidate that challenge and record a
-sanitized operational failure event. Unapproved addresses never reach delivery.
+SMTP still enforces verified TLS 1.2+, delivery timeouts and disabled transport
+logging/file/URL access. It is not required for the Resend configuration. Postmark
+setup is discontinued; do not create Postmark resources or add SMTP credentials.
+The deterministic development adapter remains local-only and refuses production
+mode and real-domain recipients. Automated mail tests use mocked transports only.
 
-The remaining external email blocker is a usable authenticated SMTP service and
-approved sender. Database migration and deployment still require the user's
-separate authorization; no production configuration has been inspected or changed.
+Missing or unknown adapter configuration fails closed with 503 for every request,
+independently of invitation membership. Individual delivery failures retain the
+generic request response, consume the failed challenge and record only a sanitized
+failure event. Unapproved addresses never reach delivery. Resend failure tests
+cover HTTP errors (including auth, unverified domain, throttling and server errors),
+timeout/network failures and malformed success bodies. A PostgreSQL-backed mocked
+Resend lifecycle also verifies approved-only delivery, HMAC-only code storage,
+cooldown, one-time use, revocation/restoration and independent checkout denial.
 
 ## Shared native API
 
@@ -172,6 +199,15 @@ searches. Entitlements never enable an otherwise-disabled checkout/provider safe
 flag, and no travel search/ranking/provider implementation was changed.
 
 ## Admin operations
+
+The duration menu now includes a **1 day** convenience choice. It reads current
+server time and sends the existing explicit `expiresAt` field: one day after the
+chosen invitation start, or after the later of now/current expiry when extending.
+The API's `durationDays` presets remain 3/7/14, custom-expiry validation is unchanged,
+and extending never restores a revoked invitation. The existing default is still
+seven days. Validation: all 162 backend tests passed against isolated PostgreSQL;
+nine browser-script duration scenarios passed, including future starts, active and
+expired extensions, custom expiry, existing presets and invalid starts.
 
 `/admin/partner-access` reuses the existing protected admin surface. Partner page
 assets require admin authentication. No travel searches or conversation data is

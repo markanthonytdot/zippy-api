@@ -114,6 +114,49 @@ test("PostgreSQL Partner Access lifecycle and concurrent security contracts", { 
     return { person, email, ip, platform: "ios" };
   }
   async function verify(input) { const reply = await service.verifyCode({ ...input, code: "314159" }); const claims = (await jwtVerify(reply.token, key, { issuer: "zippy-api", audience: "zippy-ios" })).payload; return { reply, claims }; }
+  await t.test("mocked Resend preserves approved-only delivery, OTP security and live entitlement changes", async () => {
+    const messages = []; let deliveryFails = false;
+    const resend = createPartnerMailAdapter({ ZIPPI_PARTNER_MAIL_ADAPTER: "resend", RESEND_API_KEY: "test-only", ZIPPI_PARTNER_EMAIL_FROM: "preview@example.test" }, {
+      fetchImpl: async (_url, options) => {
+        messages.push(JSON.parse(options.body));
+        return { ok: !deliveryFails, json: async () => ({ id: "mock-message-id" }) };
+      },
+    });
+    const resendService = createPartnerAccessService({ dbPool: pool, secret: "only-for-local-integration-tests", now: () => clock, mailAdapter: resend,
+      signToken: (subject, claims) => new SignJWT(claims).setProtectedHeader({ alg: "HS256" }).setSubject(subject).setIssuer("zippy-api").setAudience("zippy-ios").setIssuedAt().setExpirationTime("30d").sign(key),
+    });
+    const input = await fixture({ platforms: ["ios"], features: { flights: true, hotels: true, combinedTrip: true, checkout: false } });
+    const unknown = { email: "resend-unapproved@porter.test", platform: "ios", ip: "192.0.2.201" };
+    const unknownReply = await resendService.requestCode(unknown);
+    assert.equal(messages.length, 0);
+    assert.deepEqual(await resendService.requestCode(input), unknownReply);
+    assert.equal(messages.length, 1);
+    const code = messages[0].text.match(/\b\d{6}\b/)[0];
+    const row = (await pool.query("select * from partner_verifications where person_id=$1", [input.person.id])).rows[0];
+    assert.equal(row.code_digest, codeDigest("only-for-local-integration-tests", row.id, code));
+    assert.equal(Object.hasOwn(row, "code"), false);
+    assert.equal(new Date(row.expires_at).getTime() - clock, 600000);
+    await resendService.requestCode(input); assert.equal(messages.length, 1);
+    const reply = await resendService.verifyCode({ ...input, code });
+    const claims = (await jwtVerify(reply.token, key, { issuer: "zippy-api", audience: "zippy-ios" })).payload;
+    assert.equal(reply.partnerAccess.features.checkout, false);
+    await assert.rejects(resendService.verifyCode({ ...input, code }), error => error.code === "invalid_code");
+    await service.changePerson(input.person.id, "revoke", {}, "test-admin");
+    assert.equal((await resendService.status(claims)).access, "revoked");
+    clock += 60000; await resendService.requestCode(input); assert.equal(messages.length, 1);
+    await service.changePerson(input.person.id, "update", { status: "active", features: { combinedTrip: false } }, "test-admin");
+    const restored = await resendService.status(claims);
+    assert.equal(restored.access, "active"); assert.equal(restored.features.combinedTrip, false); assert.equal(restored.features.checkout, false);
+    deliveryFails = true;
+    assert.deepEqual(await resendService.requestCode(input), unknownReply);
+    assert.equal(messages.length, 2);
+    const failedCode = messages[1].text.match(/\b\d{6}\b/)[0];
+    await assert.rejects(resendService.verifyCode({ ...input, code: failedCode }), error => error.code === "invalid_code");
+    const latest = (await pool.query("select * from partner_verifications where person_id=$1 order by created_at desc limit 1", [input.person.id])).rows[0];
+    assert.ok(latest.consumed_at);
+    const audit = (await pool.query("select metadata from partner_access_audit where person_id=$1 and event='code_delivery_failed'", [input.person.id])).rows;
+    assert.deepEqual(audit, [{ metadata: { platform: "ios" } }]);
+  });
   await t.test("approved case-normalized email requests code; code database stores only keyed digest", async () => {
     const input = await fixture(); const reply = await service.requestCode({ ...input, email: ` ${input.email.toUpperCase()} ` });
     assert.equal(reply.ok, true); assert.equal(mail.read(input.email).code, "314159");
