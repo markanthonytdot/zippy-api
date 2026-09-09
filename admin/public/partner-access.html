@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Partner Access · Zippi Admin</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <link rel="stylesheet" href="/admin/assets/partner-access.css">
+  <script src="/admin/assets/partner-access.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/admin/overview" aria-label="Zippi Admin overview">
+        <img class="brand-logo" src="/admin/assets/zippi-logo-nano.png" alt="Zippi">
+        <span class="brand-copy"><strong>Zippi</strong><small>Business Admin</small></span>
+      </a>
+      <nav aria-label="Admin sections">
+        <p class="nav-label">Business</p>
+        <a href="/admin/overview"><span class="nav-icon">01</span><span>Overview</span></a>
+        <a href="/admin/partner-access" class="active" aria-current="page"><span class="nav-icon">P</span><span>Partner Access</span></a>
+        <p class="nav-label">Travel</p>
+        <a href="/admin/flights"><span class="nav-icon">02</span><span>Flight pricing</span></a>
+        <a href="/admin/currencies"><span class="nav-icon">03</span><span>Currency settings</span></a>
+      </nav>
+      <form method="post" action="/admin/logout"><button class="sign-out" type="submit">Sign out</button></form>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">Private business control panel</p><h1>Partner Access</h1><p class="page-subtitle">Give partners a little time with Zippi.</p></div>
+        <span class="subtle-badge">Internal only</span>
+      </header>
+      <div id="partner-message" class="notice-banner" role="status" aria-live="polite" hidden></div>
+      <section class="summary-grid partner-summary" aria-label="Preview overview">
+        <article class="summary-card accent"><p class="summary-label">Currently active</p><strong id="active-count">—</strong><p class="summary-copy">Verified partner previews</p></article>
+        <article class="summary-card"><p class="summary-label">Waiting to activate</p><strong id="pending-count">—</strong><p class="summary-copy">Approved people</p></article>
+        <article class="summary-card"><p class="summary-label">Organizations</p><strong id="organization-count">—</strong><p class="summary-copy">One invitation for both platforms</p></article>
+      </section>
+      <section class="panel partner-list-panel">
+        <div class="panel-heading"><div><p class="eyebrow">Partner previews</p><h2>People with an invitation</h2></div><div class="partner-actions"><button type="button" id="refresh" class="text-button">Refresh</button><button type="button" id="add-person" class="primary-button compact">Add person</button></div></div>
+        <div class="partner-filter"><label for="organization-filter">Organization</label><select id="organization-filter"><option value="">All organizations</option></select><button type="button" id="add-organization" class="text-button">Add organization</button></div>
+        <div class="partner-table-scroll"><table class="partner-table"><thead><tr><th>Email / organization</th><th>Access</th><th>Expires</th><th>Features / platforms</th><th>Activity</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="people-list"><tr><td colspan="6">Loading invitations…</td></tr></tbody></table></div>
+        <p class="form-note">Access updates on the next entitlement check. Activation and access activity are shown here; searches and conversations are private.</p>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="person-dialog" class="partner-dialog" aria-labelledby="person-title">
+    <form id="person-form">
+      <div class="panel-heading"><h2 id="person-title">Add person</h2><button type="button" data-close class="text-button">Cancel</button></div>
+      <p id="person-copy" class="form-note">Approve their work email. They receive a code only when they request one in the app.</p>
+      <div id="person-identity">
+        <label>Work email<input type="email" name="email" autocomplete="off" maxlength="254" required placeholder="name@example.com"></label>
+        <label>Organization<select name="organizationId" required></select></label>
+      </div>
+      <div id="duration-fields">
+        <label>Duration<select name="duration"><option value="3">3 days</option><option value="7" selected>7 days</option><option value="14">14 days</option><option value="custom">Custom expiry</option></select></label>
+        <label id="custom-expiry-label" hidden>Expires at <span class="form-note">(your local time)</span><input name="expiresAt" type="datetime-local"></label>
+        <label id="start-label">Starts at <span class="form-note">(optional, your local time)</span><input name="startsAt" type="datetime-local"></label>
+      </div>
+      <div id="entitlement-fields">
+        <fieldset><legend>Platforms</legend><label class="partner-toggle"><input type="checkbox" name="ios" checked>iOS</label><label class="partner-toggle"><input type="checkbox" name="android" checked>Android</label></fieldset>
+        <fieldset><legend>Features</legend><label class="partner-toggle"><input type="checkbox" name="flights" checked>Flights</label><label class="partner-toggle"><input type="checkbox" name="hotels" checked>Hotels</label><label class="partner-toggle"><input type="checkbox" name="combinedTrip" checked>Combined Trip</label><label class="partner-toggle"><input type="checkbox" name="checkout">Checkout</label></fieldset>
+        <p class="form-note">Checkout also requires the app and backend booking controls to allow it.</p>
+      </div>
+      <p id="person-error" class="partner-error" role="alert"></p>
+      <button type="submit" id="save-person" class="primary-button">Add person</button>
+    </form>
+  </dialog>
+
+  <dialog id="organization-dialog" class="partner-dialog" aria-labelledby="organization-title">
+    <form id="organization-form">
+      <div class="panel-heading"><h2 id="organization-title">Add organization</h2><button type="button" data-close class="text-button">Cancel</button></div>
+      <label>Organization name<input name="name" maxlength="160" required autocomplete="off" placeholder="Partner organization"></label>
+      <label>Allowed email domains <span class="form-note">(optional)</span><input name="domains" autocomplete="off" placeholder="example.com, example.org"></label>
+      <p class="form-note">Domains restrict the people you can add. Each email still needs its own invitation.</p>
+      <p id="organization-error" class="partner-error" role="alert"></p>
+      <button type="submit" class="primary-button">Add organization</button>
+    </form>
+  </dialog>
+
+  <dialog id="action-dialog" class="partner-dialog" aria-labelledby="action-title">
+    <form id="action-form">
+      <div class="panel-heading"><h2 id="action-title">Revoke access</h2><button type="button" data-close class="text-button">Cancel</button></div>
+      <p id="action-copy"></p><p id="action-error" class="partner-error" role="alert"></p>
+      <button type="submit" id="confirm-action" class="primary-button">Revoke access</button>
+    </form>
+  </dialog>
+</body>
+</html>

@@ -25,6 +25,10 @@ const { createStrictCorsMiddleware } = require("./lib/strictCors");
 const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
 const { resolveFlightBookingMode } = require("./lib/flightBookingMode");
 const { createAdminDashboardRouter } = require("./lib/adminDashboard");
+const { createPartnerAccessService } = require("./lib/partnerAccess");
+const { createPartnerMailAdapter } = require("./lib/partnerAccessMail");
+const { registerPartnerAccessRoutes, createPartnerAccessEnforcement } = require("./lib/partnerAccessRoutes");
+const { databaseSSLForURL } = require("./lib/databaseConfig");
 const {
   DEFAULT_ROUNDING_RULES,
   SUPPORTED_CUSTOMER_CURRENCIES,
@@ -540,12 +544,12 @@ async function getGoogleJwks() {
 }
 
 // sign our own Zippy JWT (HS256)
-async function signZippyToken(subject) {
+async function signZippyToken(subject, claims = {}) {
   if (!JWT_SECRET) return null;
   const { SignJWT } = await getJose();
   const encoder = new TextEncoder();
 
-  return new SignJWT({ uid: subject })
+  return new SignJWT({ ...claims, uid: subject })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setSubject(subject)
     .setIssuer(JWT_ISSUER)
@@ -726,6 +730,7 @@ async function hydrateUserIdFromAuth(req) {
       if (sub) {
         req.userId = sub;
         req.userIdVerified = true;
+        req.authClaims = payload;
         return;
       }
     } catch (_) {
@@ -845,9 +850,19 @@ app.get("/version", (req, res) => {
 const dbPool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
+      ssl: databaseSSLForURL(process.env.DATABASE_URL),
     })
   : null;
+
+const partnerAccessRequired = String(process.env.ZIPPI_PARTNER_ACCESS_REQUIRED || "").toLowerCase() === "true";
+const partnerAccessService = createPartnerAccessService({
+  dbPool,
+  secret: JWT_SECRET,
+  signToken: signZippyToken,
+  mailAdapter: createPartnerMailAdapter(),
+});
+registerPartnerAccessRoutes(app, { service: partnerAccessService, required: partnerAccessRequired, verifyUser: requireVerifiedUser });
+app.use(createPartnerAccessEnforcement({ service: partnerAccessService, required: partnerAccessRequired }));
 
 const currentFlightPricingConfig = Object.freeze({
   fxMarginBps: FLIGHT_FX_MARGIN_BPS,
@@ -1082,6 +1097,7 @@ app.get("/v1/flights/booking/config", async (req, res) => {
 
 app.use("/admin", createAdminDashboardRouter({
   dbPool,
+  partnerAccessService,
   adminSecret: ZIPPI_ADMIN_SECRET,
   sessionSecret: ZIPPI_ADMIN_SESSION_SECRET,
   adminActor: ZIPPI_ADMIN_ACTOR,
@@ -6047,6 +6063,7 @@ async function verifyBearerUserId(req) {
 
   req.userId = sub;
   req.userIdVerified = true;
+  req.authClaims = payload;
   return sub;
 }
 
@@ -6474,6 +6491,7 @@ app.delete("/me/account", async (req, res) => {
   if (!requireDb(req, res)) return;
 
   try {
+    await partnerAccessService.deleteAccount(req.authClaims);
     let appleTokenTableReady = false;
     let appleRefreshToken = "";
     try {
