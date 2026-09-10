@@ -26,6 +26,7 @@ const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
 const { resolveFlightBookingMode } = require("./lib/flightBookingMode");
 const { createAdminDashboardRouter } = require("./lib/adminDashboard");
 const { createPartnerAccessService } = require("./lib/partnerAccess");
+const { createStagingReviewerAccess } = require("./lib/partnerAccessReviewer");
 const { createPartnerMailAdapter } = require("./lib/partnerAccessMail");
 const { registerPartnerAccessRoutes, createPartnerAccessEnforcement } = require("./lib/partnerAccessRoutes");
 const { databaseSSLForURL } = require("./lib/databaseConfig");
@@ -860,6 +861,7 @@ const partnerAccessService = createPartnerAccessService({
   secret: JWT_SECRET,
   signToken: signZippyToken,
   mailAdapter: createPartnerMailAdapter(),
+  reviewerAccess: createStagingReviewerAccess(),
 });
 registerPartnerAccessRoutes(app, { service: partnerAccessService, required: partnerAccessRequired, verifyUser: requireVerifiedUser });
 app.use(createPartnerAccessEnforcement({ service: partnerAccessService, required: partnerAccessRequired }));

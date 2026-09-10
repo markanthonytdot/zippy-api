@@ -1,0 +1,91 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const { Pool } = require('pg');
+const { createStagingReviewerAccess, REVIEW_DIGEST_PREFIX } = require('../lib/partnerAccessReviewer');
+const { createPartnerAccessService } = require('../lib/partnerAccess');
+const fixtureEnv = (code) => ({ ZIPPI_PARTNER_REVIEW_ENABLED: 'true', RENDER_SERVICE_ID: 'srv-dagq12ht0dsc73a7dm40', RENDER_EXTERNAL_HOSTNAME: 'zippi-partner-staging.onrender.com', ZIPPI_PARTNER_REVIEW_CODE: code, ZIPPI_PARTNER_REVIEW_EXPIRES_AT: '2027-01-01T00:00:00Z' });
+test('reviewer configuration is opt-in and fails closed outside the exact staging service', () => {
+  assert.equal(createStagingReviewerAccess({}), null);
+  for (const patch of [{ RENDER_SERVICE_ID: 'production' }, { RENDER_EXTERNAL_HOSTNAME: 'production.example' }, { ZIPPI_PARTNER_REVIEW_CODE: '' }, { ZIPPI_PARTNER_REVIEW_EXPIRES_AT: 'bad' }]) {
+    assert.throws(() => createStagingReviewerAccess({ ...fixtureEnv('123456'), ...patch }), /configuration is invalid/);
+  }
+  const access = createStagingReviewerAccess(fixtureEnv('123456'));
+  assert.equal(access.challenge('other@heyzippi.com', 'ios', '2027-01-01', Date.parse('2026-09-10')), null);
+  assert.equal(access.challenge('appreview@heyzippi.com', 'android', '2027-01-01', Date.parse('2026-09-10')), null);
+  assert.equal(access.challenge('appreview@heyzippi.com', 'ios', '2027-01-01', Date.parse('2027-01-01')), null);
+});
+const databaseUrl = process.env.PARTNER_TEST_DATABASE_URL;
+test('isolated PostgreSQL reviewer lifecycle preserves ordinary OTP and entitlement security', { skip: !databaseUrl }, async t => {
+  assert.ok(['localhost', '127.0.0.1'].includes(new URL(databaseUrl).hostname));
+  const schema = `review_test_${crypto.randomBytes(8).toString('hex')}`;
+  const setup = new Pool({ connectionString: databaseUrl, ssl: false });
+  await setup.query(`create schema ${schema}`);
+  const pool = new Pool({ connectionString: databaseUrl, ssl: false, options: `-c search_path=${schema}` });
+  t.after(async () => { await pool.end(); await setup.query(`drop schema ${schema} cascade`); await setup.end(); });
+  await pool.query(fs.readFileSync(path.join(__dirname, '../migrations/013_partner_access.sql'), 'utf8'));
+  let now = Date.parse('2026-09-10T12:00:00Z'); const messages = [];
+  const code = '123456'; const ordinaryCode = '654321';
+  const options = { dbPool: pool, secret: 'local-reviewer-tests-only', now: () => now, signToken: async (sub, claims) => JSON.stringify({ sub, ...claims }), mailAdapter: { configured: true, development: true, fixedCode: ordinaryCode, async send(m) { messages.push(m); } } };
+  const reviewerAccess = createStagingReviewerAccess(fixtureEnv(code));
+  const service = createPartnerAccessService({ ...options, reviewerAccess });
+  const org = (await service.createOrganization({ name: 'Local review fixture' }, 'test')).organization;
+  const person = (await service.createPerson({ email: 'appreview@heyzippi.com', organizationId: org.id, expiresAt: '2027-01-01T00:00:00Z', platforms: ['ios'] }, 'test')).person;
+  const ordinary = (await service.createPerson({ email: 'normal@example.test', organizationId: org.id, durationDays: 7, platforms: ['ios'] }, 'test')).person;
+  const input = { email: person.email, platform: 'ios', ip: '192.0.2.20' };
+  const normal = { email: ordinary.email, platform: 'ios', ip: '192.0.2.21' };
+  const rejects = input => assert.rejects(service.verifyCode(input), e => e.code === 'invalid_code');
+  const clearLimits = () => pool.query('delete from partner_access_rate_limits');
+  const send = async () => { now += 61000; await service.requestCode(input); };
+  await t.test('Send Code required; long-lived hashed challenge, cooldown, wrong code and one-time consumption', async () => {
+    await rejects({ ...input, code });
+    await send();
+    await service.requestCode(input);
+    const rows = (await pool.query('select * from partner_verifications where person_id=$1', [person.id])).rows;
+    assert.equal(rows.length, 1); assert.ok(rows[0].code_digest.startsWith(REVIEW_DIGEST_PREFIX)); assert.ok(!rows[0].code_digest.includes(code));
+    assert.equal(new Date(rows[0].expires_at).toISOString(), '2027-01-01T00:00:00.000Z');
+    assert.equal(messages.length, 0);
+    await rejects({ ...input, code: '000000' }); now += 11 * 60000;
+    const reply = await service.verifyCode({ ...input, code });
+    assert.deepEqual(reply.partnerAccess.features, { flights: true, hotels: true, combinedTrip: true, checkout: false });
+    await rejects({ ...input, code });
+    const claims = JSON.parse(reply.token);
+    await service.changePerson(person.id, 'revoke', {}, 'test');
+    assert.equal((await service.status(claims)).access, 'revoked');
+    await rejects({ ...input, code });
+    await service.changePerson(person.id, 'update', { status: 'active' }, 'test');
+    assert.equal((await service.status(claims)).access, 'active');
+  });
+  await t.test('ordinary delivery remains expiring and reviewer code never authenticates another email/platform', async () => {
+    await service.requestCode(normal); assert.equal(messages.length, 1);
+    await rejects({ ...normal, code });
+    assert.equal((await service.verifyCode({ ...normal, code: ordinaryCode })).partnerAccess.access, 'active');
+    now += 61000; await service.requestCode(normal); now += 600001;
+    await rejects({ ...normal, code: ordinaryCode });
+    await rejects({ ...input, platform: 'android', code });
+  });
+  await t.test('five attempts, persistent request/verification rate limits, and fixed code survives another Send Code', async () => {
+    await clearLimits(); await send();
+    for (let i = 0; i < 5; i++) await rejects({ ...input, code: '000000' });
+    await rejects({ ...input, code });
+    await send(); assert.equal((await service.verifyCode({ ...input, code })).partnerAccess.access, 'active');
+    await clearLimits();
+    for (let i = 0; i < 5; i++) await service.requestCode(input);
+    await assert.rejects(service.requestCode(input), e => e.code === 'rate_limited');
+    await clearLimits();
+    for (let i = 0; i < 20; i++) await rejects({ ...input, code: '000000' });
+    await assert.rejects(service.verifyCode({ ...input, code }), e => e.code === 'rate_limited');
+  });
+  await t.test('configuration removal/rotation, entitlement expiry and review deadline fail closed', async () => {
+    await clearLimits(); await send();
+    const disabled = createPartnerAccessService(options);
+    await assert.rejects(disabled.verifyCode({ ...input, code }), e => e.code === 'invalid_code');
+    const rotated = createPartnerAccessService({ ...options, reviewerAccess: createStagingReviewerAccess(fixtureEnv('234567')) });
+    await assert.rejects(rotated.verifyCode({ ...input, code }), e => e.code === 'invalid_code');
+    await pool.query('update partner_people set expires_at=$2 where id=$1', [person.id, new Date(now + 1000)]);
+    now += 1001; await rejects({ ...input, code });
+    now = Date.parse('2027-01-01T00:00:00Z'); await rejects({ ...input, code });
+  });
+});
