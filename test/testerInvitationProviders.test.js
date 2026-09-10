@@ -23,6 +23,11 @@ function appleFixture({ existing = false, member = false, autoNotify = true, bui
     if (path === "betaGroups/group-fixture") data = { attributes: { isInternalGroup: internal } };
     else if (path === "betaGroups/group-fixture/app") data = { id: appId, attributes: { bundleId: "com.heyzippi.zippi" } };
     else if (path === "betaGroups/group-fixture/builds") {
+      assert.equal(new URL(url).searchParams.has("include"), false, "Apple's group builds endpoint does not support includes");
+      data = builds ? [{ id: "build-fixture", attributes: { expired: false, expirationDate: "2099-01-01" } }] : [];
+    } else if (path === "builds") {
+      assert.equal(new URL(url).searchParams.get("filter[id]"), "build-fixture");
+      assert.equal(new URL(url).searchParams.get("include"), "buildBetaDetail");
       data = builds ? [{ id: "build-fixture", attributes: { expired: false, expirationDate: "2099-01-01" }, relationships: { buildBetaDetail: { data: { id: "detail-fixture" } } } }] : [];
       included = [{ type: "buildBetaDetails", id: "detail-fixture", attributes: { externalBuildState: "IN_BETA_TESTING", autoNotifyEnabled: autoNotify } }];
     } else if (path === "betaTesters" && !body) { data = existing ? [tester()] : []; links = pagination ? { next: "https://attacker.test" } : {}; }
