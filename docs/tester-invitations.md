@@ -1,6 +1,45 @@
 # Dashboard tester invitations
 
+## Apple API activation — September 10, 2026
+
+The user supplied the App Manager Team Key named **Zippi TestFlight Invites**.
+Its issuer, key identifier and private key are stored only in the isolated
+staging Render environment using the three existing `ZIPPI_TESTER_APPLE_*`
+credential variables. No credential values are recorded here or in the client.
+
+Live read-only authentication returned HTTP 200 for **Hey Zippi / 6757395108 /
+com.heyzippi.zippi**, the external groups, builds and the designated QA tester.
+Build **1.3.1 (12)** is processed (`VALID`), unexpired and beta-approved. With
+explicit user authorization, it was added to the existing **Beta Testers** group
+after disabling automatic notifications for that build. The association returned
+HTTP 204 and was confirmed by a fresh group-build read. Build 11, the Mark group,
+existing public links and App Store submission/release metadata were not changed.
+
+Two live API compatibility details are covered by regression tests:
+
+- Apple's general tester lookup and individual tester resource can return a null
+  state. Status reads now use the documented `filter[id]` plus `filter[apps]`
+  query and require the exact returned tester. Global email lookup is retained
+  for identity reuse, so an existing tester is not duplicated.
+- Switching automatic notifications off changes an approved build's external
+  state from `IN_BETA_TESTING` to `BETA_APPROVED`. Both are valid for invitation
+  preflight; processing, review-pending, rejected and expired states fail closed.
+  Individual invitations use the supported tester-invitation endpoint. No bulk
+  build notification is sent by this adapter.
+
+The production adapter's live read-only preflight and app-scoped status refresh
+passed. The user designated one controlled QA recipient with one-day access;
+the final hosted invitation outcome is reported separately after deployment.
+Android remains disabled until the intended Android build is uploaded and verified.
+
+Apple references: [tester queries](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-betatesters),
+[build statuses](https://developer.apple.com/help/app-store-connect/reference/app-uploads/app-build-statuses/),
+[build notification setting](https://developer.apple.com/documentation/appstoreconnectapi/patch-v1-buildbetadetails-_id_),
+[group-build assignment](https://developer.apple.com/documentation/appstoreconnectapi/post-v1-betagroups-_id_-relationships-builds).
+
 ## Audit and current external readiness — September 10, 2026
+
+The following records the initial audit, before the Apple activation above.
 
 This feature extends the existing Express admin dashboard at
 `https://zippi-partner-staging.onrender.com/admin/partner-access`. It uses the
@@ -76,7 +115,7 @@ Admin enters **Email → iOS OR Android → Invite to Zippi**. No Both option.
    pool starvation, and its existing email transaction lock protects shared identity.
 4. Create/reuse Partner Access, then the unique `(person_id, platform)` workflow.
 5. Apple: validate the configured external group belongs to the exact Zippi app,
-   with an unexpired `IN_BETA_TESTING` build. Find existing tester by exact normalized
+   with an unexpired `IN_BETA_TESTING` or `BETA_APPROVED` build. Find existing tester by exact normalized
    email, create only if absent, ensure existing group membership, then re-read.
    Automatic notifications are not duplicated. When notification is disabled and
    Apple reports `NOT_INVITED`, use the supported invitation endpoint with a durable
