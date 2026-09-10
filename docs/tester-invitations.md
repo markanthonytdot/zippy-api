@@ -21,16 +21,26 @@ Two live API compatibility details are covered by regression tests:
   state. Status reads now use the documented `filter[id]` plus `filter[apps]`
   query and require the exact returned tester. Global email lookup is retained
   for identity reuse, so an existing tester is not duplicated.
-- Switching automatic notifications off changes an approved build's external
-  state from `IN_BETA_TESTING` to `BETA_APPROVED`. Both are valid for invitation
-  preflight; processing, review-pending, rejected and expired states fail closed.
-  Individual invitations use the supported tester-invitation endpoint. No bulk
-  build notification is sent by this adapter.
+- Switching automatic notifications off changed the approved build's external
+  state from `IN_BETA_TESTING` to `BETA_APPROVED`. A controlled QA resend then
+  failed; an isolated follow-up returned HTTP 409 with
+  `STATE_ERROR.TESTER_INVITE.NO_INSTALLABLE_BUILDS`. Approval alone is therefore
+  insufficient for invitation readiness. Preflight requires `IN_BETA_TESTING`;
+  approved-but-not-activated, review-pending, rejected and expired states fail
+  closed. That specific 409 maps to the safe `apple_no_testable_build` error.
 
-The production adapter's live read-only preflight and app-scoped status refresh
-passed. The user designated one controlled QA recipient with one-day access;
-the final hosted invitation outcome is reported separately after deployment.
-Android remains disabled until the intended Android build is uploaded and verified.
+Live app-scoped status refresh passed. The authorized QA recipient was added to
+the existing group without duplicating its Apple record. One-day iOS preview
+access was preserved and Resend accepted the Zippi welcome email. Apple's fresh
+invitation was not accepted; no Apple invitation delivery is claimed.
+
+Build 12 is attached to Beta Testers (17 members after QA enrollment), with one
+pre-existing individual tester also assigned. Apple's build-notification endpoint
+targets all assigned testers; its request has only a build relationship, not an
+individual recipient selector. Group-wide notification was not triggered. iOS
+invitation sending is held pending authorization for that activation scope; the
+credentials and group association remain configured. Android remains disabled
+until the intended Android build is uploaded and verified.
 
 Apple references: [tester queries](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-betatesters),
 [build statuses](https://developer.apple.com/help/app-store-connect/reference/app-uploads/app-build-statuses/),
@@ -115,7 +125,7 @@ Admin enters **Email → iOS OR Android → Invite to Zippi**. No Both option.
    pool starvation, and its existing email transaction lock protects shared identity.
 4. Create/reuse Partner Access, then the unique `(person_id, platform)` workflow.
 5. Apple: validate the configured external group belongs to the exact Zippi app,
-   with an unexpired `IN_BETA_TESTING` or `BETA_APPROVED` build. Find existing tester by exact normalized
+   with an unexpired `IN_BETA_TESTING` build. Find existing tester by exact normalized
    email, create only if absent, ensure existing group membership, then re-read.
    Automatic notifications are not duplicated. When notification is disabled and
    Apple reports `NOT_INVITED`, use the supported invitation endpoint with a durable
