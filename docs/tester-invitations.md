@@ -197,12 +197,48 @@ enrollment attempted. Current intended Android build remains a separate task.
 
 ## Deployment
 
+Verified deployed runtime: `9e384f3069777c0d8f3a1863afca07558a718f97`, Render deploy
+`dep-dahgt415efls73bsr490`. `/version` confirms this SHA. `/health`, `/health/db`
+and `/partner-access/config` return 200; Partner Access remains required and all
+reported checkout/booking controls remain disabled. Anonymous admin invitation
+requests return 401. The authenticated dashboard loads the new panel and the
+two existing active QA/reviewer records. No real invitation or welcome email was sent.
+
+Created the empty **Zippi Testers** organization
+`ff752a41-2b3b-4558-8f6e-4336abbc88d2` and configured the seven non-secret tester
+settings in isolated staging. Seven-day policy, exact Apple app/group IDs and
+Android open-testing mode are saved. Both the global invitation enable flag and
+Android verified-build flag are explicitly `false`. No existing person's access
+or existing secret was changed. The dashboard accurately shows setup pending.
+
+The follow-up local harness login redirect and this deployment record do not alter
+the deployed runtime. The harness's default post-login route now goes directly to
+Partner Access; its fixture schema intentionally excludes the unrelated booking
+overview. Direct login landing was verified in the browser.
+
 Deploy this additive dashboard/backend change only to isolated staging, from the
 tested `codex/partner-preview-staging` commit, using the normal migration command.
 Keep the feature's enable flag unset/off while credentials and builds are missing.
 Then check `/health`, `/health/db`, `/partner-access/config`, unauthenticated admin
 rejection, and authenticated dashboard readiness. No production or mobile release
 is included. See the task report for the actual deployed revision and observations.
+
+## Changed files
+
+- `admin/public/partner-access.html`, `admin/public/partner-access.js`: invitation
+  section and refresh existing people after successful workflow activity.
+- `admin/public/tester-invitations.js`, `admin/public/tester-invitations.css`: form,
+  readiness, status list and throttled action presentation.
+- `lib/adminDashboard.js`, `server.js`: existing authenticated router/service wiring.
+- `lib/partnerAccess.js`: shared-identity authorization helper and reusable DB connection.
+- `lib/partnerAccessResendMail.js`: reusable HTTPS welcome delivery with idempotency.
+- `lib/testerInvitations.js`: durable workflow, projections, locking, rate limits and audit.
+- `lib/testerInvitationProviders.js`: restricted Apple API and actual Android open-testing model.
+- `lib/testerInvitationRoutes.js`, `lib/testerInvitationEmail.js`: protected API and templates.
+- `migrations/014_tester_invitations.sql`: additive workflow table/index.
+- `test/testerInvitations.test.js`, `test/testerInvitationProviders.test.js`: deterministic regression coverage.
+- `scripts/run_tester_invitation_dev.js`: isolated browser acceptance harness.
+- `docs/tester-invitations.md`: audit, setup, operation, validation and deployment record.
 
 ## Provider references
 
