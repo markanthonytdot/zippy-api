@@ -214,4 +214,5 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
   loadPartners();
+  document.addEventListener("tester-invitation-updated", loadPartners);
 });
