@@ -51,3 +51,26 @@ Live read-only preflight with the revised adapter passed for Zippi Partners/buil
 Actual live invitation outcome is recorded after the authorized dashboard retry.
 
 Reference: [Apple List Builds supported includes and state fields](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-builds).
+
+## Live staging outcome
+
+Runtime commit `4e4c6e1b9dacc19efd81fa0c032d90d2f3a11f3d` deployed successfully as
+Render `dep-dahv4dp594qs738ngdeg`. The existing dashboard **Retry invitation** button
+was clicked once for support@heyzippi.com at 2026-09-11 12:23:16 UTC. It completed
+with platformStatus confirmed, providerState INVITED, error null, and welcome sent
+(provider accepted at 12:23:19 UTC).
+
+Live Apple reads confirmed exactly one new tester, EMAIL invite type, INVITED state,
+and membership only in Zippi Partners. QA membership remained empty and unchanged.
+Build 13 subsequently reported IN_BETA_TESTING with autoNotifyEnabled false. No
+buildBetaNotifications request, new binary or build/group-assignment change was
+made in this correction. The individual provider flow—not the earlier local state
+assumption—established invitation success. The standalone betaTesterInvitations HTTP
+status is not separately recorded; an already-INVITED readback is intentionally
+reused without a duplicate resend.
+
+The existing Partner Access person and invitation IDs are unchanged. One identity,
+one entitlement/person record and one invitation remain, in Zippi Testers, with
+identical features/platforms and expiry 2026-09-18T11:45:00.790Z. Access is active;
+app verification has not yet occurred. One welcome was accepted; inbox delivery
+has not been independently observed. No unrelated tester was invited or notified.
