@@ -879,6 +879,7 @@ const partnerAccessService = createPartnerAccessService({
 const testerInvitationService = createTesterInvitationService({ dbPool, partnerAccessService, mailAdapter: partnerMailAdapter,
   secret: JWT_SECRET, providers: { ios: createAppleTesterProvider(), android: createAndroidTesterProvider(),
   iosQA: createAppleTesterProvider({ ...process.env, ZIPPI_TESTER_APPLE_GROUP_ID: QA_GROUP, ZIPPI_TESTER_APPLE_GROUP_NAME: "Zippi Dashboard QA" }) } });
+require("./lib/testerInvitationWorker").startTesterInvitationWorker(testerInvitationService);
 registerPartnerAccessRoutes(app, { service: partnerAccessService, required: partnerAccessRequired, verifyUser: requireVerifiedUser });
 app.use(createPartnerAccessEnforcement({ service: partnerAccessService, required: partnerAccessRequired }));
 

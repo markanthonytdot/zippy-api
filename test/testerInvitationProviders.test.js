@@ -6,13 +6,13 @@ const { createAppleTesterProvider, createAndroidTesterProvider } = require("../l
 const { createResendMailAdapter } = require("../lib/partnerAccessResendMail");
 const { invitationInstructions } = require("../lib/testerInvitationEmail");
 
-function appleFixture({ processingState = "VALID", reviewState = "APPROVED", platform = "IOS", audience = "APP_STORE_ELIGIBLE", expired = false, expirationDate = "2099-01-01", missingReview = false, returnedBuildId = "build-fixture", invitationRemainsPending = false, groupName = "Zippi Partners", expectedGroupName = "Zippi Partners", existing = false, member = false, autoNotify = true, builds = true, internal = false, appId = "6757395108", failure = null, state = "INVITED", pagination = false, scopedMismatch = false, externalBuildState = "IN_BETA_TESTING", noInstallableBuilds = false } = {}) {
+function appleFixture({ states = [], transportInvitation = false, processingState = "VALID", reviewState = "APPROVED", platform = "IOS", audience = "APP_STORE_ELIGIBLE", expired = false, expirationDate = "2099-01-01", missingReview = false, returnedBuildId = "build-fixture", invitationRemainsPending = false, groupName = "Zippi Partners", expectedGroupName = "Zippi Partners", existing = false, member = false, autoNotify = true, builds = true, internal = false, appId = "6757395108", failure = null, state = "INVITED", pagination = false, scopedMismatch = false, externalBuildState = "IN_BETA_TESTING", noInstallableBuilds = false } = {}) {
   const keys = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
-  const calls = []; let reservations = 0;
+  const calls = [], delays = []; let reservations = 0;
   const env = { ZIPPI_TESTER_APPLE_GROUP_NAME: expectedGroupName, ZIPPI_TESTER_APPLE_APP_ID: "6757395108", ZIPPI_TESTER_APPLE_GROUP_ID: "group-fixture", ZIPPI_TESTER_APPLE_ISSUER_ID: "issuer-fixture",
     ZIPPI_TESTER_APPLE_KEY_ID: "key-fixture", ZIPPI_TESTER_APPLE_PRIVATE_KEY: keys.privateKey.export({ type: "pkcs8", format: "pem" }) };
   const tester = () => ({ type: "betaTesters", id: "tester-fixture", attributes: { email: "qa@example.test", state } });
-  const provider = createAppleTesterProvider(env, { fetchImpl: async (url, options) => {
+  const provider = createAppleTesterProvider(env, { sleep: async ms => { delays.push(ms); }, fetchImpl: async (url, options) => {
     const token = options.headers.Authorization.slice(7);
     assert.equal(jwt.verify(token, keys.publicKey, { algorithms: ["ES256"], audience: "appstoreconnect-v1" }).iss, "issuer-fixture");
     assert.equal(options.redirect, "error");
@@ -37,6 +37,7 @@ function appleFixture({ processingState = "VALID", reviewState = "APPROVED", pla
       if (params.has("filter[id]")) {
         assert.equal(params.get("filter[id]"), "tester-fixture");
         assert.equal(params.get("filter[apps]"), "6757395108");
+        if (states.length) state = states.shift();
         data = existing ? [{ ...tester(), ...(scopedMismatch ? { id: "wrong-tester" } : {}) }] : [];
       } else {
         data = existing ? [{ ...tester(), attributes: { email: "qa@example.test", state: null } }] : [];
@@ -48,13 +49,14 @@ function appleFixture({ processingState = "VALID", reviewState = "APPROVED", pla
     else if (path === "betaTesters/tester-fixture/relationships/betaGroups") { member = true; return { ok: true, status: 204 }; }
     else if (path === "betaTesters/tester-fixture") data = { ...tester(), attributes: { state: null } };
     else if (path === "betaTesterInvitations") {
+      if (transportInvitation) throw new Error("private-transport-error");
       if (noInstallableBuilds) return { ok: false, status: 409, json: async () => ({ errors: [{ code: "STATE_ERROR.TESTER_INVITE.NO_INSTALLABLE_BUILDS", detail: "provider-sensitive-value" }] }) };
-      if (!invitationRemainsPending) state = "INVITED"; data = { id: "invitation-fixture" };
+      if (!invitationRemainsPending && !states.length) state = "INVITED"; data = { id: "invitation-fixture" };
     }
     else throw new Error(`Unexpected mocked route ${path}`);
     return { ok: true, status: 200, json: async () => ({ data, included, links }) };
   } });
-  return { provider, calls, reserveNotification: async () => { reservations++; }, get reservations() { return reservations; } };
+  return { provider, calls, delays, reserveNotification: async () => { reservations++; }, get reservations() { return reservations; } };
 }
 test("Apple new tester creates only tester/group relationship, never edits build or app", async () => {
   const f = appleFixture();
@@ -173,4 +175,66 @@ for (const [name, options] of [
   const f = appleFixture({ externalBuildState: "BETA_APPROVED", ...options });
   await assert.rejects(f.provider.enroll("qa@example.test", f), e => e.code === "apple_no_testable_build");
   assert.equal(f.calls.some(c => c.method === "POST"), false);
+});
+
+
+test("delayed INVITED is rechecked with bounded waits and exactly one Apple notification", async () => {
+  const f = appleFixture({ existing: true, member: true, autoNotify: false, state: 'NOT_INVITED',
+    states: ['NOT_INVITED', 'NOT_INVITED', 'NOT_INVITED', 'INVITED'] });
+  const checkpoints = [];
+  const result = await f.provider.enroll('qa@example.test', { ...f, checkpoint: async value => checkpoints.push(value) });
+  assert.equal(result.state, 'INVITED'); assert.deepEqual(f.delays, [1000, 2000]);
+  assert.equal(f.calls.filter(x => x.path === 'betaTesterInvitations').length, 1);
+  assert.ok(checkpoints.some(x => x.pending && x.testerId === 'tester-fixture'));
+  assert.ok(result.metadata.some(x => x.endpoint === 'tester_invitation' && x.httpStatus === 200));
+  assert.equal(JSON.stringify(result.metadata).includes('qa@example.test'), false);
+});
+test("confirmation timeout preserves tester reference and response metadata", async () => {
+  const f = appleFixture({ autoNotify: false, state: 'NOT_INVITED', invitationRemainsPending: true });
+  await assert.rejects(f.provider.enroll('qa@example.test', f), error => {
+    assert.equal(error.code, 'apple_invitation_pending');
+    assert.equal(error.providerReference.testerId, 'tester-fixture');
+    assert.ok(error.providerReference.metadata.some(x => x.endpoint === 'tester_invitation' && x.httpStatus === 200));
+    return true;
+  });
+  assert.deepEqual(f.delays, [1000, 2000, 4000]); assert.equal(f.reservations, 1);
+  await assert.rejects(f.provider.reconcile('qa@example.test', 'tester-fixture'), e => e.code === 'apple_invitation_pending');
+  assert.equal(f.reservations, 1, 'reconciliation never reserves/sends another notification');
+});
+test("reconciliation confirms an existing invited tester with GET requests only", async () => {
+  const f = appleFixture({ existing: true, member: true });
+  const result = await f.provider.reconcile('qa@example.test', 'tester-fixture');
+  assert.equal(result.state, 'INVITED'); assert.ok(f.calls.every(x => x.method === 'GET')); assert.deepEqual(f.delays, []);
+});
+test("lost Apple notification response remains ambiguous and preserves reference, not raw error", async () => {
+  const f = appleFixture({ autoNotify: false, state: 'NOT_INVITED', transportInvitation: true });
+  await assert.rejects(f.provider.enroll('qa@example.test', f), error => {
+    assert.equal(error.confirmationUncertain, true); assert.equal(error.providerReference.testerId, 'tester-fixture');
+    assert.equal(error.providerReference.metadata.at(-1).category, 'transport');
+    assert.equal(JSON.stringify(error.providerReference).includes('private-transport-error'), false); return true;
+  });
+});
+test("hard Apple refusal retains HTTP/category but no provider prose or credentials", async () => {
+  const f = appleFixture({ autoNotify: false, state: 'NOT_INVITED', noInstallableBuilds: true });
+  await assert.rejects(f.provider.enroll('qa@example.test', f), e => {
+    assert.equal(e.code, 'apple_no_testable_build'); assert.equal(e.confirmationUncertain, false);
+    assert.equal(e.providerReference.metadata.at(-1).httpStatus, 409);
+    assert.equal(e.providerReference.metadata.at(-1).appleCode, 'STATE_ERROR.TESTER_INVITE.NO_INSTALLABLE_BUILDS');
+    assert.equal(JSON.stringify(e.providerReference).includes('provider-sensitive-value'), false); return true;
+  });
+});
+test("diagnostic allowlist removes all arbitrary text, headers, URLs and payload data", () => {
+  const { safeAppleMetadata } = require('../lib/appleInvitationDiagnostics');
+  const value = safeAppleMetadata([{ endpoint: 'tester_invitation', method: 'POST', category: 'response', httpStatus: 403,
+    at: '2026-09-11', appleCode: 'secret-value', detail: 'secret-value', headers: { Authorization: 'secret-value' }, body: 'secret-value' }]);
+  assert.deepEqual(Object.keys(value[0]).sort(), ['at', 'category', 'endpoint', 'httpStatus', 'method']);
+  assert.equal(JSON.stringify(value).includes('secret-value'), false);
+  assert.deepEqual(safeAppleMetadata([{ endpoint: 'https://evil.test/?email=private' }]), []);
+});
+
+test("notification HTTP evidence survives repeated later status polling", () => {
+  const { safeAppleMetadata } = require('../lib/appleInvitationDiagnostics');
+  const original = { endpoint: 'tester_invitation', method: 'POST', category: 'response', httpStatus: 201, at: '2026-09-11' };
+  const metadata = safeAppleMetadata([original, ...Array.from({ length: 100 }, () => ({ ...original, endpoint: 'tester_status', method: 'GET', httpStatus: 200 }))]);
+  assert.equal(metadata.length, 33); assert.equal(metadata[0].endpoint, 'tester_invitation'); assert.equal(metadata[0].httpStatus, 201);
 });

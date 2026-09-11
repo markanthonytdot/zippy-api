@@ -8,7 +8,7 @@
     tester_invitations_disabled: "Tester invitations are awaiting setup.", tester_policy_not_configured: "Set the default tester organization in the staging environment.",
     tester_qa_restricted: "Only the designated iOS QA email is enabled. General invitations remain disabled.",
     invalid_organization: "Choose an active organization from the existing list.",
-    apple_invitation_pending: "Apple has not yet confirmed this individual invitation. No welcome email was sent; refresh or retry later.",
+    apple_invitation_pending: "Waiting for Apple to confirm this invitation. Zippi checks automatically without resending the Apple invitation. The welcome email will follow confirmation.",
     apple_not_configured: "Apple API access and a tester key are required.", apple_no_testable_build: "The configured TestFlight group has no build available for external testing.",
     android_preview_build_unverified: "The intended Android preview build is not yet verified on Google Play.",
     apple_authorization_failed: "Apple rejected the API permissions. Check the server key and role.", apple_group_mismatch: "The configured group must be an external group for Zippi.",
@@ -57,8 +57,9 @@
       if (!rows.length) cell.append(node("small", invitationsLoaded ? "No platform invitation recorded" : "Loading invitation status…", "tester-secondary"));
       for (const item of rows) {
         const details = node("div", "", "tester-person-invitation");
-        details.append(node("strong", `${item.platform === "ios" ? "TestFlight" : "Android"}: ${item.platformStatus === "failed" ? "Failed" : labels[item.providerState] || "Pending"}`));
-        if (item.error) details.append(node("p", explain(item.error), "tester-error"));
+        details.append(node("strong", `${item.platform === "ios" ? "TestFlight" : "Android"}: ${item.platformStatus === "failed" ? "Failed" : item.confirmationPending ? "Pending confirmation" : labels[item.providerState] || "Pending"}`));
+        if (item.error) details.append(node("p", item.error === 'apple_invitation_pending' && !item.nextConfirmationCheckAt
+          ? 'Apple confirmation is still pending. Automatic checks have paused. Check confirmation to read Apple status without resending an invitation.' : explain(item.error), "tester-error"));
         details.append(node("small", `Welcome email: ${{ sent: "Sent (provider accepted)", failed: "Failed / unconfirmed", sending: "Sending / unconfirmed", not_sent: "Not sent" }[item.emailStatus] || "Not sent"}`, "tester-secondary"),
           node("small", `Last attempt: ${date(item.lastAttemptAt)}`, "tester-secondary"));
         const buttons = node("div", "", "tester-row-actions");
@@ -67,8 +68,8 @@
           button.disabled = pending || cell.dataset.access !== "active" || new Date(item.retryAfter).getTime() > Date.now();
           button.addEventListener("click", () => operate(`/${item.id}/${name}`, {})); buttons.append(button);
         }
-        if (item.error || item.platformStatus !== "confirmed" || item.emailStatus !== "sent") action("Retry invitation", "retry");
-        if (item.platformStatus === "confirmed") {
+        if (item.error || item.platformStatus !== "confirmed" || item.emailStatus !== "sent") action(item.confirmationPending ? "Check confirmation" : "Retry invitation", "retry");
+        if (item.platformStatus === "confirmed" && !item.confirmationPending) {
           action("Resend instructions", "resend");
           if (item.platform === "ios") { action("Refresh Apple status", "refresh"); if (["NOT_INVITED", "INVITED"].includes(item.providerState)) action("Resend TestFlight invite", "apple-resend"); }
         }
@@ -104,5 +105,7 @@
   document.addEventListener("partner-people-rendered", render);
   document.addEventListener("partner-person-deleted", () => load().catch(() => { message.textContent = "Refresh the invitation list."; }));
   document.addEventListener("partner-organizations-updated", () => load().catch(() => { message.textContent = "Refresh the list to load organizations."; }));
+  // Reflect completed server reconciliation without triggering workflow actions.
+  setInterval(() => { if (!pending && !document.hidden && invitations.some(item => item.confirmationPending)) load().catch(() => {}); }, 15000);
   load().catch(() => { message.textContent = "Tester invitations are unavailable. Existing Partner Access controls remain available below."; });
 })();

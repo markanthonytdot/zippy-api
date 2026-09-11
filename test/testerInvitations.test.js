@@ -66,7 +66,7 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
   const setup = new Pool({ connectionString: databaseUrl, ssl: false }); await setup.query(`create schema ${schema}`);
   const pool = new Pool({ connectionString: databaseUrl, ssl: false, options: `-c search_path=${schema}` });
   t.after(async () => { await pool.end(); await setup.query(`drop schema ${schema} cascade`); await setup.end(); });
-  for (const file of ["013_partner_access.sql", "014_tester_invitations.sql"]) await pool.query(fs.readFileSync(path.join(__dirname, "../migrations", file), "utf8"));
+  for (const file of ["013_partner_access.sql", "014_tester_invitations.sql", "015_tester_invitation_confirmation.sql"]) await pool.query(fs.readFileSync(path.join(__dirname, "../migrations", file), "utf8"));
   let clock = Date.parse("2026-09-10T12:00:00Z"), serial = 0;
   const access = createPartnerAccessService({ dbPool: pool, secret: "local-test-only", signToken() {}, now: () => clock });
   const org = (await access.createOrganization({ name: "Fixture Testers", allowedEmailDomains: ["example.test"] }, "test-admin")).organization;
@@ -78,7 +78,7 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
       calls[platform].push(address); if (pause) await pause;
       if (failPlatform) throw new Error("private-provider-response-fixture");
       return platform === "ios" ? { testerId: "tester-fixture", state: "INVITED" } : { state: "OPT_IN_REQUIRED" };
-    }, async refresh() { return { state: "INSTALLED" }; }, async resend(_id, { reserveNotification }) { await reserveNotification(); calls.resend++; return { state: "INVITED" }; } });
+    }, async reconcile(address, id) { return this.enroll(address); }, async refresh() { return { state: "INSTALLED" }; }, async resend(_id, { reserveNotification }) { await reserveNotification(); calls.resend++; return { state: "INVITED" }; } });
     const providers = { ios: provider("ios"), iosQA: provider("ios"), android: provider("android") };
     const mailAdapter = { configured: true, async sendInstructions(message) { calls.email.push(message); if (failMail) throw new Error("mail-secret-fixture"); return { id: "message-fixture" }; } };
     const env = { ZIPPI_TESTER_INVITES_ENABLED: "true", ZIPPI_TESTER_ORGANIZATION_ID: org.id, RESEND_API_KEY: "secret-fixture-not-returned" };
@@ -110,6 +110,101 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
       assert.equal(people[0].expires_at.toISOString(), personBefore.expires_at.toISOString());
       assert.deepEqual(people[0].features, personBefore.features);
     }
+  });
+  await t.test("pending confirmation preserves the tester and metadata; background recovery sends welcome once", async () => {
+    const f = fixture(); let enrolls = 0, checks = 0;
+    const metadata = [{ endpoint: 'tester_invitation', method: 'POST', category: 'response', httpStatus: 201, at: new Date(clock).toISOString(), secret: 'never-store' }];
+    f.providers.ios.enroll = async (_email, { checkpoint }) => {
+      enrolls++; await checkpoint({ testerId: 'durable-tester', state: 'NOT_INVITED', pending: true, metadata });
+      return { testerId: 'durable-tester', state: 'NOT_INVITED', metadata };
+    };
+    f.providers.ios.reconcile = async (email, id) => {
+      checks++; assert.equal(email, f.email); assert.equal(id, 'durable-tester');
+      return { testerId: id, state: 'INVITED', metadata: [] };
+    };
+    const first = await f.invite();
+    assert.equal(first.invitation.platformStatus, 'pending'); assert.equal(first.invitation.confirmationPending, true);
+    const before = (await pool.query('select * from partner_people where email=$1', [f.email])).rows[0];
+    const stored = (await pool.query('select * from tester_invitations where id=$1', [first.invitation.id])).rows[0];
+    assert.equal(stored.provider_tester_id, 'durable-tester'); assert.equal(stored.provider_metadata[0].httpStatus, 201);
+    assert.equal(JSON.stringify(stored.provider_metadata).includes('never-store'), false); assert.equal(f.calls.email.length, 0);
+    // New service instance simulates a restart; all recovery information is durable.
+    const restarted = createTesterInvitationService({ dbPool: pool, partnerAccessService: access, providers: f.providers,
+      mailAdapter: f.mailAdapter, secret: 'local-test-only', env: f.env, now: () => clock });
+    clock += 60001;
+    await Promise.all([restarted.reconcilePending(), restarted.reconcilePending(), f.service.reconcilePending()]);
+    await restarted.reconcilePending();
+    assert.equal(enrolls, 1); assert.equal(checks, 1); assert.equal(f.calls.email.length, 1);
+    const row = (await restarted.list()).invitations.find(x => x.id === first.invitation.id);
+    assert.equal(row.platformStatus, 'confirmed'); assert.equal(row.providerState, 'INVITED'); assert.equal(row.emailStatus, 'sent');
+    assert.equal(row.confirmationPending, false); assert.equal(row.nextConfirmationCheckAt, null);
+    const people = (await pool.query('select * from partner_people where email=$1', [f.email])).rows;
+    assert.equal(people.length, 1); assert.deepEqual(people[0], before);
+  });
+  await t.test("confirmation timeout stays pending and manual retry only reconciles; checks have a durable ceiling", async () => {
+    const f = fixture(); let enrolls = 0, checks = 0, ready = false;
+    f.providers.ios.enroll = async () => { enrolls++; return { testerId: 'same-pending-tester', state: 'NOT_INVITED' }; };
+    f.providers.ios.reconcile = async (_email, id) => { checks++; assert.equal(id, 'same-pending-tester');
+      if (!ready) throw new PartnerAccessError(503, 'apple_invitation_pending');
+      return { testerId: id, state: 'INVITED' };
+    };
+    const first = await f.invite();
+    for (let n=0; n<22; n++) { clock += 60001; await f.service.reconcilePending(); }
+    assert.equal(checks, 20); assert.equal(enrolls, 1); assert.equal(f.calls.email.length, 0);
+    let row = (await f.service.list()).invitations.find(x => x.id === first.invitation.id);
+    assert.equal(row.platformStatus, 'pending'); assert.equal(row.nextConfirmationCheckAt, null);
+    ready = true; advance(); const result = await f.action(first.invitation.id, 'retry');
+    assert.equal(result.ok, true); assert.equal(enrolls, 1); assert.equal(f.calls.email.length, 1);
+    advance(); await f.action(first.invitation.id, 'retry'); assert.equal(f.calls.email.length, 1);
+  });
+  await t.test("ambiguous Apple write persists a pending reference before an exception; no new enrollment on retry", async () => {
+    const f = fixture(); let enrolls = 0;
+    f.providers.ios.enroll = async (_email, { checkpoint }) => {
+      enrolls++; await checkpoint({ testerId: 'ambiguous-tester', pending: true });
+      const error = new PartnerAccessError(503, 'apple_unavailable'); error.confirmationUncertain = true;
+      error.providerReference = { testerId: 'ambiguous-tester', metadata: [{ endpoint: 'tester_invitation', method: 'POST', category: 'transport', httpStatus: null }] };
+      throw error;
+    };
+    f.providers.ios.reconcile = async (_email, id) => ({ testerId: id, state: 'INVITED' });
+    const first = await f.invite(); assert.equal(first.invitation.platformStatus, 'pending'); assert.equal(f.calls.email.length, 0);
+    advance(); const retried = await f.action(first.invitation.id, 'retry'); assert.equal(retried.ok, true);
+    assert.equal(enrolls, 1); assert.equal(f.calls.email.length, 1);
+  });
+  await t.test("explicit resend while pending is status-only and does not send a second welcome", async () => {
+    const f = fixture(); let resend = 0, checks = 0;
+    f.providers.ios.enroll = async () => ({ testerId: 'pending-tester', state: 'NOT_INVITED' });
+    f.providers.ios.resend = async () => { resend++; assert.fail('Apple resend is forbidden while pending'); };
+    f.providers.ios.reconcile = async () => { checks++; return { testerId: 'pending-tester', state: 'INVITED' }; };
+    const first = await f.invite(); advance(); await f.action(first.invitation.id, 'apple-resend');
+    assert.equal(resend, 0); assert.equal(checks, 1); assert.equal(f.calls.email.length, 1);
+  });
+  await t.test("hard Apple failure is not auto-retried and stores only sanitized diagnostics", async () => {
+    const f = fixture();
+    f.providers.ios.enroll = async () => {
+      const error = new PartnerAccessError(503, 'apple_authorization_failed');
+      error.providerReference = { testerId: 'existing-tester', metadata: [{ endpoint: 'tester_invitation', method: 'POST', category: 'response', httpStatus: 403, at: new Date(clock).toISOString(), body: 'private' }] };
+      throw error;
+    };
+    f.providers.ios.reconcile = async () => assert.fail('Hard failures are not automatically retried');
+    const result = await f.invite(); assert.equal(result.invitation.platformStatus, 'failed');
+    clock += 60001; await f.service.reconcilePending(); assert.equal(f.calls.email.length, 0);
+    const row = (await pool.query('select * from tester_invitations where id=$1', [result.invitation.id])).rows[0];
+    assert.equal(row.provider_metadata[0].httpStatus, 403); assert.equal(row.confirmation_next_check_at, null);
+    assert.equal(JSON.stringify(row.provider_metadata).includes('private'), false);
+  });
+  await t.test("background confirmation cannot send after access is revoked or expired", async () => {
+    for (const revoked of [true, false]) {
+      const f = fixture(); f.providers.ios.enroll = async () => ({ testerId: 'pending-tester', state: 'NOT_INVITED' });
+      f.providers.ios.reconcile = async () => assert.fail('Inactive access must stop before Apple lookup');
+      const result = await f.invite();
+      await pool.query(revoked ? "update partner_people set revoked_at=now() where email=$1" : "update partner_people set expires_at=starts_at + interval '1 second' where email=$1", [f.email]);
+      clock += 60001; await f.service.reconcilePending(); assert.equal(f.calls.email.length, 0);
+      assert.equal((await f.service.list()).invitations.find(x => x.id === result.invitation.id).nextConfirmationCheckAt, null);
+    }
+  });
+  await t.test("untrusted callers cannot invoke the private automatic reconciliation action", async () => {
+    const f = fixture(); const result = await f.invite();
+    await assert.rejects(f.service.run({ id: result.invitation.id }, f.actor, 'reconcile', qaContext), e => e.code === 'invalid_action');
   });
   await t.test("selected organization is used for new identities and survives retries without duplicates", async () => {
     const f = fixture();
