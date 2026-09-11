@@ -302,6 +302,80 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
     const row = (await pool.query("select * from partner_access_audit where event='tester_invitation' and metadata->>'invitationId'=$1", [result.invitation.id])).rows[0];
     assert.equal(row.actor, f.actor); assert.equal(row.metadata.platform, "ios"); assert.equal(row.metadata.result, "accepted"); assert.ok(row.created_at); assert.equal(JSON.stringify(row.metadata).includes(f.email), false);
   });
+  await t.test("admin Delete Person removes all platforms and delivery/OTP history, preserves organization and other people, and permits a fresh invite", async () => {
+    const f = fixture(), other = fixture();
+    const first = await f.invite(); await f.invite("android"); await other.invite();
+    const person = (await pool.query("select * from partner_people where email=$1", [f.email])).rows[0];
+    await pool.query("insert into partner_verifications(id,person_id,code_digest,platform,expires_at) values($1,$2,'private-digest-fixture','ios',$3)", [crypto.randomUUID(), person.id, new Date(clock + 600000)]);
+    // Even a platform no longer entitled can still have a stored invitation that must be confirmed.
+    await access.changePerson(person.id, "update", { platforms: ["ios"] }, f.actor);
+    const { target } = await access.describeDeletion(person.id);
+    assert.deepEqual(target.platforms, ["android", "ios"]);
+    const confirmation = { ...target, confirm: true };
+    for (const patch of [{ confirm: false }, { scope: "ios" }, { personId: crypto.randomUUID() }, { email: other.email }, { platforms: ["ios"] }, { organizationId: crypto.randomUUID() }]) {
+      await assert.rejects(access.deletePerson(person.id, { ...confirmation, ...patch }, f.actor), e => ["delete_confirmation_required", "delete_target_changed"].includes(e.code));
+    }
+    await assert.rejects(access.deletePerson(person.id, confirmation, null), e => e.status === 401);
+    const callsBefore = JSON.stringify(f.calls);
+    const deleted = await access.deletePerson(person.id, confirmation, f.actor);
+    assert.deepEqual(deleted, { ok: true, deleted: true, personId: person.id, externalTestersChanged: false });
+    assert.equal(JSON.stringify(f.calls), callsBefore, "No provider or email action during deletion");
+    for (const table of ["tester_invitations", "partner_verifications"]) assert.equal((await pool.query(`select * from ${table} where person_id=$1`, [person.id])).rows.length, 0);
+    assert.equal((await pool.query("select * from partner_people where id=$1", [person.id])).rows.length, 0);
+    assert.equal((await pool.query("select * from partner_organizations where id=$1", [org.id])).rows.length, 1);
+    assert.equal((await pool.query("select * from partner_people where email=$1", [other.email])).rows.length, 1);
+    assert.equal((await access.status({ auth_method: "partner_preview", sub: `partner:${person.id}`, partner_invite_id: person.id, platform: "ios" })).access, "unavailable");
+    const audit = (await pool.query("select * from partner_access_audit where metadata->>'personId'=$1", [person.id])).rows;
+    assert.equal(audit.length, 1); assert.equal(audit[0].event, "person_deleted"); assert.equal(audit[0].person_id, null);
+    assert.equal(audit[0].actor, f.actor); assert.ok(audit[0].created_at); assert.deepEqual(audit[0].metadata.platforms, target.platforms);
+    assert.equal(audit[0].metadata.result, "deleted");
+    for (const value of [f.email, "private-digest-fixture", "tester-fixture", "email_payload", "email_key"]) assert.equal(JSON.stringify(audit).includes(value), false);
+    assert.equal((await pool.query("select * from partner_access_audit where person_id=$1", [person.id])).rows.length, 0);
+    await assert.rejects(access.deletePerson(person.id, confirmation, f.actor), e => e.code === "person_not_found");
+    await assert.rejects(f.action(first.invitation.id, "retry"), e => e.code === "invitation_not_found");
+    const fresh = await f.invite();
+    assert.notEqual(fresh.invitation.id, first.invitation.id);
+    const replacement = (await pool.query("select * from partner_people where email=$1", [f.email])).rows;
+    assert.equal(replacement.length, 1); assert.notEqual(replacement[0].id, person.id);
+    assert.equal(replacement[0].organization_id, org.id); assert.equal(f.calls.email.length, 3);
+    assert.equal((await pool.query("select * from tester_invitations where person_id=$1", [replacement[0].id])).rows.length, 1);
+  });
+  await t.test("deletion refuses an in-flight invitation and succeeds once the lock is released", async () => {
+    const f = fixture(); await f.invite();
+    const person = (await pool.query("select id from partner_people where email=$1", [f.email])).rows[0];
+    const { target } = await access.describeDeletion(person.id);
+    const client = await pool.connect();
+    try {
+      await client.query("select pg_advisory_lock(hashtextextended($1,0))", [`tester-invite:${f.email}`]);
+      await assert.rejects(access.deletePerson(person.id, { ...target, confirm: true }, f.actor), e => e.code === "invitation_in_progress");
+    } finally { await client.query("select pg_advisory_unlock(hashtextextended($1,0))", [`tester-invite:${f.email}`]); client.release(); }
+    assert.equal((await access.deletePerson(person.id, { ...target, confirm: true }, f.actor)).deleted, true);
+  });
+  await t.test("a retry whose initial lookup raced with deletion cannot recreate the person or send anything", async () => {
+    const f = fixture(); const first = await f.invite();
+    const person = (await pool.query("select id from partner_people where email=$1", [f.email])).rows[0];
+    const { target } = await access.describeDeletion(person.id);
+    let intercepted = false;
+    const racingPool = { connect: () => pool.connect(), async query(sql, args) {
+      const result = await pool.query(sql, args);
+      if (!intercepted && sql.includes("where i.id=$1")) {
+        intercepted = true;
+        await access.deletePerson(person.id, { ...target, confirm: true }, f.actor);
+      }
+      return result;
+    } };
+    const service = createTesterInvitationService({ dbPool: racingPool, partnerAccessService: access, providers: f.providers, mailAdapter: f.mailAdapter, secret: "local-test-only", env: f.env, now: () => clock });
+    const before = JSON.stringify(f.calls);
+    await assert.rejects(service.run({ id: first.invitation.id }, f.actor, "retry"), e => e.code === "invitation_not_found");
+    assert.equal(intercepted, true); assert.equal(JSON.stringify(f.calls), before);
+    assert.equal((await pool.query("select * from partner_people where email=$1", [f.email])).rows.length, 0);
+  });
+  await t.test("deletion has a durable admin rate limit", async () => {
+    const f = fixture(); const id = crypto.randomUUID();
+    const input = { confirm: true, scope: "entire_partner_person", personId: id, email: f.email };
+    for (let i = 0; i < 20; i++) await assert.rejects(access.deletePerson(id, input, f.actor), e => e.code === "person_not_found");
+    await assert.rejects(access.deletePerson(id, input, f.actor), e => e.code === "rate_limited");
+  });
   await t.test("account deletion cascades workflow rows and audit does not retain the email", async () => {
     const f = fixture(); const result = await f.invite(); const person = (await pool.query("select id from partner_people where email=$1", [f.email])).rows[0];
     await access.deleteAccount({ auth_method: "partner_preview", sub: `partner:${person.id}`, partner_invite_id: person.id });

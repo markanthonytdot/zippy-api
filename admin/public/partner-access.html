@@ -89,6 +89,14 @@
     </form>
   </dialog>
 
+  <dialog id="delete-dialog" class="partner-dialog" aria-labelledby="delete-title" aria-describedby="delete-copy">
+    <form id="delete-form">
+      <div class="panel-heading"><h2 id="delete-title">Delete person?</h2><button type="button" data-close class="text-button" autofocus>Cancel</button></div>
+      <p id="delete-copy"></p><p id="delete-error" class="partner-error" role="alert"></p>
+      <button type="submit" class="primary-button partner-destructive">Delete person</button>
+    </form>
+  </dialog>
+
   <dialog id="action-dialog" class="partner-dialog" aria-labelledby="action-title">
     <form id="action-form">
       <div class="panel-heading"><h2 id="action-title">Revoke access</h2><button type="button" data-close class="text-button">Cancel</button></div>

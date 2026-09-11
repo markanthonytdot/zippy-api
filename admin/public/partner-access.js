@@ -39,7 +39,8 @@ async function partnerApi(path = "", body) {
       429: "Please wait a moment before trying again.",
       503: "Partner Access is not configured yet. Check the local setup instructions.",
     };
-    throw new Error(messages[response.status] || "Partner Access could not be updated. Please try again.");
+    const deletionErrors = { delete_confirmation_required: "Confirm the complete person deletion.", delete_target_changed: "This person's records changed. Cancel, refresh and confirm the updated person.", invitation_in_progress: "An invitation is in progress. Wait for it to finish, then try again." };
+    throw new Error(deletionErrors[payload.error] || messages[response.status] || "Partner Access could not be updated. Please try again.");
   }
   return payload;
 }
@@ -69,7 +70,7 @@ function renderPartners() {
       <td>${escapePartnerText(features.join(" · ") || "No features")}<small>${escapePartnerText(platforms.join(" · ") || "No platforms")}</small></td>
       <td>${person.activatedAt ? `Activated ${escapePartnerText(partnerDate(person.activatedAt))}` : "Not activated"}<small>Last check ${escapePartnerText(partnerDate(person.lastCheckedAt))}</small></td>
       <td class="tester-person-status" data-email="${escapePartnerText(person.email)}" data-access="${escapePartnerText(access)}">Loading invitation status…</td>
-      <td><div class="partner-row-actions"><button type="button" class="text-button" data-action="extend">Extend</button><button type="button" class="text-button" data-action="edit">Edit access</button><button type="button" class="text-button" data-action="${person.revokedAt || person.status === "disabled" ? "restore" : "revoke"}">${person.revokedAt || person.status === "disabled" ? "Restore" : "Revoke"}</button></div></td>
+      <td><div class="partner-row-actions"><button type="button" class="text-button" data-action="extend">Extend</button><button type="button" class="text-button" data-action="edit">Edit access</button><button type="button" class="text-button" data-action="${person.revokedAt || person.status === "disabled" ? "restore" : "revoke"}">${person.revokedAt || person.status === "disabled" ? "Restore" : "Revoke"}</button><button type="button" class="text-button partner-destructive" data-action="delete">Delete</button></div></td>
     </tr>`;
   }).join("") : '<tr><td colspan="7" class="partner-empty">No people in this organization. Use Invite to Zippi above to invite someone.</td></tr>';
   document.dispatchEvent(new Event("partner-people-rendered"));
@@ -156,13 +157,26 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
   byId("person-form").elements.duration.addEventListener("change", durationChanged);
-  byId("people-list").addEventListener("click", (event) => {
+  byId("people-list").addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-action]");
     if (!button) return;
     const person = partnerState.people.find((p) => p.id === button.closest("tr").dataset.personId);
     if (!person) return;
     const action = button.dataset.action;
     if (["edit", "extend"].includes(action)) return openPerson(action, person);
+    if (action === "delete") {
+      button.disabled = true;
+      try {
+        const { target } = await partnerApi(`/people/${encodeURIComponent(person.id)}/deletion`);
+        partnerState.deleteTarget = target;
+        byId("delete-title").textContent = `Delete ${target.email}?`;
+        byId("delete-copy").textContent = `Permanently remove this entire Zippi Partner Preview person across ALL listed platforms: ${target.platforms.map(p => p === "ios" ? "iOS" : "Android").join(" and ")}. This removes access, verification codes, invitations, welcome-email state and dashboard history. The organization and other people stay unchanged. A minimal security audit is retained. This does not remove or notify Apple TestFlight or Google testers.`;
+        byId("delete-error").textContent = "";
+        byId("delete-dialog").showModal();
+      } catch (error) { partnerMessage(error.message); }
+      finally { button.disabled = false; }
+      return;
+    }
     partnerState.selected = person; partnerState.action = action;
     byId("action-title").textContent = action === "revoke" ? "Revoke access" : "Restore access";
     byId("confirm-action").textContent = byId("action-title").textContent;
@@ -194,6 +208,18 @@ document.addEventListener("DOMContentLoaded", () => {
       await partnerApi("/organizations", { name: form.elements.name.value.trim(), allowedEmailDomains: form.elements.domains.value.split(",").map((v) => v.trim().toLowerCase()).filter(Boolean) });
       byId("organization-dialog").close(); partnerMessage("Organization added."); await loadPartners();
       document.dispatchEvent(new Event("partner-organizations-updated"));
+    });
+  });
+  byId("delete-form").addEventListener("submit", event => {
+    event.preventDefault();
+    withPartnerSubmission(event.currentTarget, "delete-error", async () => {
+      const target = partnerState.deleteTarget;
+      await partnerApi(`/people/${encodeURIComponent(target.personId)}/delete`, { ...target, confirm: true });
+      byId("delete-dialog").close();
+      partnerState.deleteTarget = null;
+      partnerMessage("Person deleted from Zippi. Apple TestFlight and Google testers were not changed or notified.");
+      await loadPartners();
+      document.dispatchEvent(new Event("partner-person-deleted"));
     });
   });
   byId("action-form").addEventListener("submit", (event) => {

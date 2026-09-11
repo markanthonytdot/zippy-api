@@ -102,6 +102,7 @@
   document.getElementById("tester-refresh").addEventListener("click", () => load().catch(() => { message.textContent = "Couldn't refresh invitations."; }));
   document.getElementById("refresh").addEventListener("click", () => load().catch(() => { message.textContent = "Couldn't refresh invitations."; }));
   document.addEventListener("partner-people-rendered", render);
+  document.addEventListener("partner-person-deleted", () => load().catch(() => { message.textContent = "Refresh the invitation list."; }));
   document.addEventListener("partner-organizations-updated", () => load().catch(() => { message.textContent = "Refresh the list to load organizations."; }));
   load().catch(() => { message.textContent = "Tester invitations are unavailable. Existing Partner Access controls remain available below."; });
 })();

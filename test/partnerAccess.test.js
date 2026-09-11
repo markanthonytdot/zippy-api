@@ -265,3 +265,19 @@ test("PostgreSQL Partner Access lifecycle and concurrent security contracts", { 
     assert.equal((await pool.query("select count(*) from partner_access_audit where event='account_deleted' and person_id is null")).rows[0].count, "1");
   });
 });
+
+
+test("admin delete route binds confirmation to the URL target and trusted actor; unexpected errors stay private", async () => {
+  const { createPartnerAdminRouter } = require("../lib/partnerAccessRoutes");
+  let received, body, status = 200;
+  const service = { async deletePerson(...args) { received = args; return { ok: true }; } };
+  const router = createPartnerAdminRouter({ service });
+  const handler = router.stack.find(layer => layer.route?.path === "/people/:id/delete").route.stack[0].handle;
+  const req = { params: { id: "url-target" }, body: { personId: "different-target", actor: "untrusted" }, zippiAdmin: { actor: "signed-admin" } };
+  const res = { setHeader() {}, status(value) { status = value; return this; }, json(value) { body = value; } };
+  await handler(req, res);
+  assert.deepEqual(received, ["url-target", req.body, "signed-admin"]);
+  service.deletePerson = async () => { throw new Error("secret-fixture"); };
+  await handler(req, res); assert.equal(status, 503);
+  assert.deepEqual(body, { ok: false, error: "partner_access_unavailable" });
+});

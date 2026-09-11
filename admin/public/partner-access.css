@@ -31,3 +31,6 @@
 .partner-empty { padding: 50px 12px !important; text-align: center; color: var(--muted); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (max-width: 850px) { .partner-summary { grid-template-columns: 1fr; } .partner-list-panel { padding: 16px; } }
+
+.text-button.partner-destructive { color: #ffc4ba; }
+.primary-button.partner-destructive { background: #92372f; color: #fff; border: 1px solid #ffc4ba; }
