@@ -34,7 +34,10 @@ const {
   normalizeCurrencySettingsConfig,
   resolveCustomerCurrency,
 } = require("./lib/pricingConfig");
+const { createHotelReadReliability } = require("./lib/hotelReadReliability");
+const { HotelRateLimitError, sendHotelRateLimit, zippiLimit } = require("./lib/hotelRateLimit");
 const app = express();
+const hotelReads = createHotelReadReliability({ env: process.env, now: () => Date.now(), fetch: (url, options) => fetch(url, options), identity: (req) => getRateLimitKey(req) });
 
 const translateClient = (() => {
   const raw = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
@@ -117,7 +120,7 @@ function makeFixedWindowLimiter({ windowMs, max }) {
         return { ok: true, remaining: max - 1 };
       }
       if (cur.count >= max) {
-        return { ok: false, remaining: 0 };
+        return { ok: false, remaining: 0, limit: max, resetAtMs: cur.start + windowMs };
       }
       cur.count += 1;
       return { ok: true, remaining: max - cur.count };
@@ -149,7 +152,7 @@ function makePrunableFixedWindowLimiter({ windowMs, max, pruneIntervalMs = 60 * 
         return { ok: true, remaining: max - 1 };
       }
       if (cur.count >= max) {
-        return { ok: false, remaining: 0 };
+        return { ok: false, remaining: 0, limit: max, resetAtMs: cur.start + windowMs };
       }
       cur.count += 1;
       return { ok: true, remaining: max - cur.count };
@@ -740,12 +743,19 @@ async function hydrateUserIdFromAuth(req) {
   }
 }
 
+function hotelAwareApiLimit(req, res, lim, scope) {
+  if (/^\/v1\/hotels(?:\/|$)/.test(req.originalUrl || req.path || "")) {
+    return sendHotelRateLimit(res, zippiLimit(scope, "MINUTE", lim.limit, lim.resetAtMs, Date.now()));
+  }
+  return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
+}
+
 function rateLimitMiddleware(limiter, label) {
   return (req, res, next) => {
     const key = getRateLimitKey(req);
     const lim = limiter.allow(`${label}:${key}`);
     if (!lim.ok) {
-      return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
+      return hotelAwareApiLimit(req, res, lim, label === "hotels" ? "API_ROUTE" : "API");
     }
     return next();
   };
@@ -775,7 +785,7 @@ app.use((req, res, next) => {
   const key = getRateLimitKey(req);
   const lim = globalLimiter.allow(`global:${key}`);
   if (!lim.ok) {
-    return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
+    return hotelAwareApiLimit(req, res, lim, "API_GLOBAL");
   }
   return next();
 });
@@ -1119,11 +1129,12 @@ app.use("/v1/hotels", async (req, res, next) => {
   if (!allowAnonymous && !userId) return;
 
   const limiterId = getRateLimitKey(req, userId);
+  if (allowAnonymous) return hotelReads.api(req, res, next);
   const lim = hotelsMinuteLimiter.allow(`hotels:${limiterId}`);
-  if (!lim.ok) return res.status(429).json({ ok: false, error: "Hotel rate limit exceeded. Try again shortly." });
+  if (!lim.ok) return sendHotelRateLimit(res, zippiLimit("HOTEL_LEGACY", "MINUTE", lim.limit, lim.resetAtMs, Date.now()));
 
   const q = enforceHotelsHourlyDaily(limiterId);
-  if (!q.ok) return res.status(q.status).json({ ok: false, error: q.error });
+  if (!q.ok) return sendHotelRateLimit(res, zippiLimit("HOTEL_LEGACY", q.window, q.limit, q.resetAtMs, Date.now()));
 
   console.log(
     "[Hotels LIMIT]",
@@ -1668,7 +1679,7 @@ async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, ad
   let responseText = "";
   let responseJson = {};
   try {
-    response = await fetchWithTimeout(
+    response = await hotelReads.fetch(
       "https://api.duffel.com/stays/search",
       {
         method: "POST",
@@ -1680,11 +1691,12 @@ async function searchDuffelStays({ city, lat, lng, checkIn, checkOut, nights, ad
         },
         body: JSON.stringify(payload),
       },
-      15000
+      15000, "DISCOVERY", { city, locale, max, nights }
     );
     responseText = await response.text().catch(() => "");
     responseJson = safeJsonParse(responseText);
   } catch (e) {
+    if (e instanceof HotelRateLimitError || e?.code === "HOTEL_CALLER_CANCELLED") throw e;
     const errMsg = e?.message ? String(e.message) : String(e || "error");
     console.log("[Hotels DUFFEL]", "requestId=" + requestId, "step=search", "error=" + truncateText(errMsg, 300));
     return {
@@ -1747,7 +1759,7 @@ async function fetchDuffelStayAllRates({ searchResultId, requestId }) {
   let responseText = "";
   let responseJson = {};
   try {
-    response = await fetchWithTimeout(
+    response = await hotelReads.fetch(
       ratesUrl,
       {
         method: "POST",
@@ -1758,11 +1770,12 @@ async function fetchDuffelStayAllRates({ searchResultId, requestId }) {
           "Duffel-Version": DUFFEL_API_VERSION,
         },
       },
-      15000
+      15000, "PRICING"
     );
     responseText = await response.text().catch(() => "");
     responseJson = safeJsonParse(responseText);
   } catch (e) {
+    if (e instanceof HotelRateLimitError || e?.code === "HOTEL_CALLER_CANCELLED") throw e;
     const errMsg = e?.message ? String(e.message) : String(e || "error");
     console.log("[Hotels DUFFEL]", "requestId=" + requestId, "step=fetch_all_rates", "error=" + truncateText(errMsg, 300));
     return {
@@ -1798,7 +1811,7 @@ async function fetchDuffelStayAllRates({ searchResultId, requestId }) {
   return { ok: true, result };
 }
 
-app.post("/v1/hotels/search", async (req, res) => {
+app.post("/v1/hotels/search", hotelReads.route(async (req, res) => {
   const userId = String(req.userId || "unknown");
   const requestStartMs = Date.now();
   const requestId = String(req.requestId || randomUUID());
@@ -1981,13 +1994,13 @@ app.post("/v1/hotels/search", async (req, res) => {
   }
 
   return res.json(payload);
-});
+}));
 
 // ---------------------------------------------
 // Hotels Prices (Duffel continuity)
 // POST /v1/hotels/prices
 // ---------------------------------------------
-app.post("/v1/hotels/prices", async (req, res) => {
+app.post("/v1/hotels/prices", hotelReads.route(async (req, res) => {
   const userId = String(req.userId || "unknown");
   const requestStartMs = Date.now();
   const requestId = String(req.requestId || randomUUID());
@@ -2170,7 +2183,7 @@ app.post("/v1/hotels/prices", async (req, res) => {
     elapsed_ms: elapsedMs,
     items,
   });
-});
+}));
 
 // ---------------------------------------------
 // Hotels Photo (lazy)
@@ -4719,11 +4732,13 @@ function enforceHotelsHourlyDaily(limiterId) {
   const hourCount = (hotelsHourlyCounters.get(hourKey) || 0) + 1;
   const dayCount = (hotelsDailyCounters.get(dayKey) || 0) + 1;
 
-  if (hourlyLimit >= 0 && hourCount > hourlyLimit) {
-    return { ok: false, status: 429, error: "Hotel hourly limit reached. Try again later." };
-  }
-  if (dailyLimit >= 0 && dayCount > dailyLimit) {
-    return { ok: false, status: 429, error: "Hotel daily limit reached. Try again tomorrow." };
+  const hourlyBlocked = hourlyLimit >= 0 && hourCount > hourlyLimit;
+  const dailyBlocked = dailyLimit >= 0 && dayCount > dailyLimit;
+  if (hourlyBlocked || dailyBlocked) {
+    const duration = dailyBlocked ? 86400000 : 3600000;
+    return { ok: false, status: 429, window: dailyBlocked ? "DAY" : "HOUR",
+      limit: dailyBlocked ? dailyLimit : hourlyLimit,
+      resetAtMs: (Math.floor(Date.now() / duration) + 1) * duration };
   }
 
   hotelsHourlyCounters.set(hourKey, hourCount);
