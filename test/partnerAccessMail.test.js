@@ -8,7 +8,7 @@ const env = {
 };
 const message = { email: "approved@example.test", code: "482931", expiresInSeconds: 600 };
 
-test("Resend sends a plain-text OTP through authenticated HTTPS with a bounded request", async () => {
+test("Resend sends a branded HTML OTP with the unchanged plain-text fallback through authenticated HTTPS with a bounded request", async () => {
   let sent;
   const mail = createPartnerMailAdapter(env, { fetchImpl: async (url, options) => {
     sent = { url, ...options }; return { ok: true, json: async () => ({ id: "mock-message-id" }) };
@@ -22,7 +22,11 @@ test("Resend sends a plain-text OTP through authenticated HTTPS with a bounded r
   assert.equal(sent.redirect, "error");
   assert.ok(sent.signal instanceof AbortSignal);
   assert.equal(sent.signal.aborted, false);
-  assert.deepEqual(JSON.parse(sent.body), {
+  const delivered = JSON.parse(sent.body);
+  assert.equal(delivered.html, require('../lib/partnerVerificationEmail').verificationEmail(message).html);
+  assert.equal(delivered.attachments[0].content_id, 'zippi-bunny');
+  const { html, attachments, ...plainEnvelope } = delivered;
+  assert.deepEqual(plainEnvelope, {
     from: env.ZIPPI_PARTNER_EMAIL_FROM, to: [message.email], subject: "Your Zippi Partner Preview code",
     text: "Your Zippi verification code is:\n\n482931\n\nThis code expires in 10 minutes.\n\nIf you didn’t request this code, you can ignore this email.",
   });
