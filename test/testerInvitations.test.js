@@ -89,6 +89,28 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
       set failPlatform(value) { failPlatform = value; }, set failMail(value) { failMail = value; }, set pause(value) { pause = value; } };
   }
   function advance() { clock += 300001; }
+  await t.test("Apple refusal or unconfirmed individual invitation sends no welcome; retry reuses records and sends welcome once", async () => {
+    for (const outcome of ["apple_no_testable_build", "NOT_INVITED"]) {
+      const f = fixture();
+      f.providers.ios.enroll = async () => {
+        if (outcome === "NOT_INVITED") return { testerId: "same-tester", state: "NOT_INVITED" };
+        throw new PartnerAccessError(503, outcome);
+      };
+      const failed = await f.invite();
+      assert.equal(failed.ok, false);assert.equal(f.calls.email.length, 0);
+      assert.equal(failed.invitation.error, outcome === "NOT_INVITED" ? "apple_invitation_pending" : outcome);
+      const personBefore = (await pool.query("select * from partner_people where email=$1", [f.email])).rows[0];
+      f.providers.ios.enroll = async () => ({ testerId: "same-tester", state: "INVITED" });
+      advance(); const retried = await f.action(failed.invitation.id, "retry");
+      advance(); const repeated = await f.action(failed.invitation.id, "retry");
+      assert.equal(retried.ok, true);assert.equal(repeated.invitation.id, failed.invitation.id);assert.equal(f.calls.email.length, 1);
+      const people = (await pool.query("select * from partner_people where email=$1", [f.email])).rows;
+      assert.equal(people.length, 1);assert.equal(people[0].id, personBefore.id);
+      assert.equal(people[0].organization_id, personBefore.organization_id);
+      assert.equal(people[0].expires_at.toISOString(), personBefore.expires_at.toISOString());
+      assert.deepEqual(people[0].features, personBefore.features);
+    }
+  });
   await t.test("selected organization is used for new identities and survives retries without duplicates", async () => {
     const f = fixture();
     const selected = (await access.createOrganization({ name: "Test Organization", allowedEmailDomains: ["example.test"] }, f.actor)).organization;

@@ -8,6 +8,7 @@
     tester_invitations_disabled: "Tester invitations are awaiting setup.", tester_policy_not_configured: "Set the default tester organization in the staging environment.",
     tester_qa_restricted: "Only the designated iOS QA email is enabled. General invitations remain disabled.",
     invalid_organization: "Choose an active organization from the existing list.",
+    apple_invitation_pending: "Apple has not yet confirmed this individual invitation. No welcome email was sent; refresh or retry later.",
     apple_not_configured: "Apple API access and a tester key are required.", apple_no_testable_build: "The configured TestFlight group has no build available for external testing.",
     android_preview_build_unverified: "The intended Android preview build is not yet verified on Google Play.",
     apple_authorization_failed: "Apple rejected the API permissions. Check the server key and role.", apple_group_mismatch: "The configured group must be an external group for Zippi.",

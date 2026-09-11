@@ -1,5 +1,7 @@
 # Partner invitation rollout — September 10, 2026
 
+Eligibility interpretation updated: see [Apple invitation candidates](apple-invitation-candidates.md).
+
 ## Dashboard
 
 The top **Invite to Zippi** form is the only person-onboarding workflow: email,

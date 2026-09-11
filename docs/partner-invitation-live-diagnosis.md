@@ -1,5 +1,7 @@
 # Live invitation diagnosis — September 11, 2026
 
+Eligibility interpretation updated: see [Apple invitation candidates](apple-invitation-candidates.md).
+
 ## Observed before any retry
 
 Staging `/version` reported `0f9cfbba81a417e10693bcfae88664ac19097451`, a hotel

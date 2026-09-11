@@ -6,7 +6,7 @@ const { createAppleTesterProvider, createAndroidTesterProvider } = require("../l
 const { createResendMailAdapter } = require("../lib/partnerAccessResendMail");
 const { invitationInstructions } = require("../lib/testerInvitationEmail");
 
-function appleFixture({ groupName = "Zippi Partners", expectedGroupName = "Zippi Partners", existing = false, member = false, autoNotify = true, builds = true, internal = false, appId = "6757395108", failure = null, state = "INVITED", pagination = false, scopedMismatch = false, externalBuildState = "IN_BETA_TESTING", noInstallableBuilds = false } = {}) {
+function appleFixture({ processingState = "VALID", reviewState = "APPROVED", platform = "IOS", audience = "APP_STORE_ELIGIBLE", expired = false, expirationDate = "2099-01-01", missingReview = false, returnedBuildId = "build-fixture", invitationRemainsPending = false, groupName = "Zippi Partners", expectedGroupName = "Zippi Partners", existing = false, member = false, autoNotify = true, builds = true, internal = false, appId = "6757395108", failure = null, state = "INVITED", pagination = false, scopedMismatch = false, externalBuildState = "IN_BETA_TESTING", noInstallableBuilds = false } = {}) {
   const keys = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
   const calls = []; let reservations = 0;
   const env = { ZIPPI_TESTER_APPLE_GROUP_NAME: expectedGroupName, ZIPPI_TESTER_APPLE_APP_ID: "6757395108", ZIPPI_TESTER_APPLE_GROUP_ID: "group-fixture", ZIPPI_TESTER_APPLE_ISSUER_ID: "issuer-fixture",
@@ -24,12 +24,14 @@ function appleFixture({ groupName = "Zippi Partners", expectedGroupName = "Zippi
     else if (path === "betaGroups/group-fixture/app") data = { id: appId, attributes: { bundleId: "com.heyzippi.zippi" } };
     else if (path === "betaGroups/group-fixture/builds") {
       assert.equal(new URL(url).searchParams.has("include"), false, "Apple's group builds endpoint does not support includes");
-      data = builds ? [{ id: "build-fixture", attributes: { expired: false, expirationDate: "2099-01-01" } }] : [];
+      data = builds ? [{ id: "build-fixture", attributes: { expired, expirationDate } }] : [];
     } else if (path === "builds") {
       assert.equal(new URL(url).searchParams.get("filter[id]"), "build-fixture");
-      assert.equal(new URL(url).searchParams.get("include"), "buildBetaDetail");
-      data = builds ? [{ id: "build-fixture", attributes: { expired: false, expirationDate: "2099-01-01" }, relationships: { buildBetaDetail: { data: { id: "detail-fixture" } } } }] : [];
-      included = [{ type: "buildBetaDetails", id: "detail-fixture", attributes: { externalBuildState, autoNotifyEnabled: autoNotify } }];
+      assert.equal(new URL(url).searchParams.get("include"), "buildBetaDetail,betaAppReviewSubmission,preReleaseVersion");
+      data = builds ? [{ id: returnedBuildId, attributes: { expired, expirationDate, processingState, buildAudienceType: audience }, relationships: { buildBetaDetail: { data: { id: "detail-fixture" } }, betaAppReviewSubmission: { data: { id: "review-fixture" } }, preReleaseVersion: { data: { id: "version-fixture" } } } }] : [];
+      included = [{ type: "buildBetaDetails", id: "detail-fixture", attributes: { externalBuildState, autoNotifyEnabled: autoNotify } },
+        { type: "preReleaseVersions", id: "version-fixture", attributes: { platform } },
+        ...(missingReview ? [] : [{ type: "betaAppReviewSubmissions", id: "review-fixture", attributes: { betaReviewState: reviewState } }])];
     } else if (path === "betaTesters" && !body) {
       const params = new URL(url).searchParams;
       if (params.has("filter[id]")) {
@@ -47,7 +49,7 @@ function appleFixture({ groupName = "Zippi Partners", expectedGroupName = "Zippi
     else if (path === "betaTesters/tester-fixture") data = { ...tester(), attributes: { state: null } };
     else if (path === "betaTesterInvitations") {
       if (noInstallableBuilds) return { ok: false, status: 409, json: async () => ({ errors: [{ code: "STATE_ERROR.TESTER_INVITE.NO_INSTALLABLE_BUILDS", detail: "provider-sensitive-value" }] }) };
-      state = "INVITED"; data = { id: "invitation-fixture" };
+      if (!invitationRemainsPending) state = "INVITED"; data = { id: "invitation-fixture" };
     }
     else throw new Error(`Unexpected mocked route ${path}`);
     return { ok: true, status: 200, json: async () => ({ data, included, links }) };
@@ -67,7 +69,7 @@ test("Apple existing tester gets missing group once and duplicate enroll perform
 });
 test("Apple automatic invitation is not duplicated by a manual notification", async () => {
   const f = appleFixture({ state: "NOT_INVITED" });
-  assert.equal((await f.provider.enroll("qa@example.test", f)).state, "NOT_INVITED");
+  await assert.rejects(f.provider.enroll("qa@example.test", f), e => e.code === "apple_invitation_pending");
   assert.equal(f.reservations, 0);
 });
 test("Apple notifications disabled: explicit supported invitation reserved before sending", async () => {
@@ -82,7 +84,7 @@ test("Apple invitation rejects loss of installable builds with a safe actionable
   assert.equal(f.reservations, 1);
 });
 test("Apple unapproved or expired external build states cannot send invitations", async () => {
-  for (const externalBuildState of ["BETA_APPROVED", "READY_FOR_BETA_TESTING", "READY_FOR_BETA_SUBMISSION", "WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW", "BETA_REJECTED", "EXPIRED", "PROCESSING"]) {
+  for (const externalBuildState of ["READY_FOR_BETA_TESTING", "READY_FOR_BETA_SUBMISSION", "WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW", "BETA_REJECTED", "EXPIRED", "PROCESSING"]) {
     const f = appleFixture({ externalBuildState });
     await assert.rejects(f.provider.enroll("qa@example.test", f), error => error.code === "apple_no_testable_build");
     assert.equal(f.calls.some(c => c.method === "POST"), false);
@@ -139,4 +141,35 @@ test("Resend instructions reuse existing delivery adapter and stable idempotency
   assert.match(JSON.parse(calls[0].options.body).text, /same email address/);
   assert.equal(JSON.parse(calls[0].options.body).text.includes("mock-provider-key"), false);
   assert.match(invitationInstructions("android").text, /apps\/testing\/com.heyzippi.app/);
+});
+
+for (const externalBuildState of ["IN_BETA_TESTING", "BETA_APPROVED"]) {
+  test(`${externalBuildState}: approved iOS candidate succeeds only through individual Apple invitation`, async () => {
+    const f = appleFixture({ externalBuildState, state: "NOT_INVITED", autoNotify: false });
+    assert.equal((await f.provider.enroll("qa@example.test", f)).state, "INVITED");
+    assert.deepEqual(f.calls.filter(c => c.method === "POST").map(c => c.path), ["betaTesters", "betaTesterInvitations"]);
+    await f.provider.enroll("qa@example.test", f);
+    assert.equal(f.calls.filter(c => c.method === "POST").length, 2, "repeat reuses tester, membership and existing invitation");
+  });
+}
+test("BETA_APPROVED candidate still preserves Apple's NO_INSTALLABLE_BUILDS refusal", async () => {
+  const f = appleFixture({ externalBuildState: "BETA_APPROVED", state: "NOT_INVITED", autoNotify: false, noInstallableBuilds: true });
+  await assert.rejects(f.provider.enroll("qa@example.test", f), e => e.code === "apple_no_testable_build");
+  assert.deepEqual(f.calls.filter(c => c.method === "POST").map(c => c.path), ["betaTesters", "betaTesterInvitations"]);
+});
+test("an accepted HTTP response with NOT_INVITED status does not manufacture success", async () => {
+  const f = appleFixture({ externalBuildState: "BETA_APPROVED", state: "NOT_INVITED", autoNotify: false, invitationRemainsPending: true });
+  await assert.rejects(f.provider.enroll("qa@example.test", f), e => e.code === "apple_invitation_pending");
+});
+for (const [name, options] of [
+  ["explicit expiration", { expired: true }], ["past expiry date", { expirationDate: "2000-01-01" }],
+  ["invalid processing", { processingState: "INVALID" }], ["failed processing", { processingState: "FAILED" }],
+  ["still processing", { processingState: "PROCESSING" }], ["rejected review", { reviewState: "REJECTED" }],
+  ["pending review", { reviewState: "IN_REVIEW" }], ["missing review", { missingReview: true }],
+  ["wrong platform", { platform: "MAC_OS" }], ["internal-only build", { audience: "INTERNAL_ONLY" }],
+  ["unassociated returned build", { returnedBuildId: "not-in-group" }], ["no group build", { builds: false }],
+]) test(`BETA_APPROVED does not bypass ${name}`, async () => {
+  const f = appleFixture({ externalBuildState: "BETA_APPROVED", ...options });
+  await assert.rejects(f.provider.enroll("qa@example.test", f), e => e.code === "apple_no_testable_build");
+  assert.equal(f.calls.some(c => c.method === "POST"), false);
 });
