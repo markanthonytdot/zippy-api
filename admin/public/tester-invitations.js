@@ -6,6 +6,7 @@
   let config; let pending = false;
   const errors = {
     tester_invitations_disabled: "Tester invitations are awaiting setup.", tester_policy_not_configured: "Set the default tester organization in the staging environment.",
+    tester_qa_restricted: "Only the designated iOS QA email is enabled. General invitations remain disabled.",
     apple_not_configured: "Apple API access and a tester key are required.", apple_no_testable_build: "The configured TestFlight group has no build available for external testing.",
     android_preview_build_unverified: "The intended Android preview build is not yet verified on Google Play.",
     apple_authorization_failed: "Apple rejected the API permissions. Check the server key and role.", apple_group_mismatch: "The configured group must be an external group for Zippi.",
@@ -32,11 +33,15 @@
   }
   function readiness() {
     const platform = form.elements.platform.value;
-    const ready = config?.enabled && config.policyConfigured && config.emailConfigured && config.platforms[platform];
+    const qaMatch = config?.qaOnly && platform === config.qaOnly.platform
+      && form.elements.email.value.trim().toLowerCase() === config.qaOnly.email;
+    const ready = (config?.enabled || qaMatch) && config.policyConfigured && config.emailConfigured && config.platforms[platform];
     submit.disabled = pending || !ready;
     document.getElementById("tester-policy").textContent = config?.policyConfigured
       ? `New previews last ${config.durationDays} days with Flights, Hotels and Combined Trip on, Checkout off. Existing access settings are preserved.` : "Default preview policy needs setup.";
-    document.getElementById("tester-readiness").textContent = !config?.enabled ? errors.tester_invitations_disabled
+    document.getElementById("tester-readiness").textContent = config?.qaOnly
+      ? `QA only: ${config.qaOnly.email} on iOS. General invitations remain disabled.`
+      : !config?.enabled ? errors.tester_invitations_disabled
       : !config.platforms[platform] ? explain(platform === "ios" ? "apple_not_configured" : "android_preview_build_unverified")
       : !config.emailConfigured ? "Welcome email delivery needs setup." : platform === "android" ? "Testers must opt in through Google Play themselves." : "Apple will check group and build readiness before inviting anyone.";
   }
@@ -78,6 +83,7 @@
   }
   form.addEventListener("submit", event => { event.preventDefault(); if (!submit.disabled) operate("", { email: form.elements.email.value, platform: form.elements.platform.value }); });
   form.addEventListener("change", readiness);
+  form.addEventListener("input", readiness);
   document.getElementById("tester-refresh").addEventListener("click", () => load().catch(() => { message.textContent = "Couldn't refresh invitations."; }));
   load().catch(() => { message.textContent = "Tester invitations are unavailable. Existing Partner Access controls remain available below."; });
 })();

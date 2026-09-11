@@ -7,6 +7,41 @@ const { Pool } = require("pg");
 const { createPartnerAccessService, PartnerAccessError } = require("../lib/partnerAccess");
 const { createTesterInvitationService } = require("../lib/testerInvitations");
 const { createTesterInvitationRouter } = require("../lib/testerInvitationRoutes");
+const qaContext = { authenticatedAdmin: true };
+const qaEnv = { ZIPPI_TESTER_INVITES_ENABLED: "false", ZIPPI_TESTER_QA_ENABLED: "true",
+  RENDER_SERVICE_ID: "srv-dagq12ht0dsc73a7dm40", ZIPPI_TESTER_APPLE_APP_ID: "6757395108",
+  ZIPPI_TESTER_APPLE_GROUP_ID: "39a3f713-9168-4e9a-abc4-2d97f7cf7cdb" };
+
+test("QA gate fails closed without its flag, exact staging service, app, group or trusted admin context", async () => {
+  for (const patch of [{ ZIPPI_TESTER_QA_ENABLED: "false" }, { RENDER_SERVICE_ID: "production" },
+    { ZIPPI_TESTER_APPLE_APP_ID: "other-app" }, { ZIPPI_TESTER_APPLE_GROUP_ID: "a81451ab-a35e-4bf6-b11b-521a6e3df853" }]) {
+    const service = createTesterInvitationService({ dbPool: { query() { assert.fail("No database access expected"); } },
+      secret: "test-only", providers: {}, env: { ...qaEnv, ...patch } });
+    await assert.rejects(service.run({ email: "s.mark@mac.com", platform: "ios" }, "admin", "invite", qaContext),
+      error => error.code === "tester_invitations_disabled");
+    assert.equal((await service.list(qaContext)).config.qaOnly, null);
+  }
+  const service = createTesterInvitationService({ dbPool: {}, secret: "test-only", providers: {}, env: qaEnv });
+  for (const context of [undefined, {}, { authenticatedAdmin: false }]) {
+    await assert.rejects(service.run({ email: "s.mark@mac.com", platform: "ios", authenticatedAdmin: true }, "admin", "invite", context),
+      error => error.code === "tester_invitations_disabled");
+    assert.equal((await service.list(context)).config.qaOnly, null);
+  }
+});
+
+test("admin invitation routes pass trusted context separately from untrusted request fields", async () => {
+  const calls = [];
+  const router = createTesterInvitationRouter({ service: { run: async (...args) => { calls.push(args); return { ok: true }; } } });
+  for (const layer of router.stack.filter(layer => layer.route?.methods.post)) {
+    await layer.route.stack[0].handle({ body: { email: "s.mark@mac.com", platform: "ios", authenticatedAdmin: false },
+      params: { id: "invitation-fixture" }, zippiAdmin: { actor: "verified-admin" } }, { json() {} });
+  }
+  assert.equal(calls.length, 5);
+  for (const [input, actor, , context] of calls) {
+    assert.equal(actor, "verified-admin"); assert.deepEqual(context, qaContext);
+    assert.equal(Object.hasOwn(input, "authenticatedAdmin"), false);
+  }
+});
 
 test("invitation router rejects unauthenticated, foreign-origin and non-JSON requests", () => {
   const guard = createTesterInvitationRouter({ service: {} }).stack[0].handle;
@@ -54,6 +89,41 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
       set failPlatform(value) { failPlatform = value; }, set failMail(value) { failMail = value; }, set pause(value) { pause = value; } };
   }
   function advance() { clock += 300001; }
+  await t.test("QA-only invitations reuse one-day access and remain idempotent; all other identities and platforms are blocked", async () => {
+    const f = fixture();
+    const qaOrg = (await access.createOrganization({ name: "Isolated QA", allowedEmailDomains: ["mac.com"] }, f.actor)).organization;
+    const person = (await access.createPerson({ email: "s.mark@mac.com", organizationId: qaOrg.id,
+      expiresAt: new Date(clock + 86400000).toISOString(), platforms: ["ios"],
+      features: { flights: true, hotels: true, combinedTrip: true, checkout: false } }, f.actor)).person;
+    const service = createTesterInvitationService({ dbPool: pool, partnerAccessService: access, providers: f.providers,
+      mailAdapter: f.mailAdapter, secret: "test-only", env: { ...qaEnv, ZIPPI_TESTER_ORGANIZATION_ID: qaOrg.id }, now: () => clock });
+    for (const [email, platform] of [["someone@mac.com", "ios"], ["s.mark+qa@mac.com", "ios"], ["s.mark@me.com", "ios"], ["s.mark@mac.com", "android"]]) {
+      await assert.rejects(service.run({ email, platform }, f.actor, "invite", qaContext), error => error.code === "tester_qa_restricted");
+    }
+    assert.equal(f.calls.ios.length + f.calls.android.length + f.calls.email.length, 0);
+    const first = await service.run({ email: "s.mark@mac.com", platform: "ios" }, f.actor, "invite", qaContext);
+    assert.equal(first.ok, true); assert.equal(first.invitation.access, "active");
+    const again = await service.run({ email: "s.mark@mac.com", platform: "ios" }, f.actor, "invite", qaContext);
+    assert.equal(again.invitation.id, first.invitation.id); assert.equal(f.calls.ios.length, 1); assert.equal(f.calls.email.length, 1);
+    const retained = (await pool.query("select * from partner_people where email=$1", ["s.mark@mac.com"])).rows;
+    assert.equal(retained.length, 1); assert.equal(retained[0].id, person.id);
+    assert.equal(retained[0].expires_at.toISOString(), person.expiresAt); assert.equal(retained[0].features.checkout, false);
+    const unrelated = await f.invite();
+    const android = await f.invite("android");
+    for (const id of [unrelated.invitation.id, android.invitation.id]) {
+      for (const action of ["retry", "resend", "apple-resend", "refresh"]) {
+        await assert.rejects(service.run({ id }, f.actor, action, qaContext), error => error.code === "tester_qa_restricted");
+      }
+    }
+    const listed = await service.list(qaContext);
+    assert.equal(listed.config.enabled, false); assert.deepEqual(listed.config.qaOnly, { email: "s.mark@mac.com", platform: "ios" });
+    assert.equal(listed.config.platforms.android, false); assert.deepEqual(listed.invitations.map(x => x.id), [first.invitation.id]);
+    advance(); await service.run({ id: first.invitation.id }, f.actor, "apple-resend", qaContext);
+    assert.equal(f.calls.resend, 1);
+    await assert.rejects(service.run({ id: first.invitation.id }, f.actor, "resend", qaContext), error => error.code === "invitation_cooldown");
+    await access.changePerson(person.id, "revoke", {}, f.actor); advance();
+    await assert.rejects(service.run({ email: "s.mark@mac.com", platform: "ios" }, f.actor, "invite", qaContext), error => error.code === "preview_access_inactive");
+  });
   for (const platform of ["ios", "android"]) {
     await t.test(`new ${platform} tester: access, platform and welcome in order`, async () => {
       const f = fixture(); const result = await f.invite(platform);
