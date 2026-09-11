@@ -1,7 +1,7 @@
 "use strict";
 
 // The existing admin cookie authenticates every read/write. Nothing is stored in browser storage.
-const partnerState = { organizations: [], people: [], mode: "add", selected: null, action: null };
+const partnerState = { organizations: [], people: [], mode: "edit", selected: null, action: null };
 const byId = (id) => document.getElementById(id);
 const featureLabels = { flights: "Flights", hotels: "Hotels", combinedTrip: "Combined Trip", checkout: "Checkout" };
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -54,7 +54,7 @@ function renderPartners() {
   byId("pending-count").textContent = partnerState.people.filter((p) => !p.activatedAt && ["active", "scheduled"].includes(p.access)).length;
   byId("organization-count").textContent = partnerState.organizations.length;
   const selected = byId("organization-filter").value;
-  const people = partnerState.people.filter((person) => !selected || person.organizationId === selected);
+  const people = partnerState.people.filter((person) => !selected || (selected === "unassigned" ? !person.organizationId : person.organizationId === selected));
   byId("people-list").innerHTML = people.length ? people.map((person) => {
     const access = person.access || "unavailable";
     const status = access === "active" && !person.activatedAt ? "pending" : access;
@@ -68,9 +68,11 @@ function renderPartners() {
       <td>${escapePartnerText(partnerDate(person.expiresAt))}</td>
       <td>${escapePartnerText(features.join(" · ") || "No features")}<small>${escapePartnerText(platforms.join(" · ") || "No platforms")}</small></td>
       <td>${person.activatedAt ? `Activated ${escapePartnerText(partnerDate(person.activatedAt))}` : "Not activated"}<small>Last check ${escapePartnerText(partnerDate(person.lastCheckedAt))}</small></td>
+      <td class="tester-person-status" data-email="${escapePartnerText(person.email)}" data-access="${escapePartnerText(access)}">Loading invitation status…</td>
       <td><div class="partner-row-actions"><button type="button" class="text-button" data-action="extend">Extend</button><button type="button" class="text-button" data-action="edit">Edit access</button><button type="button" class="text-button" data-action="${person.revokedAt || person.status === "disabled" ? "restore" : "revoke"}">${person.revokedAt || person.status === "disabled" ? "Restore" : "Revoke"}</button></div></td>
     </tr>`;
-  }).join("") : '<tr><td colspan="6" class="partner-empty">No invitations yet. Add an organization, then approve a person’s work email.</td></tr>';
+  }).join("") : '<tr><td colspan="7" class="partner-empty">No people in this organization. Use Invite to Zippi above to invite someone.</td></tr>';
+  document.dispatchEvent(new Event("partner-people-rendered"));
 }
 
 async function loadPartners() {
@@ -82,7 +84,8 @@ async function loadPartners() {
     const filter = byId("organization-filter");
     const previous = filter.value;
     filter.innerHTML = '<option value="">All organizations</option>' + partnerState.organizations.map((org) => `<option value="${escapePartnerText(org.id)}">${escapePartnerText(org.name)}</option>`).join("");
-    filter.value = partnerState.organizations.some((org) => org.id === previous) ? previous : "";
+    if (partnerState.people.some(person => !person.organizationId)) filter.add(new Option("No organization", "unassigned"));
+    filter.value = [...filter.options].some(option => option.value === previous) ? previous : "";
     renderPartners();
     return true;
   } catch (error) {
@@ -106,21 +109,13 @@ function openPerson(mode, person = null) {
   const form = byId("person-form");
   form.reset();
   byId("person-error").textContent = "";
-  const adding = mode === "add";
   const extending = mode === "extend";
-  byId("person-title").textContent = adding ? "Add person" : extending ? "Extend preview" : "Edit access";
-  byId("save-person").textContent = adding ? "Add person" : extending ? "Extend preview" : "Save access";
-  byId("person-copy").textContent = adding
-    ? "Approve their work email. They receive a code only when they request one in the app."
-    : extending ? `${person.email} · Add time from the current expiry, or today if it has passed. Revoked access stays revoked until you restore it.` : person.email;
-  byId("person-identity").hidden = !adding;
-  byId("start-label").hidden = !adding;
+  byId("person-title").textContent = extending ? "Extend preview" : "Edit access";
+  byId("save-person").textContent = extending ? "Extend preview" : "Save access";
+  byId("person-copy").textContent = extending
+    ? `${person.email} · Add time from the current expiry, or today if it has passed. Revoked access stays revoked until you restore it.` : person.email;
   byId("duration-fields").hidden = mode === "edit";
   byId("entitlement-fields").hidden = extending;
-  form.elements.email.required = adding;
-  form.elements.organizationId.required = adding;
-  form.elements.organizationId.innerHTML = '<option value="">Select organization</option>' + partnerState.organizations.filter((org) => org.status === "active").map((org) => `<option value="${escapePartnerText(org.id)}">${escapePartnerText(org.name)}</option>`).join("");
-  if (adding) form.elements.organizationId.value = byId("organization-filter").value;
   for (const platform of ["ios", "android"]) form.elements[platform].checked = person ? person.platforms.includes(platform) : true;
   for (const key of Object.keys(featureLabels)) form.elements[key].checked = person ? person.features[key] === true : key !== "checkout";
   durationChanged();
@@ -134,7 +129,7 @@ async function durationBody(form) {
     const now = new Date(serverTime).getTime();
     const start = partnerState.mode === "extend"
       ? Math.max(now, new Date(partnerState.selected.expiresAt).getTime())
-      : form.elements.startsAt.value ? new Date(form.elements.startsAt.value).getTime() : now;
+      : now;
     if (!Number.isFinite(now) || !Number.isFinite(start)) throw new Error("Refresh the list and choose a valid start time.");
     return { expiresAt: new Date(start + 86400000).toISOString() };
   }
@@ -156,7 +151,6 @@ async function withPartnerSubmission(form, errorId, action) {
 document.addEventListener("DOMContentLoaded", () => {
   byId("refresh").addEventListener("click", () => { partnerMessage(""); loadPartners(); });
   byId("organization-filter").addEventListener("change", renderPartners);
-  byId("add-person").addEventListener("click", () => openPerson("add"));
   byId("add-organization").addEventListener("click", () => {
     byId("organization-form").reset(); byId("organization-error").textContent = ""; byId("organization-dialog").showModal();
   });
@@ -187,14 +181,10 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!body.platforms.length) throw new Error("Choose at least one platform.");
         body.features = Object.fromEntries(Object.keys(featureLabels).map((key) => [key, form.elements[key].checked]));
       }
-      if (mode === "add") {
-        body.email = form.elements.email.value.trim(); body.organizationId = form.elements.organizationId.value;
-        if (form.elements.startsAt.value) body.startsAt = new Date(form.elements.startsAt.value).toISOString();
-      }
-      const path = mode === "add" ? "/people" : `/people/${encodeURIComponent(partnerState.selected.id)}/${mode === "edit" ? "update" : "extend"}`;
+      const path = `/people/${encodeURIComponent(partnerState.selected.id)}/${mode === "edit" ? "update" : "extend"}`;
       await partnerApi(path, body);
       byId("person-dialog").close();
-      partnerMessage(mode === "add" ? "Invitation saved. No email has been sent." : "Preview access updated.");
+      partnerMessage("Preview access updated.");
       await loadPartners();
     });
   });
@@ -203,6 +193,7 @@ document.addEventListener("DOMContentLoaded", () => {
     withPartnerSubmission(form, "organization-error", async () => {
       await partnerApi("/organizations", { name: form.elements.name.value.trim(), allowedEmailDomains: form.elements.domains.value.split(",").map((v) => v.trim().toLowerCase()).filter(Boolean) });
       byId("organization-dialog").close(); partnerMessage("Organization added."); await loadPartners();
+      document.dispatchEvent(new Event("partner-organizations-updated"));
     });
   });
   byId("action-form").addEventListener("submit", (event) => {

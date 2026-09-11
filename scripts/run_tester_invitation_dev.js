@@ -25,7 +25,7 @@ async function main() {
     if (email.startsWith("failure")) throw new Error("Mocked provider failure");
     return { testerId: "local-fixture", state: "INVITED" };
   }, async refresh() { return { state: "ACCEPTED" }; } };
-  const android = { configured: true, async enroll() { return { state: "OPT_IN_REQUIRED" }; } };
+  const android = { configured: false, async enroll() { throw new Error("Android preview not verified"); } };
   const invitations = createTesterInvitationService({ dbPool: pool, partnerAccessService: service, secret: crypto.randomBytes(32).toString("hex"),
     env: { ZIPPI_TESTER_INVITES_ENABLED: "true", ZIPPI_TESTER_ORGANIZATION_ID: organization.id }, providers: { ios, android },
     mailAdapter: { configured: true, async sendInstructions({ email }) { if (!email.endsWith("@example.test")) throw new Error("Fixture email only"); return { id: "local-message" }; } },

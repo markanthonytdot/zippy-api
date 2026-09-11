@@ -1,5 +1,9 @@
 # Dashboard tester invitations
 
+Current partner workflow: see [partner invitation rollout](partner-invitation-rollout.md).
+The dated setup entries below are historical; the rollout supersedes their group
+and enable-flag instructions.
+
 ## Apple API activation — September 10, 2026
 
 The user supplied the App Manager Team Key named **Zippi TestFlight Invites**.
@@ -190,7 +194,8 @@ environment/secret storage, never source, chat, frontend fields or documentation
 | `ZIPPI_TESTER_ORGANIZATION_ID` | UUID of an existing active Partner Access tester organization |
 | `ZIPPI_TESTER_DURATION_DAYS` | Optional new-person duration: 3, 7 (default), or 14 |
 | `ZIPPI_TESTER_APPLE_APP_ID` | `6757395108` (only this app is accepted) |
-| `ZIPPI_TESTER_APPLE_GROUP_ID` | Audited external Beta Testers group UUID above |
+| `ZIPPI_TESTER_APPLE_GROUP_ID` | Dedicated Zippi Partners group; see current rollout |
+| `ZIPPI_TESTER_APPLE_GROUP_NAME` | `Zippi Partners`; validated against Apple before invitation |
 | `ZIPPI_TESTER_APPLE_ISSUER_ID` | Team API issuer, available after Apple enables API access |
 | `ZIPPI_TESTER_APPLE_KEY_ID` | Dedicated tester-management API key ID |
 | `ZIPPI_TESTER_APPLE_PRIVATE_KEY` | Secret: multiline Apple .p8 PEM, stored only in Render |

@@ -1,7 +1,7 @@
 .tester-invitation-panel { margin-bottom: 24px; }
 #tester-invite-form { display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap; margin: 24px 26px 18px; }
-.tester-email { flex: 1 1 240px; display: grid; gap: 8px; }
-.tester-email input { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--bg-soft); color: var(--text); color-scheme: dark; }
+.tester-email, .tester-organization { flex: 1 1 240px; display: grid; gap: 8px; }
+.tester-email input, .tester-organization select { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--bg-soft); color: var(--text); color-scheme: dark; }
 #tester-invite-form fieldset { display: flex; gap: 20px; border: 0; padding: 0 0 12px; margin: 0; }
 #tester-invite-form legend { margin-bottom: 12px; }
 #tester-invite-form input[type=radio] { accent-color: var(--gold); }

@@ -38,13 +38,13 @@
         <div class="panel-heading"><div><p class="eyebrow">Invite someone to try Zippi</p><h2 id="tester-invitation-title">Invite to Zippi</h2></div><button type="button" id="tester-refresh" class="text-button">Refresh list</button></div>
         <form id="tester-invite-form">
           <label class="tester-email">Email<input type="email" name="email" placeholder="person@example.com" maxlength="254" autocomplete="off" required></label>
-          <fieldset><legend>Platform</legend><label><input type="radio" name="platform" value="ios" checked> iOS</label><label><input type="radio" name="platform" value="android"> Android</label></fieldset>
+          <label class="tester-organization">Organization<select name="organizationId"><option value="">Use existing or default organization</option></select></label>
+          <fieldset><legend>Platform</legend><label><input type="radio" name="platform" value="ios" checked> iOS</label><label><input type="radio" name="platform" value="android" disabled> Android <span id="tester-android-status">(setup pending)</span></label></fieldset>
           <button id="tester-invite-submit" class="primary-button" type="submit" disabled>Invite to Zippi</button>
         </form>
         <p id="tester-policy" class="form-note"></p>
         <p id="tester-readiness" class="form-note" role="status"></p>
         <p id="tester-invite-message" role="status" aria-live="polite"></p>
-        <div class="partner-table-scroll"><table class="partner-table"><caption class="visually-hidden">Tester invitations by platform</caption><thead><tr><th>Email / platform</th><th>Zippi access</th><th>Platform invitation</th><th>Welcome email</th><th>Activity</th><th>Actions</th></tr></thead><tbody id="tester-invitation-list"><tr><td colspan="6">Loading tester invitations…</td></tr></tbody></table></div>
       </section>
       <section class="summary-grid partner-summary" aria-label="Preview overview">
         <article class="summary-card accent"><p class="summary-label">Currently active</p><strong id="active-count">—</strong><p class="summary-copy">Verified partner previews</p></article>
@@ -52,9 +52,9 @@
         <article class="summary-card"><p class="summary-label">Organizations</p><strong id="organization-count">—</strong><p class="summary-copy">One invitation for both platforms</p></article>
       </section>
       <section class="panel partner-list-panel">
-        <div class="panel-heading"><div><p class="eyebrow">Partner previews</p><h2>People with an invitation</h2></div><div class="partner-actions"><button type="button" id="refresh" class="text-button">Refresh</button><button type="button" id="add-person" class="primary-button compact">Add person</button></div></div>
+        <div class="panel-heading"><div><p class="eyebrow">Partner previews</p><h2>Manage existing people</h2></div><div class="partner-actions"><button type="button" id="refresh" class="text-button">Refresh</button></div></div>
         <div class="partner-filter"><label for="organization-filter">Organization</label><select id="organization-filter"><option value="">All organizations</option></select><button type="button" id="add-organization" class="text-button">Add organization</button></div>
-        <div class="partner-table-scroll"><table class="partner-table"><thead><tr><th>Email / organization</th><th>Access</th><th>Expires</th><th>Features / platforms</th><th>Activity</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="people-list"><tr><td colspan="6">Loading invitations…</td></tr></tbody></table></div>
+        <div class="partner-table-scroll"><table class="partner-table"><thead><tr><th>Email / organization</th><th>Access</th><th>Expires</th><th>Features / platforms</th><th>Activity</th><th>TestFlight / instructions</th><th><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="people-list"><tr><td colspan="7">Loading invitations…</td></tr></tbody></table></div>
         <p class="form-note">Access updates on the next entitlement check. Activation and access activity are shown here; searches and conversations are private.</p>
       </section>
     </main>
@@ -62,16 +62,11 @@
 
   <dialog id="person-dialog" class="partner-dialog" aria-labelledby="person-title">
     <form id="person-form">
-      <div class="panel-heading"><h2 id="person-title">Add person</h2><button type="button" data-close class="text-button">Cancel</button></div>
-      <p id="person-copy" class="form-note">Approve their work email. They receive a code only when they request one in the app.</p>
-      <div id="person-identity">
-        <label>Work email<input type="email" name="email" autocomplete="off" maxlength="254" required placeholder="name@example.com"></label>
-        <label>Organization<select name="organizationId" required></select></label>
-      </div>
+      <div class="panel-heading"><h2 id="person-title">Edit access</h2><button type="button" data-close class="text-button">Cancel</button></div>
+      <p id="person-copy" class="form-note"></p>
       <div id="duration-fields">
         <label>Duration<select name="duration"><option value="1">1 day</option><option value="3">3 days</option><option value="7" selected>7 days</option><option value="14">14 days</option><option value="custom">Custom expiry</option></select></label>
         <label id="custom-expiry-label" hidden>Expires at <span class="form-note">(your local time)</span><input name="expiresAt" type="datetime-local"></label>
-        <label id="start-label">Starts at <span class="form-note">(optional, your local time)</span><input name="startsAt" type="datetime-local"></label>
       </div>
       <div id="entitlement-fields">
         <fieldset><legend>Platforms</legend><label class="partner-toggle"><input type="checkbox" name="ios" checked>iOS</label><label class="partner-toggle"><input type="checkbox" name="android" checked>Android</label></fieldset>
@@ -79,7 +74,7 @@
         <p class="form-note">Checkout also requires the app and backend booking controls to allow it.</p>
       </div>
       <p id="person-error" class="partner-error" role="alert"></p>
-      <button type="submit" id="save-person" class="primary-button">Add person</button>
+      <button type="submit" id="save-person" class="primary-button">Save access</button>
     </form>
   </dialog>
 

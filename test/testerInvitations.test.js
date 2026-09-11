@@ -12,11 +12,11 @@ const qaEnv = { ZIPPI_TESTER_INVITES_ENABLED: "false", ZIPPI_TESTER_QA_ENABLED: 
   RENDER_SERVICE_ID: "srv-dagq12ht0dsc73a7dm40", ZIPPI_TESTER_APPLE_APP_ID: "6757395108",
   ZIPPI_TESTER_APPLE_GROUP_ID: "39a3f713-9168-4e9a-abc4-2d97f7cf7cdb" };
 
-test("QA gate fails closed without its flag, exact staging service, app, group or trusted admin context", async () => {
+test("QA gate fails closed without its flag, exact staging service, app, separate provider or trusted admin context", async () => {
   for (const patch of [{ ZIPPI_TESTER_QA_ENABLED: "false" }, { RENDER_SERVICE_ID: "production" },
-    { ZIPPI_TESTER_APPLE_APP_ID: "other-app" }, { ZIPPI_TESTER_APPLE_GROUP_ID: "a81451ab-a35e-4bf6-b11b-521a6e3df853" }]) {
+    { ZIPPI_TESTER_APPLE_APP_ID: "other-app" }]) {
     const service = createTesterInvitationService({ dbPool: { query() { assert.fail("No database access expected"); } },
-      secret: "test-only", providers: {}, env: { ...qaEnv, ...patch } });
+      secret: "test-only", providers: { iosQA: { configured: true } }, env: { ...qaEnv, ...patch } });
     await assert.rejects(service.run({ email: "s.mark@mac.com", platform: "ios" }, "admin", "invite", qaContext),
       error => error.code === "tester_invitations_disabled");
     assert.equal((await service.list(qaContext)).config.qaOnly, null);
@@ -79,7 +79,7 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
       if (failPlatform) throw new Error("private-provider-response-fixture");
       return platform === "ios" ? { testerId: "tester-fixture", state: "INVITED" } : { state: "OPT_IN_REQUIRED" };
     }, async refresh() { return { state: "INSTALLED" }; }, async resend(_id, { reserveNotification }) { await reserveNotification(); calls.resend++; return { state: "INVITED" }; } });
-    const providers = { ios: provider("ios"), android: provider("android") };
+    const providers = { ios: provider("ios"), iosQA: provider("ios"), android: provider("android") };
     const mailAdapter = { configured: true, async sendInstructions(message) { calls.email.push(message); if (failMail) throw new Error("mail-secret-fixture"); return { id: "message-fixture" }; } };
     const env = { ZIPPI_TESTER_INVITES_ENABLED: "true", ZIPPI_TESTER_ORGANIZATION_ID: org.id, RESEND_API_KEY: "secret-fixture-not-returned" };
     const service = createTesterInvitationService({ dbPool: pool, partnerAccessService: access, providers, mailAdapter, secret: "local-test-only", env, now: () => clock });
@@ -89,6 +89,51 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
       set failPlatform(value) { failPlatform = value; }, set failMail(value) { failMail = value; }, set pause(value) { pause = value; } };
   }
   function advance() { clock += 300001; }
+  await t.test("selected organization is used for new identities and survives retries without duplicates", async () => {
+    const f = fixture();
+    const selected = (await access.createOrganization({ name: "Test Organization", allowedEmailDomains: ["example.test"] }, f.actor)).organization;
+    f.failPlatform = true;
+    const first = await f.service.run({ email: f.email, platform: "ios", organizationId: selected.id }, f.actor);
+    assert.equal(first.invitation.organizationId, selected.id); assert.equal(first.invitation.organization, "Test Organization");
+    advance(); f.failPlatform = false;
+    const retry = await f.action(first.invitation.id, "retry"); assert.equal(retry.ok, true); assert.equal(retry.invitation.organizationId, selected.id);
+    const repeated = await f.service.run({ email: f.email, platform: "ios", organizationId: selected.id }, f.actor);
+    assert.equal(repeated.invitation.id, first.invitation.id); assert.equal(f.calls.email.length, 1);
+    assert.equal((await pool.query("select count(*)::int n from partner_people where email=$1", [f.email])).rows[0].n, 1);
+    assert.equal((await f.service.list()).organizations.filter(x => x.id === selected.id).length, 1);
+  });
+  await t.test("organization selection validates domains and active records before provider or identity changes", async () => {
+    const f = fixture();
+    const wrongDomain = (await access.createOrganization({ name: "Restricted", allowedEmailDomains: ["elsewhere.test"] }, f.actor)).organization;
+    const inactive = (await access.createOrganization({ name: "Inactive", allowedEmailDomains: [] }, f.actor)).organization;
+    await pool.query("update partner_organizations set status='disabled' where id=$1", [inactive.id]);
+    for (const [id, code] of [["invalid", "invalid_organization"], [crypto.randomUUID(), "invalid_organization"], [inactive.id, "invalid_organization"], [wrongDomain.id, "email_domain_not_allowed"]]) {
+      await assert.rejects(f.service.run({ email: f.email, platform: "ios", organizationId: id }, f.actor), e => e.code === code);
+    }
+    assert.equal(f.calls.ios.length + f.calls.email.length, 0);
+    assert.equal((await pool.query("select count(*)::int n from partner_people where email=$1", [f.email])).rows[0].n, 0);
+  });
+  await t.test("explicit organization changes preserve existing expiry and custom permissions; omission preserves organization", async () => {
+    const f = fixture();const selected = (await access.createOrganization({ name: "Selected", allowedEmailDomains: ["example.test"] }, f.actor)).organization;
+    const old = (await access.createPerson({ email: f.email, organizationId: org.id, durationDays: 3, platforms: ["ios"], features: { flights: false, combinedTrip: false } }, f.actor)).person;
+    const first = await f.invite(); assert.equal(first.invitation.organizationId, org.id);
+    const changed = await f.service.run({ email: f.email, platform: "ios", organizationId: selected.id }, f.actor);
+    assert.equal(changed.invitation.organizationId, selected.id);assert.equal(changed.invitation.expiresAt.toISOString(), old.expiresAt);
+    const person = (await pool.query("select * from partner_people where email=$1", [f.email])).rows[0];
+    assert.equal(person.id, old.id);assert.equal(person.features.flights, false);assert.equal(person.features.combinedTrip, false);
+    assert.equal((await f.invite()).invitation.organizationId, selected.id);assert.equal(f.calls.email.length, 1);
+  });
+  await t.test("general partner mode never routes the designated QA account into the partner provider; disabled Android cannot mutate access", async () => {
+    const f = fixture();let qaCalls = 0;
+    const service = createTesterInvitationService({ dbPool: pool, partnerAccessService: access, secret: "test-only", now: () => clock,
+      env: { ...qaEnv, ZIPPI_TESTER_INVITES_ENABLED: "true", ZIPPI_TESTER_ORGANIZATION_ID: org.id, ZIPPI_TESTER_APPLE_GROUP_ID: "partners-group" },
+      mailAdapter: f.mailAdapter, providers: { ios: f.providers.ios, android: { configured: false }, iosQA: { configured: true, async enroll() { qaCalls++;return { testerId: "qa-tester", state: "INVITED" }; } } } });
+    await assert.rejects(service.run({ email: f.email, platform: "android" }, f.actor, "invite", qaContext), e => e.code === "android_preview_build_unverified");
+    await assert.rejects(service.run({ email: "s.mark@mac.com", platform: "ios" }, f.actor), e => e.code === "tester_qa_restricted");
+    await service.run({ email: f.email, platform: "ios" }, f.actor, "invite", qaContext);
+    assert.equal(qaCalls, 0); assert.equal(f.calls.ios.length, 1);
+    const listed = await service.list(qaContext);assert.equal(listed.config.enabled, true);assert.equal(listed.config.qaOnly, null);assert.equal(listed.config.qa.email, "s.mark@mac.com");
+  });
   await t.test("QA-only invitations reuse one-day access and remain idempotent; all other identities and platforms are blocked", async () => {
     const f = fixture();
     const qaOrg = (await access.createOrganization({ name: "Isolated QA", allowedEmailDomains: ["mac.com"] }, f.actor)).organization;
@@ -121,6 +166,12 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
     advance(); await service.run({ id: first.invitation.id }, f.actor, "apple-resend", qaContext);
     assert.equal(f.calls.resend, 1);
     await assert.rejects(service.run({ id: first.invitation.id }, f.actor, "resend", qaContext), error => error.code === "invitation_cooldown");
+    const generalService = createTesterInvitationService({ dbPool: pool, partnerAccessService: access,
+      providers: { ...f.providers, ios: { configured: true, async refresh() { assert.fail("QA must never use the partner group"); } } },
+      mailAdapter: f.mailAdapter, secret: "test-only", env: { ...qaEnv, ZIPPI_TESTER_INVITES_ENABLED: "true", ZIPPI_TESTER_APPLE_GROUP_ID: "partners-group", ZIPPI_TESTER_ORGANIZATION_ID: qaOrg.id }, now: () => clock });
+    advance();
+    const refreshed = await generalService.run({ id: first.invitation.id }, f.actor, "refresh", qaContext);
+    assert.equal(refreshed.invitation.providerState, "INSTALLED");
     await access.changePerson(person.id, "revoke", {}, f.actor); advance();
     await assert.rejects(service.run({ email: "s.mark@mac.com", platform: "ios" }, f.actor, "invite", qaContext), error => error.code === "preview_access_inactive");
   });

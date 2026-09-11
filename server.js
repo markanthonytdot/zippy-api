@@ -28,7 +28,7 @@ const { createAdminDashboardRouter } = require("./lib/adminDashboard");
 const { createPartnerAccessService } = require("./lib/partnerAccess");
 const { createStagingReviewerAccess } = require("./lib/partnerAccessReviewer");
 const { createPartnerMailAdapter } = require("./lib/partnerAccessMail");
-const { createTesterInvitationService } = require("./lib/testerInvitations");
+const { createTesterInvitationService, QA_GROUP } = require("./lib/testerInvitations");
 const { createAppleTesterProvider, createAndroidTesterProvider } = require("./lib/testerInvitationProviders");
 const { registerPartnerAccessRoutes, createPartnerAccessEnforcement } = require("./lib/partnerAccessRoutes");
 const { databaseSSLForURL } = require("./lib/databaseConfig");
@@ -867,7 +867,8 @@ const partnerAccessService = createPartnerAccessService({
   reviewerAccess: createStagingReviewerAccess(),
 });
 const testerInvitationService = createTesterInvitationService({ dbPool, partnerAccessService, mailAdapter: partnerMailAdapter,
-  secret: JWT_SECRET, providers: { ios: createAppleTesterProvider(), android: createAndroidTesterProvider() } });
+  secret: JWT_SECRET, providers: { ios: createAppleTesterProvider(), android: createAndroidTesterProvider(),
+  iosQA: createAppleTesterProvider({ ...process.env, ZIPPI_TESTER_APPLE_GROUP_ID: QA_GROUP, ZIPPI_TESTER_APPLE_GROUP_NAME: "Zippi Dashboard QA" }) } });
 registerPartnerAccessRoutes(app, { service: partnerAccessService, required: partnerAccessRequired, verifyUser: requireVerifiedUser });
 app.use(createPartnerAccessEnforcement({ service: partnerAccessService, required: partnerAccessRequired }));
 

@@ -6,10 +6,10 @@ const { createAppleTesterProvider, createAndroidTesterProvider } = require("../l
 const { createResendMailAdapter } = require("../lib/partnerAccessResendMail");
 const { invitationInstructions } = require("../lib/testerInvitationEmail");
 
-function appleFixture({ existing = false, member = false, autoNotify = true, builds = true, internal = false, appId = "6757395108", failure = null, state = "INVITED", pagination = false, scopedMismatch = false, externalBuildState = "IN_BETA_TESTING", noInstallableBuilds = false } = {}) {
+function appleFixture({ groupName = "Zippi Partners", expectedGroupName = "Zippi Partners", existing = false, member = false, autoNotify = true, builds = true, internal = false, appId = "6757395108", failure = null, state = "INVITED", pagination = false, scopedMismatch = false, externalBuildState = "IN_BETA_TESTING", noInstallableBuilds = false } = {}) {
   const keys = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
   const calls = []; let reservations = 0;
-  const env = { ZIPPI_TESTER_APPLE_APP_ID: "6757395108", ZIPPI_TESTER_APPLE_GROUP_ID: "group-fixture", ZIPPI_TESTER_APPLE_ISSUER_ID: "issuer-fixture",
+  const env = { ZIPPI_TESTER_APPLE_GROUP_NAME: expectedGroupName, ZIPPI_TESTER_APPLE_APP_ID: "6757395108", ZIPPI_TESTER_APPLE_GROUP_ID: "group-fixture", ZIPPI_TESTER_APPLE_ISSUER_ID: "issuer-fixture",
     ZIPPI_TESTER_APPLE_KEY_ID: "key-fixture", ZIPPI_TESTER_APPLE_PRIVATE_KEY: keys.privateKey.export({ type: "pkcs8", format: "pem" }) };
   const tester = () => ({ type: "betaTesters", id: "tester-fixture", attributes: { email: "qa@example.test", state } });
   const provider = createAppleTesterProvider(env, { fetchImpl: async (url, options) => {
@@ -20,7 +20,7 @@ function appleFixture({ existing = false, member = false, autoNotify = true, bui
     calls.push({ path, method: options.method, body });
     if (failure === path) return { ok: false, status: 403, json: async () => ({ secret: "provider-sensitive-value" }) };
     let data, included, links;
-    if (path === "betaGroups/group-fixture") data = { attributes: { isInternalGroup: internal } };
+    if (path === "betaGroups/group-fixture") data = { attributes: { isInternalGroup: internal, name: groupName } };
     else if (path === "betaGroups/group-fixture/app") data = { id: appId, attributes: { bundleId: "com.heyzippi.zippi" } };
     else if (path === "betaGroups/group-fixture/builds") {
       assert.equal(new URL(url).searchParams.has("include"), false, "Apple's group builds endpoint does not support includes");
@@ -109,6 +109,8 @@ test("Apple rejects a missing or mismatched app-scoped tester instead of inventi
 for (const [name, options, code] of [
   ["no testable build", { builds: false }, "apple_no_testable_build"],
   ["internal group", { internal: true }, "apple_group_mismatch"],
+  ["QA group used for partners", { groupName: "Zippi Dashboard QA" }, "apple_group_mismatch"],
+  ["partner group used for QA", { expectedGroupName: "Zippi Dashboard QA" }, "apple_group_mismatch"],
   ["wrong app", { appId: "other-app" }, "apple_group_mismatch"],
   ["provider permissions", { failure: "betaGroups/group-fixture" }, "apple_authorization_failed"],
   ["incomplete result list", { pagination: true }, "apple_result_limit"],
