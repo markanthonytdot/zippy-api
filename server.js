@@ -21,6 +21,7 @@ const {
 const { buildFlightSearchContract } = require("./lib/flightSearchContract");
 const { renderDeployCommit } = require("./lib/deployRevision");
 const { createStrictCorsMiddleware } = require("./lib/strictCors");
+const { createSpeechSessionHandler } = require("./lib/speechSession");
 const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
 const { resolveFlightBookingMode } = require("./lib/flightBookingMode");
 const { createAdminDashboardRouter } = require("./lib/adminDashboard");
@@ -54,6 +55,13 @@ const translateClient = (() => {
 
 app.set("trust proxy", true);
 app.use(helmet());
+const speechSession = createSpeechSessionHandler();
+app.use("/v1/speech/session", express.json({ limit: "2kb" }), (err, _req, res, next) => {
+  if (!err) return next();
+  res.setHeader("Cache-Control", "no-store");
+  res.status(err.type === "entity.too.large" ? 413 : 400).json({ ok: false, code: "speech_request_invalid", message: "Please restart voice input." });
+});
+app.use("/v1/speech/session", speechSession);
 app.use([
   "/v1/flights/search",
   "/v1/flights/available_services",
