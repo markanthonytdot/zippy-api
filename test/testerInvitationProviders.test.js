@@ -136,9 +136,10 @@ test("Resend instructions reuse existing delivery adapter and stable idempotency
   const mail = createResendMailAdapter({ RESEND_API_KEY: "mock-provider-key", ZIPPI_PARTNER_EMAIL_FROM: "Zippi <preview@example.test>" }, { fetchImpl: async (url, options) => {
     calls.push({ url, options }); return { ok: true, json: async () => ({ id: "mock-message" }) };
   } });
-  await mail.sendInstructions({ email: "qa@example.test", ...invitationInstructions("ios"), idempotencyKey: "test-key" });
+  await mail.sendInstructions({ email: "qa@example.test", ...invitationInstructions("ios", "qa@example.test"), idempotencyKey: "test-key" });
   assert.equal(calls[0].options.headers["Idempotency-Key"], "test-key");
-  assert.match(JSON.parse(calls[0].options.body).text, /same email address/);
+  const delivered = JSON.parse(calls[0].options.body);
+  assert.ok(delivered.text.includes(`enter ${delivered.to[0]} when prompted for Partner Preview access.`));
   assert.equal(JSON.parse(calls[0].options.body).text.includes("mock-provider-key"), false);
   assert.match(invitationInstructions("android").text, /apps\/testing\/com.heyzippi.app/);
 });

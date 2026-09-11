@@ -7,7 +7,7 @@ const { createResendMailAdapter } = require('../lib/partnerAccessResendMail');
 const env = { RESEND_API_KEY: 'test-only-not-a-real-key', ZIPPI_PARTNER_EMAIL_FROM: 'Zippi Partner Preview <preview@example.test>' };
 
 test('iOS welcome contains approved content and an embedded logo, with no remote assets or tracking', () => {
-  const m = invitationInstructions('ios');
+  const m = invitationInstructions('ios', 'qa@example.test');
   assert.equal(m.subject, "You're invited to preview Zippi");
   for (const value of ['Get started', 'Get TestFlight', 'support@heyzippi.com', 'Thanks for exploring Zippi.', 'The Zippi Team', 'Zippi Technologies', 'Flights, Hotels and Flight + Hotel trips.']) {
     assert.ok(m.html.includes(value)); assert.ok(m.text.includes(value));
@@ -28,7 +28,7 @@ test('welcome payload survives persistence and reuses identical idempotent Resen
   const adapter = createResendMailAdapter(env, { fetchImpl: async (url, options) => {
     calls.push({url, ...options}); return { ok: true, json: async () => ({id:'mock-email'}) };
   } });
-  const payload = JSON.parse(JSON.stringify(invitationInstructions('ios')));
+  const payload = JSON.parse(JSON.stringify(invitationInstructions('ios', 'qa@example.test')));
   for (let i=0;i<2;i++) await adapter.sendInstructions({email:'qa@example.test', ...payload, idempotencyKey:'stable-welcome-key'});
   assert.equal(calls[0].body,calls[1].body);
   assert.equal(calls[0].headers['Idempotency-Key'],calls[1].headers['Idempotency-Key']);
@@ -55,13 +55,39 @@ test('Android instructions retain the existing platform flow and text-only paylo
 test('HTML provider failures remain generic with no retry or content disclosure', async () => {
   let calls=0;
   const mail=createResendMailAdapter(env,{fetchImpl:async()=>{calls++;return {ok:false,status:422};}});
-  await assert.rejects(mail.sendInstructions({email:'qa@example.test',...invitationInstructions('ios')}),e=>e.code==='mail_unavailable'&&e.message==='mail_unavailable');
+  await assert.rejects(mail.sendInstructions({email:'qa@example.test',...invitationInstructions('ios', 'qa@example.test')}),e=>e.code==='mail_unavailable'&&e.message==='mail_unavailable');
   assert.equal(calls,1);
 });
 
-test('HTML and fallback match the approved preview byte for byte', () => {
+test('only the recipient text differs from the approved preview', () => {
   const hash = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
-  const m = invitationInstructions('ios');
-  assert.equal(hash(m.html), '06ae80759125216196331bc1171960287a23e9d35ddceda988196ba1941cc069');
-  assert.equal(hash(m.text), 'c6ff52a744120ff97b35f293c57e4b4794a5d59d7a842b5b1b0ecf3c120a9a77');
+  const m = invitationInstructions('ios', 'qa@example.test');
+  assert.equal(hash(m.html.replace('qa@example.test', 'this same email address')), '06ae80759125216196331bc1171960287a23e9d35ddceda988196ba1941cc069');
+  assert.equal(hash(m.text.replace('qa@example.test', 'this same email address')), 'c6ff52a744120ff97b35f293c57e4b4794a5d59d7a842b5b1b0ecf3c120a9a77');
+});
+
+test('welcome instructions use the normalized invited address in HTML and plain text', () => {
+  for (const input of ['  Partner.Contact+Preview@Example.Test  ', 'another.person@example.test']) {
+    const email = input.trim().toLowerCase();
+    const m = invitationInstructions('ios', input);
+    assert.ok(m.text.includes(`Open Zippi and enter ${email} when prompted for Partner Preview access.`));
+    assert.ok(m.html.includes(`>${email}</strong> when prompted for Partner Preview access.`));
+    assert.doesNotMatch(m.html + m.text, /INVITED_EMAIL|this same email address/);
+    assert.equal(m.html.split(email).length - 1, 1);
+    assert.equal(m.text.split(email).length - 1, 1);
+  }
+});
+
+test('email rendering escapes HTML while preserving plus tags and literal replacement characters', () => {
+  const email = "o'connor+$&@example.test";
+  const m = invitationInstructions('ios', email);
+  assert.ok(m.html.includes('o&#39;connor+$&amp;@example.test'));
+  assert.ok(m.text.includes(`enter ${email} when prompted`));
+  assert.doesNotMatch(m.html, /INVITED_EMAIL/);
+});
+
+test('iOS instructions cannot render without a valid recipient', () => {
+  for (const email of [undefined, '', '<img src=x onerror=alert(1)>@example.test', 'a@example.test\r\nBcc:other@example.test']) {
+    assert.throws(() => invitationInstructions('ios', email), error => error.code === 'invalid_email');
+  }
 });

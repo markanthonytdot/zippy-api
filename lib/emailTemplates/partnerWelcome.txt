@@ -7,7 +7,7 @@ Get started
 1. Install Apple's TestFlight app.
 2. Look for a separate invitation from Apple and accept your Zippi preview.
 3. Install Zippi through TestFlight.
-4. Open Zippi and enter this same email address when prompted for Partner Preview access.
+4. Open Zippi and enter {{INVITED_EMAIL}} when prompted for Partner Preview access.
 5. Enter the verification code we send you.
 
 Get TestFlight:

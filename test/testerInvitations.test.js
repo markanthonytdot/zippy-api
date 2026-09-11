@@ -237,6 +237,15 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
   await t.test("normalization reuses exact email without merging plus tags", async () => {
     const f = fixture(); const first = await f.service.run({ email: ` ${f.email.toUpperCase()} `, platform: "ios" }, f.actor);
     assert.equal(first.invitation.email, f.email); assert.equal((await f.invite()).invitation.id, first.invitation.id);
+    const person = (await pool.query("select email from partner_people where email=$1", [f.email])).rows[0];
+    const message = f.calls.email[0];
+    assert.equal(message.email, person.email);
+    assert.ok(message.text.includes(`Open Zippi and enter ${person.email} when prompted for Partner Preview access.`));
+    assert.ok(message.html.includes(`>${person.email}</strong> when prompted for Partner Preview access.`));
+    advance(); await f.action(first.invitation.id, "resend");
+    assert.equal(f.calls.email.length, 2);
+    assert.equal(f.calls.email[1].text, message.text);
+    assert.equal(f.calls.email[1].html, message.html);
   });
   await t.test("welcome failure never repeats enrollment and retries same Resend key/body", async () => {
     const f = fixture(); f.failMail = true; const first = await f.invite(); assert.equal(first.invitation.error, "mail_unavailable");
