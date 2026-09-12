@@ -55,6 +55,7 @@ const translateClient = (() => {
 
 app.set("trust proxy", true);
 app.use(helmet());
+require('./lib/androidTesterLinks').registerAndroidTesterPublicRoutes(app);
 const speechSession = createSpeechSessionHandler();
 app.use("/v1/speech/session", express.json({ limit: "2kb" }), (err, _req, res, next) => {
   if (!err) return next();

@@ -64,6 +64,7 @@
       card.append(node('p', `Zippi access: ${{ active: 'Active', revoked: 'Revoked', expired: 'Expired', scheduled: 'Scheduled', unavailable: 'Unavailable' }[item.access] || 'Unavailable'}`));
       card.append(node('p', `Play eligibility: ${{ confirmed: 'Confirmed', not_confirmed: 'Not confirmed', removed: 'Removed' }[item.playEligibility] || 'Not confirmed'}`));
       card.append(node('p', `Invitation email: ${{ not_sent: 'Not sent', sending: 'Sending / unconfirmed', sent: 'Sent (provider accepted)', failed: 'Failed / unconfirmed' }[item.emailStatus] || 'Not sent'}`));
+      if (item.emailStatus === 'sent') card.append(node('p', "Invitation sent. If the tester doesn't see it within a few minutes, ask them to check Spam or Promotions."));
       if (item.error) card.append(node('p', explain(item.error), 'partner-error'));
       const controls = node('div', '', 'tester-row-actions');
       function action(label, name, disabled = false, confirmation) {

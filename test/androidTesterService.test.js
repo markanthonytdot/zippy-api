@@ -24,7 +24,8 @@ test('Android tester access and manual distribution lifecycle', async t => {
     await f.run('confirm', { id: row.id, confirm: true }); assert.equal(f.state.emails.length, 0);
     await f.run('send', { id: row.id }); await f.run('send', { id: row.id }); await f.prepare();
     assert.equal(f.state.emails.length, 1);
-    assert.match(f.state.emails[0].text, /https:\/\/play.google.com\/apps\/internaltest\/4701051442738255142/);
+    assert.match(f.state.emails[0].text, /https:\/\/admin.heyzippi.com\/android-test/);
+    assert.equal(f.state.emails[0].attachments, undefined);
     assert.equal((await f.service.list()).invitations[0].emailStatus, 'sent');
   });
   await t.test('two concurrent sends have one notification and retain durable state', async t => {
