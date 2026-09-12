@@ -1,0 +1,38 @@
+[hidden] { display: none !important; }
+.partner-summary { margin-bottom: 28px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.partner-summary strong { display: block; margin: 8px 0; font-size: 34px; font-weight: 600; }
+.partner-list-panel { padding: 26px; }
+.partner-actions, .partner-filter { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.partner-filter { padding: 6px 0 24px; color: var(--muted); }
+.partner-filter select { width: auto; min-width: 220px; padding: 10px 12px; border-radius: 9px; background: var(--bg-soft); color: var(--text); border: 1px solid var(--line); color-scheme: dark; }
+.partner-table-scroll { overflow-x: auto; }
+.partner-table { width: 100%; border-collapse: collapse; text-align: left; }
+.partner-table th { color: var(--muted); font-size: 12px; font-weight: 500; padding: 12px; border-bottom: 1px solid var(--line); }
+.partner-table td { padding: 22px 12px; border-bottom: 1px solid var(--line); font-size: 13px; vertical-align: top; }
+.partner-table td:first-child { min-width: 220px; }
+.partner-table td:nth-child(3) { min-width: 105px; }
+.partner-table small { display: block; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+.partner-table .partner-row-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 82px; }
+/* Keep every management action visible while the other table columns scroll. */
+.partner-table th:last-child, .partner-table td:last-child { position: sticky; right: 0; z-index: 1; background: var(--panel); box-shadow: -8px 0 12px -10px #000; }
+.partner-row-actions button { font-size: 12px; }
+.partner-status { display: inline-block; border-radius: 20px; padding: 6px 10px; background: var(--panel-soft); white-space: nowrap; }
+.partner-status.active { color: var(--success); background: var(--success-soft); }
+.partner-status.pending, .partner-status.scheduled { color: var(--warning); background: var(--warning-soft); }
+.partner-status.revoked, .partner-status.expired { color: var(--muted); }
+.partner-dialog { width: min(520px, calc(100vw - 32px)); padding: 28px; border: 1px solid var(--line-strong); }
+.partner-dialog label { display: block; margin: 16px 0; color: var(--text); font-size: 14px; }
+.partner-dialog input:not([type=checkbox]), .partner-dialog select { width: 100%; display: block; margin-top: 9px; padding: 11px 12px; background: var(--bg-soft); border: 1px solid var(--line); border-radius: 9px; color: var(--text); color-scheme: dark; }
+.partner-dialog fieldset { border: 1px solid var(--line); border-radius: 12px; margin: 20px 0; padding: 6px 14px; }
+.partner-dialog legend { color: var(--muted); font-size: 13px; padding: 0 8px; }
+.partner-dialog label.partner-toggle { display: inline-flex; align-items: center; gap: 8px; margin: 10px 18px 10px 0; }
+.partner-toggle input { accent-color: var(--gold); width: 17px; height: 17px; }
+.partner-error { color: #ffc4ba; font-size: 14px; }
+.partner-dialog button[type=submit] { width: 100%; margin-top: 8px; }
+.partner-dialog button:disabled { opacity: .6; cursor: wait; }
+.partner-empty { padding: 50px 12px !important; text-align: center; color: var(--muted); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@media (max-width: 850px) { .partner-summary { grid-template-columns: 1fr; } .partner-list-panel { padding: 16px; } }
+
+.text-button.partner-destructive { color: #ffc4ba; }
+.primary-button.partner-destructive { background: #92372f; color: #fff; border: 1px solid #ffc4ba; }

@@ -1,0 +1,15 @@
+.tester-invitation-panel { margin-bottom: 24px; }
+#tester-invite-form { display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap; margin: 24px 26px 18px; }
+.tester-email, .tester-organization { flex: 1 1 240px; display: grid; gap: 8px; }
+.tester-email input, .tester-organization select { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--bg-soft); color: var(--text); color-scheme: dark; }
+#tester-invite-form fieldset { display: flex; gap: 20px; border: 0; padding: 0 0 12px; margin: 0; }
+#tester-invite-form legend { margin-bottom: 12px; }
+#tester-invite-form input[type=radio] { accent-color: var(--gold); }
+.tester-invitation-panel .form-note { margin: 0 26px 12px; text-align: left; font-size: 13px; line-height: 1.5; }
+#tester-invite-message { min-height: 1.5em; margin: 18px 26px; line-height: 1.5; }
+.tester-row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.tester-row-actions button { white-space: nowrap; }
+.tester-invitation-panel button:disabled { opacity: .5; cursor: not-allowed; }
+.tester-secondary { display: block; font-size: 12px; color: var(--muted); margin-top: 5px; }
+.tester-error { color: #ffc4ba; font-size: 12px; max-width: 240px; margin-top: 8px; }
+@media (max-width: 600px) { #tester-invite-form .primary-button { width: 100%; } }

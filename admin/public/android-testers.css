@@ -1,0 +1,11 @@
+.android-tester-card { padding: 20px 0; border-top: 1px solid var(--border, #42413d); overflow-wrap: anywhere; }
+.android-tester-card:first-child { border-top: 0; }
+.android-tester-card p { margin: 10px 0; }
+#tester-google-email-help { max-width: 66ch; }
+#android-tester-panel { padding: 26px; }
+#android-tester-panel button:disabled { opacity: .5; cursor: not-allowed; }
+[hidden] { display: none !important; }
+.android-tester-confirm { max-width: min(520px, calc(100vw - 48px)); padding: 28px; border: 1px solid #706c60; border-radius: 16px; background: #252527; color: #f7f5ef; overflow-wrap: anywhere; }
+.android-tester-confirm p { line-height: 1.6; margin: 20px 0; }
+.android-tester-confirm::backdrop { background: rgb(0 0 0 / 70%); }
+@media (max-width: 850px) { #android-tester-panel { padding: 16px; } }

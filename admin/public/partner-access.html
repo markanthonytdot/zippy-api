@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Partner Access · Zippi Admin</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <link rel="stylesheet" href="/admin/assets/partner-access.css">
+
+  <link rel="stylesheet" href="/admin/assets/tester-invitations.css">
+
+<link rel="stylesheet" href="/admin/assets/android-testers.css">
+  <script src="/admin/assets/android-testers.js" defer></script>
+</head>
+<body data-tester-authority="production">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/admin/overview" aria-label="Zippi Admin overview">
+        <img class="brand-logo" src="/admin/assets/zippi-logo-nano.png" alt="Zippi">
+        <span class="brand-copy"><strong>Zippi</strong><small>Business Admin</small></span>
+      </a>
+      <nav aria-label="Admin sections">
+        <p class="nav-label">Business</p>
+        <a href="/admin/overview"><span class="nav-icon">01</span><span>Overview</span></a>
+        <a href="/admin/partner-access" class="active" aria-current="page"><span class="nav-icon">P</span><span>Partner Access</span></a>
+        <p class="nav-label">Travel</p>
+        <a href="/admin/flights"><span class="nav-icon">02</span><span>Flight pricing</span></a>
+        <a href="/admin/currencies"><span class="nav-icon">03</span><span>Currency settings</span></a>
+      </nav>
+      <form method="post" action="/admin/logout"><button class="sign-out" type="submit">Sign out</button></form>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">Private business control panel</p><h1>Partner Access</h1><p class="page-subtitle">Give partners a little time with Zippi.</p></div>
+        <span class="subtle-badge">Internal only</span>
+      </header>
+      <div id="partner-message" class="notice-banner" role="status" aria-live="polite" hidden></div>
+      <section class="panel tester-invitation-panel" aria-labelledby="tester-invitation-title">
+        <div class="panel-heading"><div><p class="eyebrow">Invite someone to try Zippi</p><h2 id="tester-invitation-title">Invite to Zippi</h2></div><button type="button" id="tester-refresh" class="text-button">Refresh list</button></div>
+        <form id="tester-invite-form">
+          <label class="tester-email"><span id="tester-email-label">Email</span><input type="email" name="email" placeholder="person@example.com" maxlength="254" autocomplete="off" required></label>
+          <label class="tester-organization">Organization<select name="organizationId"><option value="">Use existing or default organization</option></select></label>
+          <fieldset><legend>Platform</legend><label><input type="radio" name="platform" value="ios" disabled> iOS</label><label><input type="radio" name="platform" value="android" checked disabled> Android <span id="tester-android-status">(setup pending)</span></label></fieldset>
+          <button id="tester-invite-submit" class="primary-button" type="submit" disabled>Invite to Zippi</button>
+        </form>
+        <p id="tester-google-email-help" class="form-note" hidden>Use the email connected to your Google Play account. This may be different from your work email.</p>
+        <p id="tester-policy" class="form-note"></p>
+        <p id="tester-readiness" class="form-note" role="status"></p>
+        <p id="tester-invite-message" role="status" aria-live="polite"></p>
+      </section>
+      <section id="android-tester-panel" class="panel" hidden aria-labelledby="android-testers-title"><h2 id="android-testers-title">Android testers</h2><p>Google Play membership is managed manually. Revoking Zippi preview access does not uninstall the app.</p><div id="android-tester-rows"></div></section>
+    </main>
+  </div>
+</body>
+</html>

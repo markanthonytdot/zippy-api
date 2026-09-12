@@ -550,12 +550,12 @@ async function getGoogleJwks() {
 }
 
 // sign our own Zippy JWT (HS256)
-async function signZippyToken(subject) {
+async function signZippyToken(subject, claims = {}) {
   if (!JWT_SECRET) return null;
   const { SignJWT } = await getJose();
   const encoder = new TextEncoder();
 
-  return new SignJWT({ uid: subject })
+  return new SignJWT({ ...claims, uid: subject })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setSubject(subject)
     .setIssuer(JWT_ISSUER)
@@ -736,6 +736,7 @@ async function hydrateUserIdFromAuth(req) {
       if (sub) {
         req.userId = sub;
         req.userIdVerified = true;
+        req.authClaims = payload;
         return;
       }
     } catch (_) {
@@ -865,6 +866,10 @@ const dbPool = process.env.DATABASE_URL
       ssl: { rejectUnauthorized: false },
     })
   : null;
+
+const androidTesterService = require("./lib/androidTesterRuntime").installAndroidTesterRuntime(app, {
+  dbPool, secret: JWT_SECRET, signToken: signZippyToken, verifyUser: requireVerifiedUser,
+});
 
 const currentFlightPricingConfig = Object.freeze({
   fxMarginBps: FLIGHT_FX_MARGIN_BPS,
@@ -1099,6 +1104,7 @@ app.get("/v1/flights/booking/config", async (req, res) => {
 
 app.use("/admin", createAdminDashboardRouter({
   dbPool,
+  androidTesterService,
   adminSecret: ZIPPI_ADMIN_SECRET,
   sessionSecret: ZIPPI_ADMIN_SESSION_SECRET,
   adminActor: ZIPPI_ADMIN_ACTOR,
@@ -6056,6 +6062,7 @@ async function verifyBearerUserId(req) {
 
   req.userId = sub;
   req.userIdVerified = true;
+  req.authClaims = payload;
   return sub;
 }
 
@@ -6483,6 +6490,7 @@ app.delete("/me/account", async (req, res) => {
   if (!requireDb(req, res)) return;
 
   try {
+    await androidTesterService.deleteAccount(req.authClaims);
     let appleTokenTableReady = false;
     let appleRefreshToken = "";
     try {
