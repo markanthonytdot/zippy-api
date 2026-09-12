@@ -10,6 +10,8 @@
   <script src="/admin/assets/partner-access.js" defer></script>
   <link rel="stylesheet" href="/admin/assets/tester-invitations.css">
   <script src="/admin/assets/tester-invitations.js" defer></script>
+<link rel="stylesheet" href="/admin/assets/android-testers.css">
+  <script src="/admin/assets/android-testers.js" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -37,15 +39,17 @@
       <section class="panel tester-invitation-panel" aria-labelledby="tester-invitation-title">
         <div class="panel-heading"><div><p class="eyebrow">Invite someone to try Zippi</p><h2 id="tester-invitation-title">Invite to Zippi</h2></div><button type="button" id="tester-refresh" class="text-button">Refresh list</button></div>
         <form id="tester-invite-form">
-          <label class="tester-email">Email<input type="email" name="email" placeholder="person@example.com" maxlength="254" autocomplete="off" required></label>
+          <label class="tester-email"><span id="tester-email-label">Email</span><input type="email" name="email" placeholder="person@example.com" maxlength="254" autocomplete="off" required></label>
           <label class="tester-organization">Organization<select name="organizationId"><option value="">Use existing or default organization</option></select></label>
           <fieldset><legend>Platform</legend><label><input type="radio" name="platform" value="ios" checked> iOS</label><label><input type="radio" name="platform" value="android" disabled> Android <span id="tester-android-status">(setup pending)</span></label></fieldset>
           <button id="tester-invite-submit" class="primary-button" type="submit" disabled>Invite to Zippi</button>
         </form>
+        <p id="tester-google-email-help" class="form-note" hidden>Use the email connected to your Google Play account. This may be different from your work email.</p>
         <p id="tester-policy" class="form-note"></p>
         <p id="tester-readiness" class="form-note" role="status"></p>
         <p id="tester-invite-message" role="status" aria-live="polite"></p>
       </section>
+      <section id="android-tester-panel" class="panel" hidden aria-labelledby="android-testers-title"><h2 id="android-testers-title">Android testers</h2><p>Google Play membership is managed manually. Revoking Zippi preview access does not uninstall the app.</p><div id="android-tester-rows"></div></section>
       <section class="summary-grid partner-summary" aria-label="Preview overview">
         <article class="summary-card accent"><p class="summary-label">Currently active</p><strong id="active-count">—</strong><p class="summary-copy">Verified partner previews</p></article>
         <article class="summary-card"><p class="summary-label">Waiting to activate</p><strong id="pending-count">—</strong><p class="summary-copy">Approved people</p></article>

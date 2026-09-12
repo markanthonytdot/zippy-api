@@ -35,12 +35,13 @@
   }
   function readiness() {
     const platform = form.elements.platform.value;
+    if (platform === "android" && form.dataset.androidProductionEnabled) { document.dispatchEvent(new Event("android-tester-render")); return; }
     const qaMatch = config?.qa && platform === config.qa.platform
       && form.elements.email.value.trim().toLowerCase() === config.qa.email;
     const ready = (config?.enabled || qaMatch) && config.policyConfigured && config.emailConfigured && config.platforms[platform];
     submit.disabled = pending || !ready;
-    form.querySelector('input[value="android"]').disabled = !config?.platforms.android;
-    document.getElementById("tester-android-status").textContent = config?.platforms.android ? "" : "(setup pending)";
+    form.querySelector('input[value="android"]').disabled = !config?.platforms.android && !form.dataset.androidProductionEnabled;
+    document.getElementById("tester-android-status").textContent = form.dataset.androidProductionEnabled ? "(production)" : config?.platforms.android ? "" : "(setup pending)";
     document.getElementById("tester-policy").textContent = config?.policyConfigured
       ? `New previews last ${config.durationDays} days with Flights, Hotels and Combined Trip on, Checkout off. Existing access settings are preserved.` : "Default preview policy needs setup.";
     document.getElementById("tester-readiness").textContent = config?.qaOnly
@@ -97,7 +98,7 @@
     } catch (error) { message.textContent = error.message; }
     finally { pending = false; try { await load(); } catch { message.textContent += " Refresh the list to check the recorded outcome."; } readiness(); }
   }
-  form.addEventListener("submit", event => { event.preventDefault(); if (!submit.disabled) operate("", { email: form.elements.email.value, organizationId: form.elements.organizationId.value || undefined, platform: form.elements.platform.value }); });
+  form.addEventListener("submit", event => { event.preventDefault(); if (!submit.disabled && form.elements.platform.value !== "android") operate("", { email: form.elements.email.value, organizationId: form.elements.organizationId.value || undefined, platform: form.elements.platform.value }); });
   form.addEventListener("change", readiness);
   form.addEventListener("input", readiness);
   document.getElementById("tester-refresh").addEventListener("click", () => load().catch(() => { message.textContent = "Couldn't refresh invitations."; }));

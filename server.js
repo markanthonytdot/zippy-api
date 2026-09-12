@@ -1118,6 +1118,7 @@ app.use("/admin", createAdminDashboardRouter({
   dbPool,
   partnerAccessService,
   testerInvitationService,
+  androidTesterService: require("./lib/androidTesterRemote").createAndroidTesterRemote(),
   adminSecret: ZIPPI_ADMIN_SECRET,
   sessionSecret: ZIPPI_ADMIN_SESSION_SECRET,
   adminActor: ZIPPI_ADMIN_ACTOR,

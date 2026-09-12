@@ -89,6 +89,15 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
       set failPlatform(value) { failPlatform = value; }, set failMail(value) { failMail = value; }, set pause(value) { pause = value; } };
   }
   function advance() { clock += 300001; }
+  await t.test("production Android authority blocks legacy Android side effects while iOS remains staging", async () => {
+    const f = fixture(); f.env.ZIPPI_ANDROID_TESTER_REMOTE_ENABLED = "true";
+    await assert.rejects(f.invite("android"), error => error.code === "android_production_authority_required");
+    assert.equal(f.calls.android.length, 0); assert.equal(f.calls.email.length, 0);
+    assert.equal((await pool.query("select count(*) from partner_people where email=$1", [f.email])).rows[0].count, "0");
+    const ios = await f.invite("ios"); assert.equal(ios.ok, true);
+    assert.equal(f.calls.ios.length, 1); assert.equal(f.calls.email.length, 1);
+  });
+
   await t.test("Apple refusal or unconfirmed individual invitation sends no welcome; retry reuses records and sends welcome once", async () => {
     for (const outcome of ["apple_no_testable_build", "NOT_INVITED"]) {
       const f = fixture();
