@@ -89,6 +89,59 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
       set failPlatform(value) { failPlatform = value; }, set failMail(value) { failMail = value; }, set pause(value) { pause = value; } };
   }
   function advance() { clock += 300001; }
+  for (const durationDays of [1, 3, 7, 14, 30, 2, 5, 10, 90, undefined]) await t.test(`iOS selected access duration ${durationDays ?? 'default 7'} days`, async () => {
+    const f = fixture(); const result = await f.service.run({ email: f.email, platform: 'ios', durationDays }, f.actor);
+    const person = (await pool.query('select * from partner_people where email=$1', [f.email])).rows[0];
+    assert.equal(+person.expires_at - +person.starts_at, (durationDays ?? 7) * 86400000);
+    assert.equal(result.invitation.providerState, 'INVITED'); assert.equal(f.calls.ios.length, 1);
+    advance();
+    const again = await f.service.run({ email: f.email, platform: 'ios', durationDays: 5 }, f.actor);
+    assert.equal(+new Date(again.invitation.expiresAt), +person.expires_at);
+    advance(); await f.action(result.invitation.id, 'resend');
+    assert.equal(+(await pool.query('select expires_at from partner_people where id=$1', [person.id])).rows[0].expires_at, +person.expires_at);
+  });
+  await t.test('iOS invalid selector values never provision or call Apple/mail', async () => {
+    const f = fixture();
+    for (const durationDays of [0, -1, 91, 2.5, '', ' ', 'abc', '2', null, true, {}])
+      await assert.rejects(f.service.run({ email: f.email, platform: 'ios', durationDays }, f.actor), { code: 'invalid_duration' });
+    assert.equal(f.calls.ios.length + f.calls.email.length, 0);
+  });
+  await t.test('iOS one-day expiry cannot be reset by invite or OTP; explicit extension remains separate', async () => {
+    const f = fixture(); const original = await f.service.run({ email: f.email, platform: 'ios', durationDays: 1 }, f.actor);
+    const person = (await pool.query('select id,expires_at from partner_people where email=$1', [f.email])).rows[0];
+    clock = +person.expires_at;
+    const count = f.calls.email.length;
+    await assert.rejects(f.invite(), { code: 'preview_access_inactive' });
+    const resend = await f.action(original.invitation.id, 'resend');
+    assert.equal(resend.ok, false); assert.equal(resend.invitation.error, 'preview_access_inactive');
+    const mail = { configured: true, send() { assert.fail('Expired access must not issue another OTP'); } };
+    const login = createPartnerAccessService({ dbPool: pool, secret: 'local-expiry-test', signToken() {}, mailAdapter: mail, now: () => clock });
+    await login.requestCode({ email: f.email, platform: 'ios', ip: '192.0.2.230' });
+    assert.equal(f.calls.email.length, count);
+    const extended = await access.changePerson(person.id, 'extend', { durationDays: 1 }, f.actor);
+    assert.equal(extended.person.access, 'active'); assert.equal(Date.parse(extended.person.expiresAt), clock + 86400000);
+  });
+
+  await t.test('iOS Custom extension is explicit, bounded and cannot restore revoked or disabled access', async () => {
+    const f=fixture();const result=await f.service.run({email:f.email,platform:'ios',durationDays:2},f.actor);
+    const person=(await pool.query('select * from partner_people where email=$1',[f.email])).rows[0];
+    const expiry=new Date(person.expires_at).toISOString();
+    for(const durationDays of [0,-1,91,2.5,'','abc','2',null])
+      await assert.rejects(access.changePerson(person.id,'extend',{durationDays},f.actor),{code:'invalid_duration'});
+    await assert.rejects(access.changePerson(person.id,'extend',{expiresAt:'2099-01-01T00:00:00Z'},f.actor),{code:'invalid_expiry'});
+    await assert.rejects(access.createPerson({email:'long@example.test',organizationId:org.id,expiresAt:'2099-01-01T00:00:00Z'},f.actor),{code:'invalid_expiry'});
+    const extended=await access.changePerson(person.id,'extend',{durationDays:10,expectedExpiresAt:expiry},f.actor);
+    assert.equal(Date.parse(extended.person.expiresAt),Date.parse(expiry)+10*86400000);
+    await assert.rejects(access.changePerson(person.id,'extend',{durationDays:10,expectedExpiresAt:expiry},f.actor),{code:'expiry_changed'});
+    for(const action of ['revoke','update']) {
+      await access.changePerson(person.id,action,action==='update'?{status:'disabled'}:{},f.actor);
+      const next=await access.changePerson(person.id,'extend',{durationDays:5},f.actor);
+      assert.equal(next.person.access,action==='update'?'disabled':'revoked');
+      await assert.rejects(f.service.run({email:f.email,platform:'ios',durationDays:90},f.actor),{code:'preview_access_inactive'});
+    }
+    assert.equal(f.calls.ios.length,1);assert.equal(f.calls.email.length,1);
+  });
+
   await t.test("production Android authority blocks legacy Android side effects while iOS remains staging", async () => {
     const f = fixture(); f.env.ZIPPI_ANDROID_TESTER_REMOTE_ENABLED = "true";
     await assert.rejects(f.invite("android"), error => error.code === "android_production_authority_required");

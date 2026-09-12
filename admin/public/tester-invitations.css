@@ -1,7 +1,7 @@
 .tester-invitation-panel { margin-bottom: 24px; }
 #tester-invite-form { display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap; margin: 24px 26px 18px; }
-.tester-email, .tester-organization { flex: 1 1 240px; display: grid; gap: 8px; }
-.tester-email input, .tester-organization select { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--bg-soft); color: var(--text); color-scheme: dark; }
+.tester-email, .tester-organization, .tester-duration { flex: 1 1 240px; display: grid; gap: 8px; }
+.tester-email input, .tester-organization select, .tester-duration select, .tester-duration input, .android-tester-confirm input, .android-tester-confirm select { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--bg-soft); color: var(--text); color-scheme: dark; }
 #tester-invite-form fieldset { display: flex; gap: 20px; border: 0; padding: 0 0 12px; margin: 0; }
 #tester-invite-form legend { margin-bottom: 12px; }
 #tester-invite-form input[type=radio] { accent-color: var(--gold); }
@@ -13,3 +13,10 @@
 .tester-secondary { display: block; font-size: 12px; color: var(--muted); margin-top: 5px; }
 .tester-error { color: #ffc4ba; font-size: 12px; max-width: 240px; margin-top: 8px; }
 @media (max-width: 600px) { #tester-invite-form .primary-button { width: 100%; } }
+
+#tester-invite-form .tester-duration { min-width: 140px; }
+.android-tester-confirm label { display: grid; gap: 8px; margin-bottom: 20px; }
+
+.tester-duration-custom[hidden], .android-tester-confirm label[hidden] { display: none; }
+.tester-duration-error:empty { display: none; }
+.tester-duration-error { flex-basis: 100%; max-width: none; margin: 0; }

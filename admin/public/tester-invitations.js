@@ -19,6 +19,7 @@
     mail_delivery_check_required: "Delivery is uncertain and the safe retry window has elapsed. Check Resend before taking further action.",
     preview_access_inactive: "Preview access is inactive. Use Extend or Restore in Partner Access before retrying.",
     invitation_cooldown: "Please allow five minutes between attempts or resends.", invitation_in_progress: "An invitation is already running. Refresh the list shortly.",
+    invalid_duration: "Enter a whole number of days from 1 to 90.",
     invalid_email: "Enter a valid email address.", invalid_platform: "Choose iOS or Android.", rate_limited: "Invitation limit reached. Try again later.",
     email_domain_not_allowed: "This email domain is not allowed by the tester organization.", admin_auth_required: "Your admin session has expired. Sign in again.",
   };
@@ -43,7 +44,7 @@
     form.querySelector('input[value="android"]').disabled = !config?.platforms.android && !form.dataset.androidProductionEnabled;
     document.getElementById("tester-android-status").textContent = form.dataset.androidProductionEnabled ? "(production)" : config?.platforms.android ? "" : "(setup pending)";
     document.getElementById("tester-policy").textContent = config?.policyConfigured
-      ? `New previews last ${config.durationDays} days with Flights, Hotels and Combined Trip on, Checkout off. Existing access settings are preserved.` : "Default preview policy needs setup.";
+      ? "The selected duration applies to new Zippi access only, with Flights, Hotels and Combined Trip on, Checkout off. Existing expiry is preserved." : "Default preview policy needs setup.";
     document.getElementById("tester-readiness").textContent = config?.qaOnly
       ? `QA only: ${config.qaOnly.email} on iOS. General invitations remain disabled.`
       : qaMatch ? "This QA account stays in Zippi Dashboard QA; it will not be added to Zippi Partners."
@@ -98,7 +99,11 @@
     } catch (error) { message.textContent = error.message; }
     finally { pending = false; try { await load(); } catch { message.textContent += " Refresh the list to check the recorded outcome."; } readiness(); }
   }
-  form.addEventListener("submit", event => { event.preventDefault(); if (!submit.disabled && form.elements.platform.value !== "android") operate("", { email: form.elements.email.value, organizationId: form.elements.organizationId.value || undefined, platform: form.elements.platform.value }); });
+  form.addEventListener("submit", event => {
+    if (form.elements.platform.value === "android") return;
+    event.preventDefault(); const durationDays = testerAccessDuration.read(form);
+    if (!submit.disabled && durationDays !== null) operate("", { email: form.elements.email.value, organizationId: form.elements.organizationId.value || undefined, platform: form.elements.platform.value, durationDays });
+  });
   form.addEventListener("change", readiness);
   form.addEventListener("input", readiness);
   document.getElementById("tester-refresh").addEventListener("click", () => load().catch(() => { message.textContent = "Couldn't refresh invitations."; }));

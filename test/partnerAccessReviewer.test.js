@@ -32,7 +32,7 @@ test('isolated PostgreSQL reviewer lifecycle preserves ordinary OTP and entitlem
   const reviewerAccess = createStagingReviewerAccess(fixtureEnv(code));
   const service = createPartnerAccessService({ ...options, reviewerAccess });
   const org = (await service.createOrganization({ name: 'Local review fixture' }, 'test')).organization;
-  const person = (await service.createPerson({ email: 'appreview@heyzippi.com', organizationId: org.id, expiresAt: '2027-01-01T00:00:00Z', platforms: ['ios'] }, 'test')).person;
+  const person = (await service.createPerson({ email: 'appreview@heyzippi.com', organizationId: org.id, durationDays: 90, platforms: ['ios'] }, 'test')).person;
   const ordinary = (await service.createPerson({ email: 'normal@example.test', organizationId: org.id, durationDays: 7, platforms: ['ios'] }, 'test')).person;
   const input = { email: person.email, platform: 'ios', ip: '192.0.2.20' };
   const normal = { email: ordinary.email, platform: 'ios', ip: '192.0.2.21' };
@@ -45,7 +45,7 @@ test('isolated PostgreSQL reviewer lifecycle preserves ordinary OTP and entitlem
     await service.requestCode(input);
     const rows = (await pool.query('select * from partner_verifications where person_id=$1', [person.id])).rows;
     assert.equal(rows.length, 1); assert.ok(rows[0].code_digest.startsWith(REVIEW_DIGEST_PREFIX)); assert.ok(!rows[0].code_digest.includes(code));
-    assert.equal(new Date(rows[0].expires_at).toISOString(), '2027-01-01T00:00:00.000Z');
+    assert.equal(new Date(rows[0].expires_at).toISOString(), person.expiresAt);
     assert.equal(messages.length, 0);
     await rejects({ ...input, code: '000000' }); now += 11 * 60000;
     const reply = await service.verifyCode({ ...input, code });

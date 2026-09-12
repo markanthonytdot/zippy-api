@@ -27,15 +27,19 @@ test('existing signed dashboard dispatches Android remotely and iOS locally with
   assert.equal((await fetch(`${origin}/admin/api/android-testers`)).status,401);
   assert.equal((await post('android-testers',{action:'prepare',platform:'android',email:'qa@heyzippi.test'},{origin:'https://foreign.example'})).status,403);
   assert.equal(calls.android.length,0);
-  assert.equal((await post('android-testers',{action:'prepare',platform:'android',email:'qa@heyzippi.test',secret:'injected',features:{checkout:true}})).status,200);
+  assert.equal((await post('android-testers',{action:'prepare',platform:'android',email:'qa@heyzippi.test',durationDays:1,secret:'injected',features:{checkout:true}})).status,200);
   assert.equal(calls.android.length,1); assert.equal(calls.ios.length,0); assert.equal(calls.android[0].actor,'local-stage-admin');
-  assert.equal(calls.android[0].secret,undefined); assert.equal(calls.android[0].features,undefined);
-  assert.equal((await post('tester-invitations',{platform:'ios',email:'ios-qa@heyzippi.test'})).status,200);
+  assert.equal(calls.android[0].durationDays,1); assert.equal(calls.android[0].secret,undefined); assert.equal(calls.android[0].features,undefined);
+  assert.equal((await post('tester-invitations',{platform:'ios',email:'ios-qa@heyzippi.test',durationDays:30})).status,200);
   assert.equal(calls.android.length,1); assert.equal(calls.ios.length,1); assert.equal(calls.ios[0][0].platform,'ios');
+  assert.equal(calls.ios[0][0].durationDays,30);
   assert.deepEqual(calls.ios[0][3],{authenticatedAdmin:true});
   const page = await (await fetch(`${origin}/admin/partner-access`,{headers:{cookie}})).text();
   assert.match(page,/tester-google-email-help/); assert.match(page,/android-testers.js/); assert.match(page,/tester-invitations.js/);
   assert.ok(!page.includes(bridge));
+  assert.match(page,/name="durationDays"/); assert.match(page,/value="7" selected/);
+  const helper=await fetch(`${origin}/admin/assets/tester-access-duration.js`,{headers:{cookie}});
+  assert.equal(helper.status,200);assert.match(await helper.text(),/expectedExpiresAt/);
 });
 test('missing Android bridge does not silently provision in staging', async () => {
   const remote = createAndroidTesterRemote({env:{},fetchImpl(){assert.fail('No remote call expected');}});

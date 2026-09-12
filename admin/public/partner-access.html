@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="robots" content="noindex,nofollow,noarchive">
   <title>Partner Access · Zippi Admin</title>
+  <script src="/admin/assets/tester-access-duration.js" defer></script>
   <link rel="stylesheet" href="/admin/assets/admin.css">
   <link rel="stylesheet" href="/admin/assets/partner-access.css">
   <script src="/admin/assets/partner-access.js" defer></script>
@@ -42,8 +43,12 @@
           <label class="tester-email"><span id="tester-email-label">Email</span><input type="email" name="email" placeholder="person@example.com" maxlength="254" autocomplete="off" required></label>
           <label class="tester-organization">Organization<select name="organizationId"><option value="">Use existing or default organization</option></select></label>
           <fieldset><legend>Platform</legend><label><input type="radio" name="platform" value="ios" checked> iOS</label><label><input type="radio" name="platform" value="android" disabled> Android <span id="tester-android-status">(setup pending)</span></label></fieldset>
+          <label class="tester-duration">Access duration<select name="durationDays" aria-describedby="tester-duration-help"><option value="1">1 day</option><option value="3">3 days</option><option value="7" selected>7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="custom">Custom</option></select></label>
+          <label id="tester-custom-days-label" class="tester-duration tester-duration-custom" hidden>Number of days<input name="customDurationDays" type="number" min="1" max="90" step="1" disabled aria-describedby="tester-duration-error"></label>
+          <p id="tester-duration-error" class="tester-error tester-duration-error" role="alert"></p>
           <button id="tester-invite-submit" class="primary-button" type="submit" disabled>Invite to Zippi</button>
         </form>
+        <p id="tester-duration-help" class="form-note">For new Zippi access only. Existing expiry is preserved. Expiry does not remove Google Play or TestFlight membership.</p>
         <p id="tester-google-email-help" class="form-note" hidden>Use the email connected to your Google Play account. This may be different from your work email.</p>
         <p id="tester-policy" class="form-note"></p>
         <p id="tester-readiness" class="form-note" role="status"></p>
@@ -69,8 +74,8 @@
       <div class="panel-heading"><h2 id="person-title">Edit access</h2><button type="button" data-close class="text-button">Cancel</button></div>
       <p id="person-copy" class="form-note"></p>
       <div id="duration-fields">
-        <label>Duration<select name="duration"><option value="1">1 day</option><option value="3">3 days</option><option value="7" selected>7 days</option><option value="14">14 days</option><option value="custom">Custom expiry</option></select></label>
-        <label id="custom-expiry-label" hidden>Expires at <span class="form-note">(your local time)</span><input name="expiresAt" type="datetime-local"></label>
+        <label>Duration<select name="duration"><option value="1">1 day</option><option value="3">3 days</option><option value="7" selected>7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="custom">Custom</option></select></label>
+        <label id="custom-expiry-label" hidden>Number of days<input name="customDurationDays" type="number" min="1" max="90" step="1" disabled aria-describedby="person-error"></label>
       </div>
       <div id="entitlement-fields">
         <fieldset><legend>Platforms</legend><label class="partner-toggle"><input type="checkbox" name="ios" checked>iOS</label><label class="partner-toggle"><input type="checkbox" name="android" checked>Android</label></fieldset>

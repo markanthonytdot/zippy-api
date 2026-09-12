@@ -40,7 +40,7 @@ async function partnerApi(path = "", body) {
       503: "Partner Access is not configured yet. Check the local setup instructions.",
     };
     const deletionErrors = { delete_confirmation_required: "Confirm the complete person deletion.", delete_target_changed: "This person's records changed. Cancel, refresh and confirm the updated person.", invitation_in_progress: "An invitation is in progress. Wait for it to finish, then try again." };
-    throw new Error(deletionErrors[payload.error] || messages[response.status] || "Partner Access could not be updated. Please try again.");
+    throw new Error((payload.error === "expiry_changed" ? "Expiry changed. Refresh and review it before extending." : null) || deletionErrors[payload.error] || messages[response.status] || "Partner Access could not be updated. Please try again.");
   }
   return payload;
 }
@@ -58,8 +58,8 @@ function renderPartners() {
   const people = partnerState.people.filter((person) => !selected || (selected === "unassigned" ? !person.organizationId : person.organizationId === selected));
   byId("people-list").innerHTML = people.length ? people.map((person) => {
     const access = person.access || "unavailable";
-    const status = access === "active" && !person.activatedAt ? "pending" : access;
-    const labels = { active: "Active", pending: "Invited", scheduled: "Scheduled", expired: "Expired", revoked: "Revoked", unavailable: "Unavailable", none: "Unavailable" };
+    const status = person.status === "disabled" ? "disabled" : access;
+    const labels = { active: "Active", disabled: "Disabled", pending: "Invited", scheduled: "Scheduled", expired: "Expired", revoked: "Revoked", unavailable: "Unavailable", none: "Unavailable" };
     const safeStatus = Object.hasOwn(labels, status) ? status : "unavailable";
     const features = Object.entries(featureLabels).filter(([key]) => person.features?.[key] === true).map(([, label]) => label);
     const platforms = (person.platforms || []).map((platform) => platform === "ios" ? "iOS" : platform === "android" ? "Android" : platform);
@@ -97,11 +97,13 @@ async function loadPartners() {
   }
 }
 
+let personDuration;
 function durationChanged() {
-  const form = byId("person-form");
-  const custom = form.elements.duration.value === "custom";
-  byId("custom-expiry-label").hidden = !custom;
-  form.elements.expiresAt.required = custom && partnerState.mode !== "edit";
+  personDuration.sync();
+  if (partnerState.mode === "edit") {
+    const input = byId("person-form").elements.customDurationDays;
+    input.disabled = true; input.required = false;
+  }
 }
 
 function openPerson(mode, person = null) {
@@ -114,7 +116,7 @@ function openPerson(mode, person = null) {
   byId("person-title").textContent = extending ? "Extend preview" : "Edit access";
   byId("save-person").textContent = extending ? "Extend preview" : "Save access";
   byId("person-copy").textContent = extending
-    ? `${person.email} · Add time from the current expiry, or today if it has passed. Revoked access stays revoked until you restore it.` : person.email;
+    ? `${person.email} · Current expiry: ${partnerDate(person.expiresAt)}. Add time from that expiry, or now if it has passed. Revoked or disabled access stays blocked until explicitly restored.` : person.email;
   byId("duration-fields").hidden = mode === "edit";
   byId("entitlement-fields").hidden = extending;
   for (const platform of ["ios", "android"]) form.elements[platform].checked = person ? person.platforms.includes(platform) : true;
@@ -124,20 +126,9 @@ function openPerson(mode, person = null) {
 }
 
 async function durationBody(form) {
-  if (form.elements.duration.value === "1") {
-    // Use the existing custom-expiry contract; the server retains all validation.
-    const { serverTime } = await partnerApi();
-    const now = new Date(serverTime).getTime();
-    const start = partnerState.mode === "extend"
-      ? Math.max(now, new Date(partnerState.selected.expiresAt).getTime())
-      : now;
-    if (!Number.isFinite(now) || !Number.isFinite(start)) throw new Error("Refresh the list and choose a valid start time.");
-    return { expiresAt: new Date(start + 86400000).toISOString() };
-  }
-  if (form.elements.duration.value !== "custom") return { durationDays: Number(form.elements.duration.value) };
-  const date = new Date(form.elements.expiresAt.value);
-  if (!Number.isFinite(date.getTime())) throw new Error("Choose a valid custom expiry.");
-  return { expiresAt: date.toISOString() };
+  const durationDays = personDuration.read();
+  if (durationDays === null) throw new Error(testerAccessDuration.errorText);
+  return { durationDays, expectedExpiresAt: partnerState.selected.expiresAt };
 }
 
 async function withPartnerSubmission(form, errorId, action) {
@@ -150,6 +141,9 @@ async function withPartnerSubmission(form, errorId, action) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  const durationForm = byId("person-form");
+  personDuration = testerAccessDuration.bind(durationForm.elements.duration, durationForm.elements.customDurationDays,
+    byId("custom-expiry-label"), byId("person-error"));
   byId("refresh").addEventListener("click", () => { partnerMessage(""); loadPartners(); });
   byId("organization-filter").addEventListener("change", renderPartners);
   byId("add-organization").addEventListener("click", () => {
