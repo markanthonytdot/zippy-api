@@ -11,6 +11,7 @@
   const iosSections = document.querySelectorAll('.partner-summary, .partner-list-panel');
   const productionOnly = document.body.dataset.testerAuthority === 'production';
   let config = { enabled: false }; let invitations = []; let busy = false;
+  let androidErrorText = null;
   const errors = {
     play_eligibility_unconfirmed: 'Add this email to a Play Console tester list, then confirm eligibility here before sending.',
     preview_access_inactive: 'Zippi preview access is inactive. No invitation was sent.',
@@ -23,6 +24,7 @@
     admin_auth_required: 'Your admin session ended. Sign in again.',
   };
   const explain = value => errors[value] || 'Production tester access could not be confirmed. Refresh and try again.';
+  function showError(text) { androidErrorText = text; message.textContent = text; }
   const node = (tag, text, className) => { const n = document.createElement(tag); n.textContent = text; if (className) n.className = className; return n; };
   function confirmAction(email, description) {
     return new Promise(resolve => {
@@ -96,15 +98,27 @@
     render();
   }
   async function operate(body) {
-    if (busy) return; busy = true; render(); message.textContent = 'Updating production Android tester access…';
+    if (busy) return; busy = true; androidErrorText = null; render(); message.textContent = 'Updating production Android tester access…';
     try {
       const result = await api(body);
       message.textContent = result.invitation.error ? explain(result.invitation.error) : body.action === 'prepare'
         ? 'Access prepared. No email sent. Confirm Play eligibility before sending the invitation.'
         : body.action === 'confirm' ? 'Manual Play eligibility confirmed. No email sent.'
         : 'Action recorded. Zippi access, Play eligibility and email delivery are shown separately below.';
-    } catch (error) { message.textContent = error.message; }
-    finally { busy = false; try { await load(); } catch { message.textContent += ' Refresh to check the recorded outcome.'; } render(); }
+    } catch (error) { showError(error.message); }
+    finally { busy = false; try { await load(); } catch { showError(message.textContent + ' Refresh to check the recorded outcome.'); } render(); }
+  }
+  async function refresh() {
+    if (busy) return;
+    const previousError = androidErrorText;
+    try {
+      await load();
+      // Clear only a recovered Android error, not an iOS message or a newer action.
+      if (!busy && form.elements.platform.value === 'android' && previousError !== null
+        && androidErrorText === previousError && message.textContent === previousError) {
+        androidErrorText = null; message.textContent = '';
+      }
+    } catch { if (form.elements.platform.value === 'android') showError(explain()); }
   }
   form.addEventListener('submit', event => {
     if (form.elements.platform.value !== 'android') return;
@@ -116,7 +130,7 @@
     if (form.elements.platform.value === 'ios') submit.textContent = 'Invite to Zippi'; render();
   });
   document.addEventListener('android-tester-render', render);
-  document.getElementById('tester-refresh').addEventListener('click', () => load().catch(() => { if (form.elements.platform.value === 'android') message.textContent = explain(); }));
+  document.getElementById('tester-refresh').addEventListener('click', refresh);
   if (productionOnly) radio.checked = true;
-  load().catch(() => { if (productionOnly) message.textContent = explain(); render(); });
+  load().catch(() => { if (productionOnly) showError(explain()); render(); });
 })();
