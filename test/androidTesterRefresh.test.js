@@ -96,3 +96,16 @@ test('refresh cannot clear or duplicate an in-flight action', async () => {
   finish(response({ invitation: { error: null } })); await action;
   assert.equal(app.message(), 'Manual Play eligibility confirmed. No email sent.'); assert.equal(writes, 1);
 });
+
+test('post-send inbox guidance appears only after provider-accepted delivery', async () => {
+  for (const status of ['not_sent', 'sending', 'failed', 'sent']) {
+    let writes = 0; const data = result('confirmed'); data.invitations[0].emailStatus = status;
+    const app = ui(async (_url, options) => { if (options.method !== 'GET') writes++; return response(data); });
+    await tick();
+    const paragraphs = app.get('android-tester-rows').children[0].children.filter(e => e.tag === 'p').map(e => e.textContent);
+    const guidance = paragraphs.filter(text => text.includes('Spam or Promotions'));
+    assert.equal(guidance.length, status === 'sent' ? 1 : 0);
+    if (status === 'sent') assert.equal(guidance[0], "Invitation sent. If the tester doesn't see it within a few minutes, ask them to check Spam or Promotions.");
+    assert.equal(writes, 0);
+  }
+});
