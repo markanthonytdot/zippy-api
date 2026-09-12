@@ -50,14 +50,21 @@ test('signed dashboard → private bridge → production invitation → v10 OTP 
     assert.equal((await run({ action: 'prepare', email: 'qa@heyzippi.test' }, { origin: 'https://untrusted.example' })).status, 403);
     const list = await fetch(`${admin}/admin/api/android-testers`, { headers: { cookie } });
     assert.equal(list.headers.get('cache-control'), 'no-store');
+    const helper=await fetch(`${admin}/admin/assets/tester-access-duration.js`,{headers:{cookie}});
+    assert.equal(helper.status,200);assert.match(await helper.text(),/expectedExpiresAt/);
     const body = await list.json(); assert.equal(body.config.authority, 'production'); assert.ok(!JSON.stringify(body).includes(BRIDGE));
     for (const headers of [{}, { 'x-zippi-tester-admin': 'wrong' }, { 'x-zippi-tester-admin': BRIDGE, origin: admin }])
       assert.equal((await fetch(`${url}/internal/android-tester-admin`, { headers })).status, 401);
   });
   let id;
   await t.test('prepare, manual eligibility, one welcome and untrusted fields cannot expand access', async () => {
-    const prepared = await run({ action: 'prepare', email: 'android-http-qa@heyzippi.test', durationDays: 999, features: { checkout: true }, organizationId: 'forged' });
+    assert.equal((await run({ action: 'prepare', email: 'android-http-qa@heyzippi.test', durationDays: 999 })).status, 400);
+    const prepared = await run({ action: 'prepare', email: 'android-http-qa@heyzippi.test', durationDays: 2, features: { checkout: true }, organizationId: 'forged' });
     assert.equal(prepared.status, 200); id = prepared.body.invitation.id;
+    const expiry = prepared.body.invitation.expiresAt;
+    const person = (await f.pool.query('select starts_at,expires_at from partner_people where email=$1', ['android-http-qa@heyzippi.test'])).rows[0];
+    assert.equal(+person.expires_at - +person.starts_at, 2*86400000);
+    assert.equal((await run({action:'prepare',email:'android-http-qa@heyzippi.test',durationDays:30})).body.invitation.expiresAt,expiry);
     assert.equal(prepared.body.invitation.playEligibility, 'not_confirmed'); assert.equal(f.state.emails.length, 0);
     assert.equal((await run({ action: 'send', id })).status, 409);
     assert.equal((await run({ action: 'confirm', id })).status, 400);
@@ -65,6 +72,14 @@ test('signed dashboard → private bridge → production invitation → v10 OTP 
     assert.equal((await run({ action: 'send', id })).status, 200);
     assert.equal((await run({ action: 'send', id })).status, 200); assert.equal(f.state.emails.length, 1);
     assert.equal((await run({ action: 'prepare', platform: 'ios', email: 'ios@heyzippi.test' })).status, 400);
+  });
+  await t.test('explicit extension passes the signed bridge and stale confirmation cannot extend twice', async () => {
+    const invitation = (await service.list()).invitations.find(item=>item.id===id);
+    const request={action:'extend',id,durationDays:10,confirm:true,expectedExpiresAt:invitation.expiresAt};
+    const updated=await run(request);assert.equal(updated.status,200);
+    assert.equal(Date.parse(updated.body.invitation.expiresAt),Date.parse(invitation.expiresAt)+10*86400000);
+    assert.equal(updated.body.invitation.playEligibility,'confirmed');assert.equal(updated.body.invitation.emailStatus,'sent');
+    assert.equal((await run(request)).status,409);assert.equal(f.state.emails.length,1);
   });
   let token;
   await t.test('exact Android wire payload verifies; claims retained by production signer and hydration', async () => {

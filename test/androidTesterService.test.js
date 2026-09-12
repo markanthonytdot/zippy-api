@@ -80,7 +80,7 @@ test('Android tester access and manual distribution lifecycle', async t => {
     assert.equal(result.invitation.access, 'active'); assert.equal(result.invitation.playEligibility, 'removed');
     await assert.rejects(f.run('send', { id: row.id }), { code: 'play_eligibility_unconfirmed' });
     await f.run('confirm', { id: row.id, confirm: true }); result = await f.run('disable', { id: row.id });
-    assert.equal(result.invitation.access, 'revoked'); assert.equal(result.invitation.playEligibility, 'confirmed');
+    assert.equal(result.invitation.access, 'disabled'); assert.equal(result.invitation.playEligibility, 'confirmed');
   });
   await t.test('new actions audit safe state; no email payload/OTP/token in dashboard projection', async t => {
     const f = await fixture(t); const row = await f.prepare(); await f.run('confirm', { id: row.id, confirm: true }); await f.run('send', { id: row.id });
@@ -91,7 +91,8 @@ test('Android tester access and manual distribution lifecycle', async t => {
   await t.test('untrusted platform/features/org cannot expand provisioning permissions', async t => {
     const f = await fixture(t);
     await assert.rejects(f.service.run({ action: 'prepare', platform: 'ios', email: 'qa@heyzippi.test' }, 'qa'), { code: 'invalid_android_action' });
-    const result = await f.run('prepare', { email: 'qa@heyzippi.test', features: { checkout: true }, organizationId: 'untrusted', durationDays: 999 });
+    await assert.rejects(f.run('prepare', { email: 'qa@heyzippi.test', durationDays: 999 }), { code: 'invalid_duration' });
+    const result = await f.run('prepare', { email: 'qa@heyzippi.test', features: { checkout: true }, organizationId: 'untrusted' });
     const person = (await f.pool.query('select * from partner_people')).rows[0];
     assert.deepEqual(person.platforms, ['android']); assert.equal(person.features.checkout, false);
     assert.equal(+new Date(person.expires_at) - +new Date(person.starts_at), 7 * 86400000);

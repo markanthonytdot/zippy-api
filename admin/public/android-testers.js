@@ -20,6 +20,9 @@
     mail_delivery_check_required: 'Delivery is uncertain. Check the email provider before attempting another send.',
     rate_limited: 'Too many actions. Please try again later.',
     invalid_email: 'Enter a valid Google Play email address.',
+    invalid_duration: 'Enter a whole number of days from 1 to 90.',
+    expiry_changed: 'Access expiry changed since this page loaded. Refresh and review it before extending.',
+    invalid_expiry: 'Refresh and choose a valid access duration.',
     admin_auth_required: 'Your admin session ended. Sign in again.',
   };
   const explain = value => errors[value] || 'Production tester access could not be confirmed. Refresh and try again.';
@@ -54,14 +57,15 @@
     submit.textContent = 'Prepare Android invitation';
     submit.disabled = busy || !config.enabled || !config.policyConfigured;
     document.getElementById('tester-policy').textContent = config.enabled
-      ? `Android preview access is managed in production. New previews last ${config.durationDays} days. Existing access is preserved.` : 'Production Android tester setup is pending.';
+      ? 'Android preview access is managed in production. The selected duration applies to new testers only. Existing expiry is preserved.' : 'Production Android tester setup is pending.';
     document.getElementById('tester-readiness').textContent = 'Prepare access → add the email in Play Console → confirm eligibility → send invitation. Google Play enrollment is manual.';
     rows.replaceChildren();
     if (!invitations.length) rows.append(node('p', 'No production Android testers recorded.'));
     for (const item of invitations) {
       const card = node('article', '', 'android-tester-card');
       card.append(node('strong', item.email));
-      card.append(node('p', `Zippi access: ${{ active: 'Active', revoked: 'Revoked', expired: 'Expired', scheduled: 'Scheduled', unavailable: 'Unavailable' }[item.access] || 'Unavailable'}`));
+      card.append(node('p', `Zippi access: ${{ active: 'Active', disabled: 'Disabled', revoked: 'Revoked', expired: 'Expired', scheduled: 'Scheduled', unavailable: 'Unavailable' }[item.access] || 'Unavailable'}`));
+      card.append(node('p', `Expires: ${testerAccessDuration.format(item.expiresAt)}`));
       card.append(node('p', `Play eligibility: ${{ confirmed: 'Confirmed', not_confirmed: 'Not confirmed', removed: 'Removed' }[item.playEligibility] || 'Not confirmed'}`));
       card.append(node('p', `Invitation email: ${{ not_sent: 'Not sent', sending: 'Sending / unconfirmed', sent: 'Sent (provider accepted)', failed: 'Failed / unconfirmed' }[item.emailStatus] || 'Not sent'}`));
       if (item.emailStatus === 'sent') card.append(node('p', "Invitation sent. If the tester doesn't see it within a few minutes, ask them to check Spam or Promotions."));
@@ -86,6 +90,12 @@
         action('Revoke Zippi access', 'revoke', false, 'Revoke production Zippi preview access? Play eligibility and the installed app remain unchanged.');
         action('Disable Zippi access', 'disable', false, 'Disable production Zippi preview access? Play eligibility and the installed app remain unchanged.');
       }
+      const extend = node('button', 'Extend access', 'text-button'); extend.type = 'button'; extend.disabled = busy;
+      extend.addEventListener('click', async () => {
+        const selection = await testerAccessDuration.extend(item);
+        if (selection) await operate({ action: 'extend', platform: 'android', id: item.id, ...selection });
+      });
+      controls.append(extend);
       card.append(controls); rows.append(card);
     }
   }
@@ -101,7 +111,7 @@
     try {
       const result = await api(body);
       message.textContent = result.invitation.error ? explain(result.invitation.error) : body.action === 'prepare'
-        ? 'Access prepared. No email sent. Confirm Play eligibility before sending the invitation.'
+        ? `Access prepared. Existing expiry is preserved for returning testers. Expires: ${testerAccessDuration.format(result.invitation.expiresAt)}. No email sent.`
         : body.action === 'confirm' ? 'Manual Play eligibility confirmed. No email sent.'
         : 'Action recorded. Zippi access, Play eligibility and email delivery are shown separately below.';
     } catch (error) { message.textContent = error.message; }
@@ -110,7 +120,8 @@
   form.addEventListener('submit', event => {
     if (form.elements.platform.value !== 'android') return;
     event.preventDefault();
-    if (!submit.disabled) operate({ action: 'prepare', platform: 'android', email: form.elements.email.value });
+    const durationDays = testerAccessDuration.read(form);
+    if (!submit.disabled && durationDays !== null) operate({ action: 'prepare', platform: 'android', email: form.elements.email.value, durationDays });
   });
   form.addEventListener('change', event => {
     if (event.target.name === 'platform' && !busy) message.textContent = '';
