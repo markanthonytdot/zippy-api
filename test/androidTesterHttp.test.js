@@ -81,6 +81,20 @@ test('signed dashboard → private bridge → production invitation → v10 OTP 
     assert.equal(updated.body.invitation.playEligibility,'confirmed');assert.equal(updated.body.invitation.emailStatus,'sent');
     assert.equal((await run(request)).status,409);assert.equal(f.state.emails.length,1);
   });
+  await t.test('Set and Extend adjustment traverse signed dashboard and production bridge', async () => {
+    let row=(await service.list()).invitations.find(item=>item.id===id);
+    for(const [operation,durationDays] of [['set',1],['extend',5]]) {
+      const request={action:'adjust',id,operation,durationDays,confirm:true,expectedExpiresAt:row.expiresAt};
+      const before=Date.now();const reply=await run(request);assert.equal(reply.status,200);
+      const expiry=Date.parse(reply.body.invitation.expiresAt);
+      if(operation==='set') assert.ok(expiry>=before+86400000 && expiry<=Date.now()+86400000);
+      else assert.equal(expiry,Date.parse(row.expiresAt)+5*86400000);
+      assert.equal(reply.body.invitation.playEligibility,'confirmed');assert.equal(reply.body.invitation.emailStatus,'sent');
+      assert.equal((await run(request)).status,409);row=reply.body.invitation;
+    }
+    assert.equal((await run({action:'adjust',id,operation:'set',durationDays:91,confirm:true,expectedExpiresAt:row.expiresAt})).status,400);
+    assert.equal(f.state.emails.length,1);
+  });
   let token;
   await t.test('exact Android wire payload verifies; claims retained by production signer and hydration', async () => {
     const config = await (await fetch(`${url}/partner-access/config`)).json(); assert.equal(config.required, false);
