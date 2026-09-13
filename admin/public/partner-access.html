@@ -73,10 +73,6 @@
     <form id="person-form">
       <div class="panel-heading"><h2 id="person-title">Edit access</h2><button type="button" data-close class="text-button">Cancel</button></div>
       <p id="person-copy" class="form-note"></p>
-      <div id="duration-fields">
-        <label>Duration<select name="duration"><option value="1">1 day</option><option value="3">3 days</option><option value="7" selected>7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="custom">Custom</option></select></label>
-        <label id="custom-expiry-label" hidden>Number of days<input name="customDurationDays" type="number" min="1" max="90" step="1" disabled aria-describedby="person-error"></label>
-      </div>
       <div id="entitlement-fields">
         <fieldset><legend>Platforms</legend><label class="partner-toggle"><input type="checkbox" name="ios" checked>iOS</label><label class="partner-toggle"><input type="checkbox" name="android" checked>Android</label></fieldset>
         <fieldset><legend>Features</legend><label class="partner-toggle"><input type="checkbox" name="flights" checked>Flights</label><label class="partner-toggle"><input type="checkbox" name="hotels" checked>Hotels</label><label class="partner-toggle"><input type="checkbox" name="combinedTrip" checked>Combined Trip</label><label class="partner-toggle"><input type="checkbox" name="checkout">Checkout</label></fieldset>

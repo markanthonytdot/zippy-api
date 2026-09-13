@@ -22,7 +22,7 @@
     rate_limited: 'Too many actions. Please try again later.',
     invalid_email: 'Enter a valid Google Play email address.',
     invalid_duration: 'Enter a whole number of days from 1 to 90.',
-    expiry_changed: 'Access expiry changed since this page loaded. Refresh and review it before extending.',
+    expiry_changed: 'Access expiry changed since this page loaded. Refresh and review it before adjusting.',
     invalid_expiry: 'Refresh and choose a valid access duration.',
     admin_auth_required: 'Your admin session ended. Sign in again.',
   };
@@ -92,12 +92,12 @@
         action('Revoke Zippi access', 'revoke', false, 'Revoke production Zippi preview access? Play eligibility and the installed app remain unchanged.');
         action('Disable Zippi access', 'disable', false, 'Disable production Zippi preview access? Play eligibility and the installed app remain unchanged.');
       }
-      const extend = node('button', 'Extend access', 'text-button'); extend.type = 'button'; extend.disabled = busy;
-      extend.addEventListener('click', async () => {
-        const selection = await testerAccessDuration.extend(item);
-        if (selection) await operate({ action: 'extend', platform: 'android', id: item.id, ...selection });
+      const adjust = node('button', 'Adjust access', 'text-button'); adjust.type = 'button'; adjust.disabled = busy;
+      adjust.addEventListener('click', async () => {
+        const selection = await testerAccessDuration.adjust(item);
+        if (selection) await operate({ action: 'adjust', platform: 'android', id: item.id, ...selection });
       });
-      controls.append(extend);
+      controls.append(adjust);
       card.append(controls); rows.append(card);
     }
   }

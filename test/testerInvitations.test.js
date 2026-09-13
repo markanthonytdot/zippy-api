@@ -142,6 +142,28 @@ test("durable tester invitations with isolated PostgreSQL and mocked external de
     assert.equal(f.calls.ios.length,1);assert.equal(f.calls.email.length,1);
   });
 
+  await t.test('iOS adjusted expiry survives invite, instructions resend, Apple refresh/resend and OTP', async () => {
+    const f=fixture();const first=await f.invite();
+    let person=(await access.list()).people.find(p=>p.email===f.email);
+    person=(await access.changePerson(person.id,'adjust',{operation:'set',durationDays:1,expectedExpiresAt:person.expiresAt,confirm:true},f.actor)).person;
+    const expiry=person.expiresAt;
+    advance();assert.equal(new Date((await f.service.run({email:f.email,platform:'ios',durationDays:90},f.actor)).invitation.expiresAt).toISOString(),expiry);
+    for(const action of ['resend','refresh','apple-resend']) {
+      advance();await f.action(first.invitation.id,action);
+      assert.equal((await access.list()).people.find(p=>p.id===person.id).expiresAt,expiry);
+    }
+    const sent=[];const login=createPartnerAccessService({dbPool:pool,secret:'local-adjustment-otp',now:()=>clock,
+      mailAdapter:{configured:true,async send(m){sent.push(m)}},signToken:async()=> 'local-otp-token'});
+    const req={email:f.email,platform:'ios',ip:'192.0.2.125'};
+    await login.requestCode(req);clock+=61000;await login.requestCode(req);
+    const verified=await login.verifyCode({...req,code:sent.at(-1).code});assert.equal(verified.partnerAccess.expiresAt,expiry);
+    const claims={sub:`partner:${person.id}`,auth_method:'partner_preview',partner_invite_id:person.id,platform:'ios'};
+    assert.equal((await login.status(claims)).expiresAt,expiry);
+    clock=Date.parse(expiry);assert.equal((await login.status(claims)).access,'expired');
+    const count=sent.length;await login.requestCode(req);assert.equal(sent.length,count);
+    await assert.rejects(f.invite(),{code:'preview_access_inactive'});
+  });
+
   await t.test("production Android authority blocks legacy Android side effects while iOS remains staging", async () => {
     const f = fixture(); f.env.ZIPPI_ANDROID_TESTER_REMOTE_ENABLED = "true";
     await assert.rejects(f.invite("android"), error => error.code === "android_production_authority_required");

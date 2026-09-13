@@ -29,36 +29,48 @@ const testerAccessDuration = (() => {
   const format = value => value && Number.isFinite(Date.parse(value))
     ? new Date(value).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric',
       hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }) : 'Not available';
-  function extend(item) {
+  function adjust(item) {
     return new Promise(resolve => {
       const make = (tag, text) => { const n = document.createElement(tag); n.textContent = text; return n; };
       const dialog = make('dialog', ''); dialog.className = 'android-tester-confirm';
-      dialog.setAttribute('aria-label', 'Extend Zippi access');
+      dialog.setAttribute('aria-label', 'Adjust Zippi access');
+      const operation = make('select', ''); operation.id = 'tester-adjustment-operation';
+      for (const [value, text] of [['set', 'Set access duration from now'], ['extend', 'Extend current access']]) {
+        const option = make('option', text); option.value = value; operation.append(option);
+      }
+      operation.value = 'set';
+      const operationLabel = make('label', 'Operation'); operationLabel.append(operation);
+      const explanation = make('p', '');
+      const explain = () => { explanation.textContent = operation.value === 'set'
+        ? 'Sets expiry to the selected number of 24-hour days from server time when saved. This can shorten or increase access.'
+        : 'Adds the selected number of 24-hour days to the current expiry, or server time if it has expired.'; };
+      operation.addEventListener('change', explain); explain();
       const select = make('select', ''); select.id = 'tester-extension-days';
       for (const count of days) { const option = make('option', `${count} ${count === 1 ? 'day' : 'days'}`); option.value = String(count); select.append(option); }
       const custom = make('option', 'Custom'); custom.value = 'custom'; select.append(custom); select.value = '7';
-      const label = make('label', 'Add access time'); label.append(select);
+      const label = make('label', 'Access duration'); label.append(select);
       const input = make('input', ''); input.type = 'number'; input.min = '1'; input.max = '90'; input.step = '1';
       input.setAttribute('aria-describedby', 'tester-extension-error');
       const customLabel = make('label', 'Number of days'); customLabel.append(input);
       const error = make('p', ''); error.id = 'tester-extension-error'; error.className = 'tester-error'; error.setAttribute('role', 'alert');
       const control = bind(select, input, customLabel, error);
       const buttons = make('div', ''); buttons.className = 'tester-row-actions';
-      const cancel = make('button', 'Cancel'), confirm = make('button', 'Extend access');
+      const cancel = make('button', 'Cancel'), confirm = make('button', 'Save adjustment');
       cancel.type = confirm.type = 'button';
+      cancel.className = 'text-button'; confirm.className = 'primary-button';
       const finish = value => { dialog.close(); dialog.remove(); resolve(value); };
       cancel.addEventListener('click', () => finish(null));
       confirm.addEventListener('click', () => {
         const durationDays = control.read();
-        if (durationDays !== null) finish({ durationDays, expectedExpiresAt: item.expiresAt, confirm: true });
+        if (durationDays !== null) finish({ operation: operation.value, durationDays, expectedExpiresAt: item.expiresAt, confirm: true });
         else input.focus();
       });
       dialog.addEventListener('cancel', event => { event.preventDefault(); finish(null); });
       buttons.append(cancel, confirm);
       dialog.append(make('strong', item.email), make('p', `Current expiry: ${format(item.expiresAt)}`),
-        make('p', 'Adds time from the current expiry, or now if it has expired. Revoked or disabled access stays blocked. Google Play membership and invitation email stay unchanged.'), label, customLabel, error, buttons);
+        make('p', 'Revoked or disabled access stays blocked. Google Play, TestFlight membership and invitation email stay unchanged.'), operationLabel, explanation, label, customLabel, error, buttons);
       document.body.append(dialog); dialog.showModal(); cancel.focus();
     });
   }
-  return { read: () => invitation.read(), bind, parse, errorText, format, extend };
+  return { read: () => invitation.read(), bind, parse, errorText, format, adjust };
 })();

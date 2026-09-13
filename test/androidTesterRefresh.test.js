@@ -131,13 +131,14 @@ test('changing duration and refreshing never modifies existing access; explicit 
   await tick(); app.form.elements.durationDays.value = '1'; await app.form.fire('change'); await app.refresh();
   assert.equal(writes.length, 0);
   const nodes = parent => parent.children.flatMap(child=>[child,...nodes(child)]);
-  const pending = app.button('Extend access').fire('click');
+  const pending = app.button('Adjust access').fire('click');
   const current = nodes(app.body); assert.ok(current.some(e=>e.textContent.startsWith('Current expiry:')));
-  const select = current.find(e=>e.tag==='select'); select.value='3';
-  await current.find(e=>e.tag==='button' && e.textContent==='Extend access').fire('click'); await pending;
-  assert.equal(writes.length, 1); assert.equal(writes[0].action,'extend'); assert.equal(writes[0].durationDays,3);
+  current.find(e=>e.id==='tester-adjustment-operation').value='extend';
+  const select = current.find(e=>e.id==='tester-extension-days'); select.value='3';
+  await current.find(e=>e.tag==='button' && e.textContent==='Save adjustment').fire('click'); await pending;
+  assert.equal(writes.length, 1); assert.equal(writes[0].operation,'extend'); assert.equal(writes[0].action,'adjust'); assert.equal(writes[0].durationDays,3);
   assert.equal(writes[0].expectedExpiresAt,result().invitations[0].expiresAt); assert.equal(writes[0].confirm,true);
-  const cancel = app.button('Extend access').fire('click');
+  const cancel = app.button('Adjust access').fire('click');
   await nodes(app.body).find(e=>e.tag==='button' && e.textContent==='Cancel').fire('click'); await cancel;
   assert.equal(writes.length,1);
 });
@@ -170,16 +171,35 @@ test('Custom prepare rejects every invalid input inline without mutation then ac
   select.value='7';await select.fire('change');assert.equal(input.disabled,true);assert.equal(input.required,false);
   assert.equal(app.get('tester-custom-days-label').hidden,true);assert.equal(writes.length,4);
 });
-test('Custom Extend stays open on invalid input and submits once with stored expiry guard', async () => {
+test('Custom Set stays open on invalid input and submits once with stored expiry guard', async () => {
   const writes=[];const app=ui(async(_url,options)=>{
     if(options.method==='POST'){writes.push(JSON.parse(options.body));return response({invitation:result().invitations[0]});}
     return response(result());
-  });await tick();const pending=app.button('Extend access').fire('click');
+  });await tick();const pending=app.button('Adjust access').fire('click');
   const descendants=e=>e.children.flatMap(c=>[c,...descendants(c)]);const nodes=descendants(app.body);
-  const select=nodes.find(e=>e.tag==='select'),input=nodes.find(e=>e.tag==='input');
-  const confirm=nodes.find(e=>e.tag==='button'&&e.textContent==='Extend access');
+  const select=nodes.find(e=>e.id==='tester-extension-days'),input=nodes.find(e=>e.tag==='input');
+  const confirm=nodes.find(e=>e.tag==='button'&&e.textContent==='Save adjustment');
   select.value='custom';await select.fire('change');input.value='91';await confirm.fire('click');
   assert.equal(writes.length,0);assert.ok(nodes.some(e=>e.textContent.includes('whole number')));
   input.value='5';await input.fire('input');await confirm.fire('click');await pending;
   assert.equal(writes.length,1);assert.equal(writes[0].durationDays,5);assert.equal(writes[0].expectedExpiresAt,result().invitations[0].expiresAt);
+});
+
+test('Set and Extend show distinct explanations, refresh actual expiry and never send',async()=>{
+  for(const operation of ['set','extend']) {
+    const data=result('confirmed');const writes=[];const changed='2026-09-13T12:00:00Z';
+    const app=ui(async(_url,options)=>{
+      if(options.method==='POST'){writes.push(JSON.parse(options.body));data.invitations[0].expiresAt=changed;return response({invitation:data.invitations[0]});}
+      return response(data);
+    });await tick();const pending=app.button('Adjust access').fire('click');
+    const descendants=e=>e.children.flatMap(c=>[c,...descendants(c)]);const nodes=descendants(app.body);
+    const op=nodes.find(e=>e.id==='tester-adjustment-operation');assert.equal(op.value,'set');
+    op.value=operation;await op.fire('change');
+    assert.ok(nodes.some(e=>e.textContent.includes(operation==='set'?'shorten or increase':'Adds the selected')));
+    const select=nodes.find(e=>e.id==='tester-extension-days');assert.equal(select.value,'7');select.value='1';
+    await nodes.find(e=>e.tag==='button'&&e.textContent==='Save adjustment').fire('click');await pending;
+    assert.equal(writes.length,1);assert.equal(writes[0].operation,operation);assert.equal(writes[0].action,'adjust');
+    assert.ok(descendants(app.get('android-tester-rows')).some(e=>e.textContent.startsWith('Expires:')&&e.textContent.includes('13')));
+    assert.equal(app.button('Send Android invitation').disabled,false);
+  }
 });

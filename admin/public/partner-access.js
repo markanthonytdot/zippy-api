@@ -1,10 +1,10 @@
 "use strict";
 
 // The existing admin cookie authenticates every read/write. Nothing is stored in browser storage.
-const partnerState = { organizations: [], people: [], mode: "edit", selected: null, action: null };
+const partnerState = { organizations: [], people: [], selected: null, action: null };
 const byId = (id) => document.getElementById(id);
 const featureLabels = { flights: "Flights", hotels: "Hotels", combinedTrip: "Combined Trip", checkout: "Checkout" };
-const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+const dateFormat = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" });
 
 function escapePartnerText(value) {
   const node = document.createElement("span");
@@ -40,7 +40,7 @@ async function partnerApi(path = "", body) {
       503: "Partner Access is not configured yet. Check the local setup instructions.",
     };
     const deletionErrors = { delete_confirmation_required: "Confirm the complete person deletion.", delete_target_changed: "This person's records changed. Cancel, refresh and confirm the updated person.", invitation_in_progress: "An invitation is in progress. Wait for it to finish, then try again." };
-    throw new Error((payload.error === "expiry_changed" ? "Expiry changed. Refresh and review it before extending." : null) || deletionErrors[payload.error] || messages[response.status] || "Partner Access could not be updated. Please try again.");
+    throw new Error((payload.error === "expiry_changed" ? "Expiry changed. Refresh and review it before adjusting." : null) || deletionErrors[payload.error] || messages[response.status] || "Partner Access could not be updated. Please try again.");
   }
   return payload;
 }
@@ -70,7 +70,7 @@ function renderPartners() {
       <td>${escapePartnerText(features.join(" · ") || "No features")}<small>${escapePartnerText(platforms.join(" · ") || "No platforms")}</small></td>
       <td>${person.activatedAt ? `Activated ${escapePartnerText(partnerDate(person.activatedAt))}` : "Not activated"}<small>Last check ${escapePartnerText(partnerDate(person.lastCheckedAt))}</small></td>
       <td class="tester-person-status" data-email="${escapePartnerText(person.email)}" data-access="${escapePartnerText(access)}">Loading invitation status…</td>
-      <td><div class="partner-row-actions"><button type="button" class="text-button" data-action="extend">Extend</button><button type="button" class="text-button" data-action="edit">Edit access</button><button type="button" class="text-button" data-action="${person.revokedAt || person.status === "disabled" ? "restore" : "revoke"}">${person.revokedAt || person.status === "disabled" ? "Restore" : "Revoke"}</button><button type="button" class="text-button partner-destructive" data-action="delete">Delete</button></div></td>
+      <td><div class="partner-row-actions"><button type="button" class="text-button" data-action="adjust">Adjust access</button><button type="button" class="text-button" data-action="edit">Edit access</button><button type="button" class="text-button" data-action="${person.revokedAt || person.status === "disabled" ? "restore" : "revoke"}">${person.revokedAt || person.status === "disabled" ? "Restore" : "Revoke"}</button><button type="button" class="text-button partner-destructive" data-action="delete">Delete</button></div></td>
     </tr>`;
   }).join("") : '<tr><td colspan="7" class="partner-empty">No people in this organization. Use Invite to Zippi above to invite someone.</td></tr>';
   document.dispatchEvent(new Event("partner-people-rendered"));
@@ -97,38 +97,15 @@ async function loadPartners() {
   }
 }
 
-let personDuration;
-function durationChanged() {
-  personDuration.sync();
-  if (partnerState.mode === "edit") {
-    const input = byId("person-form").elements.customDurationDays;
-    input.disabled = true; input.required = false;
-  }
-}
-
-function openPerson(mode, person = null) {
-  partnerState.mode = mode;
+function openPerson(person) {
   partnerState.selected = person;
   const form = byId("person-form");
   form.reset();
   byId("person-error").textContent = "";
-  const extending = mode === "extend";
-  byId("person-title").textContent = extending ? "Extend preview" : "Edit access";
-  byId("save-person").textContent = extending ? "Extend preview" : "Save access";
-  byId("person-copy").textContent = extending
-    ? `${person.email} · Current expiry: ${partnerDate(person.expiresAt)}. Add time from that expiry, or now if it has passed. Revoked or disabled access stays blocked until explicitly restored.` : person.email;
-  byId("duration-fields").hidden = mode === "edit";
-  byId("entitlement-fields").hidden = extending;
-  for (const platform of ["ios", "android"]) form.elements[platform].checked = person ? person.platforms.includes(platform) : true;
-  for (const key of Object.keys(featureLabels)) form.elements[key].checked = person ? person.features[key] === true : key !== "checkout";
-  durationChanged();
+  byId("person-copy").textContent = person.email;
+  for (const platform of ["ios", "android"]) form.elements[platform].checked = person.platforms.includes(platform);
+  for (const key of Object.keys(featureLabels)) form.elements[key].checked = person.features[key] === true;
   byId("person-dialog").showModal();
-}
-
-async function durationBody(form) {
-  const durationDays = personDuration.read();
-  if (durationDays === null) throw new Error(testerAccessDuration.errorText);
-  return { durationDays, expectedExpiresAt: partnerState.selected.expiresAt };
 }
 
 async function withPartnerSubmission(form, errorId, action) {
@@ -141,23 +118,33 @@ async function withPartnerSubmission(form, errorId, action) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  const durationForm = byId("person-form");
-  personDuration = testerAccessDuration.bind(durationForm.elements.duration, durationForm.elements.customDurationDays,
-    byId("custom-expiry-label"), byId("person-error"));
   byId("refresh").addEventListener("click", () => { partnerMessage(""); loadPartners(); });
   byId("organization-filter").addEventListener("change", renderPartners);
   byId("add-organization").addEventListener("click", () => {
     byId("organization-form").reset(); byId("organization-error").textContent = ""; byId("organization-dialog").showModal();
   });
   document.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => button.closest("dialog").close()));
-  byId("person-form").elements.duration.addEventListener("change", durationChanged);
   byId("people-list").addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-action]");
     if (!button) return;
     const person = partnerState.people.find((p) => p.id === button.closest("tr").dataset.personId);
     if (!person) return;
     const action = button.dataset.action;
-    if (["edit", "extend"].includes(action)) return openPerson(action, person);
+    if (action === "edit") return openPerson(person);
+    if (action === "adjust") {
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        const selection = await testerAccessDuration.adjust(person);
+        if (selection) {
+          await partnerApi(`/people/${encodeURIComponent(person.id)}/adjust`, selection);
+          partnerMessage("Access expiry adjusted. Distribution and invitation status are unchanged.");
+          await loadPartners();
+        }
+      } catch (error) { partnerMessage(error.message); }
+      finally { button.disabled = false; }
+      return;
+    }
     if (action === "delete") {
       button.disabled = true;
       try {
@@ -182,15 +169,10 @@ document.addEventListener("DOMContentLoaded", () => {
   byId("person-form").addEventListener("submit", (event) => {
     event.preventDefault(); const form = event.currentTarget;
     withPartnerSubmission(form, "person-error", async () => {
-      const mode = partnerState.mode;
-      let body = mode === "edit" ? {} : await durationBody(form);
-      if (mode !== "extend") {
-        body.platforms = ["ios", "android"].filter((p) => form.elements[p].checked);
-        if (!body.platforms.length) throw new Error("Choose at least one platform.");
-        body.features = Object.fromEntries(Object.keys(featureLabels).map((key) => [key, form.elements[key].checked]));
-      }
-      const path = `/people/${encodeURIComponent(partnerState.selected.id)}/${mode === "edit" ? "update" : "extend"}`;
-      await partnerApi(path, body);
+      const body = { platforms: ["ios", "android"].filter((p) => form.elements[p].checked),
+        features: Object.fromEntries(Object.keys(featureLabels).map((key) => [key, form.elements[key].checked])) };
+      if (!body.platforms.length) throw new Error("Choose at least one platform.");
+      await partnerApi(`/people/${encodeURIComponent(partnerState.selected.id)}/update`, body);
       byId("person-dialog").close();
       partnerMessage("Preview access updated.");
       await loadPartners();
