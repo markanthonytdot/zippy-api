@@ -1115,6 +1115,7 @@ app.get("/v1/flights/booking/config", async (req, res) => {
 });
 
 app.use("/admin", createAdminDashboardRouter({
+  feedbackAdmin: require("./lib/feedbackAdminRemote").createFeedbackAdminRemote({ secret: process.env.ZIPPI_FEEDBACK_READ_BRIDGE_SECRET }),
   dbPool,
   partnerAccessService,
   testerInvitationService,

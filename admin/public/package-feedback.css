@@ -1,0 +1,8 @@
+.package-admin .feedback-summary { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.package-admin .feedback-table th:nth-child(3),.package-admin .feedback-table th:nth-child(5) { width:auto; }
+.package-admin .feedback-table th:nth-child(6) { width:28%; }
+.funnel-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:20px 0; }
+.funnel-summary article { min-width:0; }
+.funnel-summary strong { display:block; font-size:28px; margin:8px 0; }
+@media(max-width:1000px) { .package-admin .feedback-summary,.funnel-summary { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:420px) { .package-admin .feedback-summary,.funnel-summary { grid-template-columns:1fr; } }

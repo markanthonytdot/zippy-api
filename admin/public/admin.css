@@ -1554,3 +1554,10 @@ dialog::backdrop {
     grid-template-columns: 1fr;
   }
 }
+
+/* Keep the shared tester/feedback navigation usable on narrow screens. */
+@media (max-width: 980px) {
+  .sidebar.has-feedback { flex-wrap: wrap; overflow: visible; }
+  .sidebar.has-feedback nav { order: 3; width: 100%; flex-wrap: wrap; }
+  .sidebar.has-feedback .feedback-nav-label { display: block; flex-basis: 100%; margin: 8px 0 0; }
+}
