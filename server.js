@@ -25,6 +25,8 @@ const { createSpeechSessionHandler } = require("./lib/speechSession");
 const { createStripeWebhookHandler } = require("./lib/stripeWebhook");
 const { resolveFlightBookingMode } = require("./lib/flightBookingMode");
 const { createAdminDashboardRouter } = require("./lib/adminDashboard");
+const { createDemoFeedbackService } = require("./lib/demoFeedback");
+const { createDemoFeedbackPublicRouter } = require("./lib/demoFeedbackRoutes");
 const {
   DEFAULT_ROUNDING_RULES,
   SUPPORTED_CUSTOMER_CURRENCIES,
@@ -868,6 +870,12 @@ const dbPool = process.env.DATABASE_URL
     })
   : null;
 
+const demoFeedbackService = process.env.ZIPPI_DEMO_FEEDBACK_ENABLED === "true"
+  ? createDemoFeedbackService({ dbPool, secret: JWT_SECRET }) : null;
+if (demoFeedbackService) app.use("/v1/demo-feedback", createDemoFeedbackPublicRouter({
+  service: demoFeedbackService, allowedOrigins: process.env.DEMO_FEEDBACK_CORS_ORIGINS,
+}));
+
 const androidTesterService = require("./lib/androidTesterRuntime").installAndroidTesterRuntime(app, {
   dbPool, secret: JWT_SECRET, signToken: signZippyToken, verifyUser: requireVerifiedUser,
 });
@@ -1105,6 +1113,7 @@ app.get("/v1/flights/booking/config", async (req, res) => {
 
 app.use("/admin", createAdminDashboardRouter({
   dbPool,
+  demoFeedbackService,
   androidTesterService,
   adminSecret: ZIPPI_ADMIN_SECRET,
   sessionSecret: ZIPPI_ADMIN_SESSION_SECRET,
