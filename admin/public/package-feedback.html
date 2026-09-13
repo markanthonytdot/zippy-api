@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive"><meta name="referrer" content="no-referrer">
+  <title>Package demo feedback · Zippi Admin</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <link rel="stylesheet" href="/admin/assets/demo-feedback.css">
+  <link rel="stylesheet" href="/admin/assets/package-feedback.css">
+  <script src="/admin/assets/package-feedback.js" defer></script>
+</head>
+<body class="feedback-admin package-admin">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/admin/"><img class="brand-logo" src="/admin/assets/zippi-logo-nano.png" alt="Zippi"><span>Zippi Admin</span></a>
+      <nav aria-label="Admin navigation">
+        <p class="nav-label">Business</p>
+        <a href="/admin/overview"><span class="nav-icon">01</span><span>Overview</span></a>
+        <a href="/admin/partner-access"><span class="nav-icon">P</span><span>Partner Access</span></a>
+        <a href="/admin/demo-feedback"><span class="nav-icon">D</span><span>Flight demo</span></a>
+        <a href="/admin/package-feedback" class="active" aria-current="page"><span class="nav-icon">P</span><span>Package demo</span></a>
+      </nav>
+      <form method="post" action="/admin/logout"><button class="sign-out" type="submit">Sign out</button></form>
+    </aside>
+    <main class="feedback-main">
+      <header class="topbar"><div><p class="eyebrow">Private research workspace</p><h1>Package demo feedback</h1><p class="page-subtitle">Interest in planning flights and a hotel together, within a total trip budget.</p></div><span class="subtle-badge">Internal only</span></header>
+      <form id="filters" class="panel feedback-filters">
+        <label>Source<select name="source" id="source"><option value="">All sources</option></select></label>
+        <label>Likelihood<select name="likelihood"><option value="">All answers</option><option>Definitely</option><option>Probably</option><option>Probably not</option><option>Definitely not</option></select></label>
+        <label>More useful than separate search<select name="usefulness"><option value="">All answers</option><option>Yes</option><option>No</option><option>Not sure</option></select></label>
+        <label>Entry path<select name="entry_path"><option value="">All entries</option><option value="direct">Direct</option><option value="flight_thank_you">Flight thank-you</option></select></label>
+        <label>From (UTC)<input type="date" name="from" min="2000-01-01" max="2099-12-31"></label>
+        <label>Through (UTC)<input type="date" name="to" min="2000-01-01" max="2099-12-31"></label>
+        <label>Sort<select name="sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
+        <div class="filter-actions"><button type="submit" class="primary-button">Apply filters</button><button id="reset-filters" type="button" class="text-button">Reset</button><button id="export" type="button" class="text-button" disabled>Export CSV</button></div>
+      </form>
+      <p id="feedback-status" role="status" aria-live="polite">Loading feedback…</p>
+      <div id="feedback-results" hidden>
+        <section class="feedback-summary" id="summary" aria-label="Summary of filtered responses"></section>
+        <section class="panel"><h2>More useful than searching separately?</h2><dl id="usefulness" class="comprehension-breakdown"></dl></section>
+        <section class="panel"><h2>Entry paths</h2><p class="form-note">Package responses by the entry label on their link.</p><dl id="entries" class="comprehension-breakdown"></dl></section>
+        <section class="panel"><h2>Flight → package funnel</h2><p class="form-note">Choose dates from the package launch onward. Source and date filters apply here; survey-answer and entry filters apply only to package results.</p><div id="funnel" class="funnel-summary"></div><p class="form-note">Anonymous event counts, not unique people or linked responses. Click reporting is best effort; steps may fall on different dates, so period rates can exceed 100%.</p></section>
+        <section class="panel"><h2>By source</h2><div id="sources" class="source-breakdown"></div></section>
+        <section class="panel feedback-table-panel"><div class="panel-heading"><div><h2>Package responses</h2><p class="form-note">Times shown in your local timezone. Date filters and CSV timestamps use UTC.</p></div><span id="page-info"></span></div>
+          <div class="feedback-table-wrap" tabindex="0" role="region" aria-label="Feedback responses"><table class="feedback-table"><thead><tr><th scope="col">Date / time</th><th scope="col">Source</th><th scope="col">Entry path</th><th scope="col">Likelihood to use</th><th scope="col">More useful than separate search</th><th scope="col">Additional comments</th></tr></thead><tbody id="responses"></tbody></table></div>
+          <div class="pagination"><button id="previous" class="text-button" type="button">Previous</button><button id="next" class="text-button" type="button">Next</button></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</body></html>

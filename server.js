@@ -876,6 +876,10 @@ if (demoFeedbackService) app.use("/v1/demo-feedback", createDemoFeedbackPublicRo
   service: demoFeedbackService, allowedOrigins: process.env.DEMO_FEEDBACK_CORS_ORIGINS,
 }));
 
+const packageFeedbackService = require("./lib/packageFeedbackRoutes").installPackageFeedbackRuntime(app, {
+  dbPool, secret: JWT_SECRET,
+});
+
 const androidTesterService = require("./lib/androidTesterRuntime").installAndroidTesterRuntime(app, {
   dbPool, secret: JWT_SECRET, signToken: signZippyToken, verifyUser: requireVerifiedUser,
 });
@@ -1114,6 +1118,7 @@ app.get("/v1/flights/booking/config", async (req, res) => {
 app.use("/admin", createAdminDashboardRouter({
   dbPool,
   demoFeedbackService,
+  packageFeedbackService,
   androidTesterService,
   adminSecret: ZIPPI_ADMIN_SECRET,
   sessionSecret: ZIPPI_ADMIN_SESSION_SECRET,

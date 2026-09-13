@@ -4,7 +4,9 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const { discoverMigrations, runMigrations, migrationChecksum } = require('../lib/migrations');
 const production = require('./fixtures/demo-feedback-production-migrations.json');
-const migrations = discoverMigrations(path.join(__dirname, '../migrations'));
+// This regression suite freezes the original flight upgrade through 017.
+// Subsequent package migration history is independently checked in its own suite.
+const migrations = discoverMigrations(path.join(__dirname, '../migrations')).slice(0, 17);
 const feedbackNames = ['016_demo_feedback.sql', '017_demo_feedback_comprehension.sql'];
 
 test('feedback follows the exact production migration history with unique consecutive numbers', () => {

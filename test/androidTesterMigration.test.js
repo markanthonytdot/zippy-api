@@ -14,11 +14,11 @@ test('production-baseline migration guard, preflight, upgrade and restart', asyn
   t.after(async () => { await client.query(`drop schema ${schema} cascade`); client.release(); await pool.end(); });
   await client.query(`create schema ${schema}`); await client.query(`set search_path=${schema}`);
   const migrations = discoverMigrations(path.join(__dirname, '../migrations'));
-  assert.equal(migrations.length, 17);
+  assert.equal(migrations.length, 18);
   await runMigrations({ client, migrations: migrations.slice(0,12), log() {} });
   await client.query('begin read only');
   const before = await preflightAndroidTesterSchema(client, migrations); await client.query('rollback');
-  assert.deepEqual(before.pending, ['013_partner_access.sql','014_tester_invitations.sql','015_android_tester_eligibility.sql','016_demo_feedback.sql','017_demo_feedback_comprehension.sql']);
+  assert.deepEqual(before.pending, ['013_partner_access.sql','014_tester_invitations.sql','015_android_tester_eligibility.sql','016_demo_feedback.sql','017_demo_feedback_comprehension.sql','018_package_demo_feedback.sql']);
   await client.query('create table partner_people(id text)');
   await assert.rejects(preflightAndroidTesterSchema(client, migrations), /Untracked tester tables/);
   await client.query('drop table partner_people');
