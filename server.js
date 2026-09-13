@@ -1115,10 +1115,15 @@ app.get("/v1/flights/booking/config", async (req, res) => {
   });
 });
 
+app.use("/internal/feedback-read", require("./lib/feedbackReadBridge").createFeedbackReadBridgeRouter({
+  secret: process.env.ZIPPI_FEEDBACK_READ_BRIDGE_SECRET, flight: demoFeedbackService, packages: packageFeedbackService,
+}));
+
 app.use("/admin", createAdminDashboardRouter({
   dbPool,
   demoFeedbackService,
   packageFeedbackService,
+  feedbackAdminCanonical: process.env.ZIPPI_FEEDBACK_ADMIN_CANONICAL_ENABLED === "true",
   androidTesterService,
   adminSecret: ZIPPI_ADMIN_SECRET,
   sessionSecret: ZIPPI_ADMIN_SESSION_SECRET,
