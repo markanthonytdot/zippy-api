@@ -21,11 +21,14 @@
       <form method="post" action="/admin/logout"><button class="sign-out" type="submit">Sign out</button></form>
     </aside>
     <main class="feedback-main">
-      <header class="topbar"><div><p class="eyebrow">Private research workspace</p><h1>Demo feedback</h1><p class="page-subtitle">How people understand Zippi, and whether they would use it.</p></div><span class="subtle-badge">Internal only</span></header>
+      <header class="topbar"><div><p class="eyebrow">Private research workspace</p><h1>Demo feedback</h1><p class="page-subtitle">Combined demo results, with earlier surveys kept separately.</p></div><span class="subtle-badge">Internal only</span></header>
       <form id="filters" class="panel feedback-filters">
+        <label>Survey<select name="survey_version" id="survey-version"><option value="combined_demo_v3">Current · Combined demo</option><option value="multiple_choice_v2">Historical · Flight demo choice form</option><option value="free_text_v1">Historical · Flight demo original form</option></select></label>
         <label>Source<select name="source" id="source"><option value="">All sources</option></select></label>
         <label>Likelihood<select name="likelihood"><option value="">All answers</option><option>Definitely</option><option>Probably</option><option>Probably not</option><option>Definitely not</option></select></label>
-        <label>Recent flight shopper<select name="recent"><option value="">Yes and no</option><option value="yes">Yes</option><option value="no">No</option></select></label>
+        <label id="clarity-filter">Zippi clarity<select name="clarity"><option value="">All answers</option><option>Very clear</option><option>Somewhat clear</option><option>Not very clear</option><option>Not clear at all</option></select></label>
+        <label id="booked-filter">Booked travel in last 12 months<select name="booked"><option value="">Yes and no</option><option value="yes">Yes</option><option value="no">No</option></select></label>
+        <label id="recent-filter" hidden>Earlier recent flight shopper question<select name="recent" disabled><option value="">Yes and no</option><option value="yes">Yes</option><option value="no">No</option></select></label>
         <label>From (UTC)<input type="date" name="from" min="2000-01-01" max="2099-12-31"></label>
         <label>Through (UTC)<input type="date" name="to" min="2000-01-01" max="2099-12-31"></label>
         <label>Sort<select name="sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label>
@@ -33,12 +36,17 @@
       </form>
       <p id="feedback-status" role="status" aria-live="polite">Loading feedback…</p>
       <div id="feedback-results" hidden>
-        <section class="feedback-summary" id="summary" aria-label="Summary of filtered responses"></section>
-        <section class="panel" aria-labelledby="comprehension-title"><h2 id="comprehension-title">Understanding Zippi</h2><p id="comprehension-note" class="form-note"></p><dl id="comprehension-breakdown" class="comprehension-breakdown"></dl></section>
-        <section class="panel"><h2>Recent flight shoppers</h2><p class="form-note">People who searched for or booked a flight online in the last 12 months. Figures reflect the active filters.</p><div id="shoppers" class="shopper-summary"></div></section>
-        <section class="panel"><h2>By source</h2><div id="sources" class="source-breakdown"></div></section>
-        <section class="panel feedback-table-panel"><div class="panel-heading"><div><h2>Written responses</h2><p class="form-note">Times shown in your local timezone. Date filters and CSV timestamps use UTC.</p></div><span id="page-info"></span></div>
-          <div class="feedback-table-wrap" tabindex="0" role="region" aria-label="Feedback responses"><table class="feedback-table"><thead><tr><th scope="col">Date / time</th><th scope="col">Source</th><th scope="col">Comprehension / own words</th><th scope="col">Likelihood to use</th><th scope="col">Additional comments</th><th scope="col">Recent flight shopper</th></tr></thead><tbody id="responses"></tbody></table></div>
+        <section class="feedback-summary" id="response-totals" aria-label="Response counts across survey versions"></section>
+        <section class="panel survey-context" aria-labelledby="survey-title"><h2 id="survey-title">Current · Combined demo</h2><p id="survey-note" class="form-note"></p><p class="history-link"><a href="/admin/package-feedback">View historical package-demo responses and export</a></p></section>
+        <section class="feedback-summary" id="summary" aria-label="Summary of selected survey responses"></section>
+        <section class="panel" id="comprehension-panel" aria-labelledby="comprehension-title"><h2 id="comprehension-title">How clear is it what Zippi does?</h2><p id="comprehension-note" class="form-note"></p><dl id="comprehension-breakdown" class="comprehension-breakdown"></dl></section>
+        <section class="panel" aria-labelledby="likelihood-title"><h2 id="likelihood-title">Based on what you saw, how likely would you be to use Zippi when planning your next trip?</h2><p id="likelihood-note" class="form-note"></p><dl id="likelihood-breakdown" class="comprehension-breakdown"></dl></section>
+        <section class="panel" id="booked-panel" aria-labelledby="booked-title"><h2 id="booked-title">Have you personally booked a flight, hotel, or vacation package in the last 12 months?</h2><p id="booked-note" class="form-note"></p><dl id="booked-breakdown" class="comprehension-breakdown"></dl></section>
+        <section class="panel" id="validation-panel" aria-labelledby="validation-title"><h2 id="validation-title">Strongest validation segment</h2><p class="form-note">Answered Yes to booking travel in the last 12 months and Definitely or Probably to using Zippi.</p><div id="validation" class="shopper-summary validation-summary"></div><p id="validation-note" class="form-note"></p></section>
+        <section class="panel" id="shoppers-panel" hidden><h2>Earlier recent flight shoppers</h2><p class="form-note">The earlier flight survey asked about searching for or booking a flight online in the last 12 months. These answers are separate from the current booking question.</p><div id="shoppers" class="shopper-summary"></div></section>
+        <section class="panel"><h2>By source · selected survey</h2><div id="sources" class="source-breakdown"></div></section>
+        <section class="panel feedback-table-panel"><div class="panel-heading"><div><h2>Individual responses</h2><p class="form-note">Times shown in your local timezone. Date filters and CSV timestamps use UTC.</p></div><span id="page-info"></span></div>
+          <div class="feedback-table-wrap" tabindex="0" role="region" aria-label="Feedback responses"><table class="feedback-table"><thead><tr id="response-headings"></tr></thead><tbody id="responses"></tbody></table></div>
           <div class="pagination"><button id="previous" class="text-button" type="button">Previous</button><button id="next" class="text-button" type="button">Next</button></div>
         </section>
       </div>

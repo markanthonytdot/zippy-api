@@ -56,3 +56,13 @@ button:disabled { opacity:.5; cursor:default; }
   .feedback-table td::before { content:attr(data-label); display:block; font-size:11px; font-weight:700; color:var(--muted); margin-bottom:3px; }
   .feedback-table-panel .panel-heading { display:block; }
 }
+#response-totals { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.survey-context { border-left:3px solid var(--gold); }
+.history-link { margin:14px 0 0; font-size:14px; }
+.history-link a { color:var(--gold-strong); text-underline-offset:3px; }
+.validation-summary { grid-template-columns:repeat(2,minmax(0,1fr)); margin-bottom:20px; }
+.validation-summary span { display:block; margin-top:6px; }
+@media(max-width:450px) {
+  #response-totals { grid-template-columns:1fr; }
+  .comprehension-breakdown>div { gap:10px; }
+}

@@ -55,7 +55,28 @@ test('remote transport fails closed on upstream auth/error/redirect/content fail
  assert.equal((await fetch(base+'/api/demo-feedback')).status,401);assert.equal(calls,0);
  for(mode of ['401','403','500','302','badtype','throw']){const r=await fetch(base+'/api/demo-feedback',{headers:{'x-local-fixture-admin':'yes'}});assert.equal(r.status,503);assert.deepEqual(await r.json(),{ok:false,error:'feedback_unavailable'});}
 });
-test('feedback navigation has neutral labels, one active page, and native same-host links',()=>{
+test('feedback navigation separates current and historical pages with native same-host links',()=>{
  const html=feedbackNavigation('<aside class="sidebar"><nav><p class="nav-label">Business</p><a href="/admin/demo-feedback">Old</a></nav></aside>','package-feedback');
- assert.match(html,/Feedback<\/p>/);assert.match(html,/>Flight Demo Feedback</);assert.match(html,/>Package Demo Feedback</);assert.equal((html.match(/aria-current="page"/g)||[]).length,1);assert.equal((html.match(/href="\/admin\/demo-feedback"/g)||[]).length,1);assert.ok(!html.includes('https:'));
+ assert.match(html,/Feedback<\/p>/);assert.match(html,/>Demo feedback</);assert.match(html,/>Package feedback \(historical\)</);assert.equal((html.match(/aria-current="page"/g)||[]).length,1);assert.equal((html.match(/href="\/admin\/demo-feedback"/g)||[]).length,1);assert.ok(!html.includes('https:'));
+ const historical=feedbackNavigation('<title>Package demo feedback · Zippi Admin</title><h1>Package demo feedback</h1>','package-feedback');assert.match(historical,/<h1>Historical package demo feedback<\/h1>/);
+});
+
+test('remote reports and CSV preserve explicit current and historical survey filters',async t=>{
+ const forwarded=[];
+ const remote=createFeedbackAdminRemote({secret:'local-only-feedback-read-test-credential',fetchImpl:async(url,options)=>{
+  forwarded.push({url,options});
+  return new Response(url.includes('export.csv')?'survey_version\r\ncombined_demo_v3':JSON.stringify({ok:true}),{headers:{'Content-Type':url.includes('export.csv')?'text/csv':'application/json'}});
+ }});
+ const app=express();app.use((req,_res,next)=>{req.zippiAdmin={actor:'local-test'};next();});app.use('/api',remote.router);
+ const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();return new Promise(r=>server.close(r));});
+ const base=`http://127.0.0.1:${server.address().port}`;
+ for(const route of ['demo-feedback','demo-feedback/export.csv']){
+  const query=new URLSearchParams({survey_version:'combined_demo_v3',clarity:'Very clear',booked:'yes',likelihood:'Probably',source:'family'});
+  const response=await fetch(`${base}/api/${route}?${query}`);assert.equal(response.status,200);await response.text();
+  const passed=new URL(forwarded.at(-1).url);assert.equal(passed.searchParams.get('survey_version'),'combined_demo_v3');assert.equal(passed.searchParams.get('clarity'),'Very clear');assert.equal(passed.searchParams.get('booked'),'yes');
+ }
+ for(const survey of ['free_text_v1','multiple_choice_v2'])assert.equal((await fetch(`${base}/api/demo-feedback?survey_version=${survey}`)).status,200);
+ assert.equal((await fetch(base+'/api/demo-feedback')).status,200);assert.equal(new URL(forwarded.at(-1).url).searchParams.has('survey_version'),false);
+ assert.equal((await fetch(base+'/api/demo-feedback?endpoint=untrusted')).status,400);
+ assert.ok(forwarded.every(call=>Object.keys(call.options.headers).join(',')==='x-zippi-feedback-read'));
 });
