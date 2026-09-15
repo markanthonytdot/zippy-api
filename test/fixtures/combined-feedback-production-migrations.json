@@ -1,0 +1,77 @@
+{
+  "revision": "7582b1accc4b0de56f6e135a7712694613e081b2",
+  "migrations": [
+    {
+      "filename": "001_flight_booking_sessions.sql",
+      "checksum": "0384828c0d032505e4bff7b48a3cf8d9cfa9820a4f7f958607db79b49a7778bd"
+    },
+    {
+      "filename": "002_flight_booking_quote_lines.sql",
+      "checksum": "b154f1fbed28aae71e423afa1c7dc87e345a569bc98fbd848e4643e929adcd26"
+    },
+    {
+      "filename": "003_flight_booking_recovery_state.sql",
+      "checksum": "634e241c3f4a87c37d355357b20d66ba944b33fb891c0b5a0a1f51b921bb463c"
+    },
+    {
+      "filename": "004_flight_booking_operational_recovery.sql",
+      "checksum": "a475e27cea901702a4a1442994073bc5b3cc9d004255f1e36ae0baaf957685bb"
+    },
+    {
+      "filename": "005_flight_booking_two_sided_pricing.sql",
+      "checksum": "c83f225df33c90c38b373bd850771a52668c340302bfd15a6a88a14f678f6dba"
+    },
+    {
+      "filename": "006_flight_booking_pricing_protection.sql",
+      "checksum": "4bf60c2f5c9ff68ccad84178d10e832900a7cf94dea8e6e49407460c63e065ee"
+    },
+    {
+      "filename": "007_pricing_configuration_foundation.sql",
+      "checksum": "5d2f1b2003dc8bee7bedda0e8f957ad5539aacdd408fbca46034b432b9900707"
+    },
+    {
+      "filename": "008_flight_booking_pricing_config_audit.sql",
+      "checksum": "57cdd56b14c2f4e0afe38d27ca871ad213ad2ff7419619bd75dd3067cd4eade0"
+    },
+    {
+      "filename": "009_currency_settings_foundation.sql",
+      "checksum": "1a38c34396d70273077444e461667337ba5d807da36240fed97c3933ca97498e"
+    },
+    {
+      "filename": "010_flight_booking_trip_type.sql",
+      "checksum": "e2ff2e7f378c4581b316bfbadabb729ea9998046905a28305941b2c3a278b2df"
+    },
+    {
+      "filename": "011_hotel_booking_sessions.sql",
+      "checksum": "2a25f200992d6ba8f1b2dbf93a2efb1901ff843e883306173ecf50242a008108"
+    },
+    {
+      "filename": "012_flight_live_readiness.sql",
+      "checksum": "746193d21c4443cb86844cac2f7ec6b3527f70f64569500ec9c465f267a9810f"
+    },
+    {
+      "filename": "013_partner_access.sql",
+      "checksum": "3d5127a71e26772d78a0f3f7114e4b040e0c8b5a95403bcc35687e0559c6c668"
+    },
+    {
+      "filename": "014_tester_invitations.sql",
+      "checksum": "c5e66a5f8969046f341b2d55f7b17e50d725f9e52dc1da6a5714105c69dbd78f"
+    },
+    {
+      "filename": "015_android_tester_eligibility.sql",
+      "checksum": "4a7aa379f4cb38c9d852ca8b633060b35745677a44174ab2c4b9b32f87b4db2b"
+    },
+    {
+      "filename": "016_demo_feedback.sql",
+      "checksum": "a17b89d395f33ccc6fd722d19336dd87c3668a26329c9ee1ba11aede7169703f"
+    },
+    {
+      "filename": "017_demo_feedback_comprehension.sql",
+      "checksum": "cf8aef3dd1f13d80a6ba0588e79f22a059d04a383dc7265d60a5fdd2a8b7510c"
+    },
+    {
+      "filename": "018_package_demo_feedback.sql",
+      "checksum": "2df2100842216bef06311946c3d3ae6ace2c33f144bf1bf65d95402ca1702c7a"
+    }
+  ]
+}

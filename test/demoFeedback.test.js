@@ -106,7 +106,7 @@ test('real PostgreSQL + HTTP + existing admin authentication', {skip:!databaseUr
   await t.test('existing login grants protected dashboard and signed-cookie API access',async()=>{
     const login=await fetch(base+'/admin/session',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'secret=test-admin-key',redirect:'manual'});assert.equal(login.status,303);
     const setCookie=login.headers.get('set-cookie');for(const flag of ['HttpOnly','Secure','SameSite=Strict','Path=/admin']) assert.ok(setCookie.includes(flag));cookie=setCookie.split(';')[0];
-    const html=await fetch(base+'/admin/demo-feedback',{headers:{Cookie:cookie}});assert.equal(html.status,200);assert.ok((await html.text()).includes('Recent flight shoppers'));
+    const html=await fetch(base+'/admin/demo-feedback',{headers:{Cookie:cookie}});assert.equal(html.status,200);assert.ok((await html.text()).includes('Current · Combined demo'));
     for(const token of ['tampered',createAdminSessionToken('test-session-key',Date.now()-9*3600000)]) assert.equal((await fetch(base+'/admin/api/demo-feedback',{headers:{Cookie:`${ADMIN_COOKIE}=${token}`}})).status,401);
     const standalone=express();standalone.use(createDemoFeedbackAdminRouter({service}));const s=standalone.listen(0,'127.0.0.1');await once(s,'listening');assert.equal((await fetch(`http://127.0.0.1:${s.address().port}/`)).status,401);s.closeAllConnections();await new Promise(r=>s.close(r));
   });

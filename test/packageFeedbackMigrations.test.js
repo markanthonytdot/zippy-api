@@ -4,7 +4,8 @@ const crypto=require('node:crypto');
 const path=require('node:path');
 const {discoverMigrations,runMigrations,migrationChecksum}=require('../lib/migrations');
 const production=require('./fixtures/package-feedback-production-migrations.json');
-const migrations=discoverMigrations(path.join(__dirname,'../migrations'));
+// Freeze the original package upgrade; combined survey migration is independently tested.
+const migrations=discoverMigrations(path.join(__dirname,'../migrations')).slice(0,18);
 test('018 follows the freshly verified immutable production history 001–017',()=>{
   assert.deepEqual(migrations.slice(0,17).map(({filename,checksum})=>({filename,checksum})),production.migrations);
   assert.deepEqual(migrations.map(m=>m.version),Array.from({length:18},(_,i)=>i+1));assert.equal(migrations[17].filename,'018_package_demo_feedback.sql');
