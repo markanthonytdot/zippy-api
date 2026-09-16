@@ -39,7 +39,7 @@ test('validation segment uses matching rows and all booking-question respondents
 
 test('019 is additive and preserves the deployed 001–018 checksums', () => {
   assert.deepEqual(migrations.slice(0, 18).map(({ filename, checksum }) => ({ filename, checksum })), production.migrations);
-  assert.deepEqual(migrations.map(m => m.version), Array.from({ length: 19 }, (_, i) => i + 1));
+  assert.deepEqual(migrations.slice(0, 19).map(m => m.version), Array.from({ length: 19 }, (_, i) => i + 1));
   assert.equal(migrations[18].filename, '019_combined_demo_feedback.sql');
   assert.doesNotMatch(migrations[18].sql, /\b(?:alter|update|delete|truncate|insert|drop)\b/i);
 });
@@ -114,7 +114,7 @@ test('combined poll migration, PostgreSQL/HTTP, history and exports', { skip: !d
     const current = await read({ survey_version: version });
     assert.equal(current.overall.total, 32); assert.deepEqual(current.overall.validation, { count: 8, percent: 25, denominator: 32 });
     assert.equal(current.overall.booked.yes.percent, 50); assert.equal(current.overall.positive.percent, 50);
-    assert.deepEqual(current.totals, { all: 35, current: 32, free_text_v1: 1, multiple_choice_v2: 1, package_v1: 1 });
+    assert.deepEqual(current.totals, { all: 35, current: 0, combined_demo_v4: 0, combined_demo_v3: 32, free_text_v1: 1, multiple_choice_v2: 1, package_v1: 1 });
     for (const value of Object.values(current.overall.clarity)) assert.deepEqual(value, { count: 8, percent: 25 });
     for (const value of Object.values(current.overall.likelihoods)) assert.deepEqual(value, { count: 8, percent: 25 });
     for (const survey_version of ['free_text_v1', 'multiple_choice_v2']) { const report = await read({ survey_version }); assert.equal(report.overall.total, 1); assert.equal(report.rows[0].survey_version, survey_version); }

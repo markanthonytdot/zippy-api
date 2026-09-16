@@ -26,7 +26,7 @@ function harness(data) {
   form.elements = Object.fromEntries(['survey_version', 'source', 'likelihood', 'clarity', 'booked', 'recent', 'from', 'to', 'sort'].map(name => [name, new Element('select')]));
   form.elements.survey_version = nodes['#survey-version'];
   form.elements.source = nodes['#source'];
-  form.reset = () => { Object.values(form.elements).forEach(field => { field.value = ''; }); form.elements.survey_version.value = 'combined_demo_v3'; form.elements.sort.value = 'newest'; };
+  form.reset = () => { Object.values(form.elements).forEach(field => { field.value = ''; }); form.elements.survey_version.value = 'combined_demo_v4'; form.elements.sort.value = 'newest'; };
   form.reset(); form.elements.recent.disabled = true;
   class FormData { constructor(value) { this.values = Object.entries(value.elements).filter(([, field]) => !field.disabled).map(([name, field]) => [name, field.value]); } [Symbol.iterator]() { return this.values[Symbol.iterator](); } }
   class Option extends Element { constructor(label, value) { super('option', value); this.textContent = label; } }
@@ -43,7 +43,7 @@ function harness(data) {
 const values = ['Definitely', 'Probably', 'Probably not', 'Definitely not'];
 const stats = (counts, total) => Object.fromEntries(values.map((label, index) => [label, { count:counts[index], percent:total ? counts[index] / total * 100 : null }]));
 function current() {
-  return { surveyVersion:'combined_demo_v3', totals:{all:40,current:9,free_text_v1:10,multiple_choice_v2:12,package_v1:9}, overall:{ total:5, likelihoods:stats([2,2,1,0],5), positive:{count:4,percent:80}, clarity:Object.fromEntries(['Very clear','Somewhat clear','Not very clear','Not clear at all'].map((label,index)=>[label,{count:[2,2,1,0][index],percent:[40,40,20,0][index]}])), booked:{answered:5,yes:{count:4,percent:80},no:{count:1,percent:20}}, validation:{count:3,percent:60,denominator:5} }, sourceOptions:['family'], sources:[], rows:[{submitted_at:'2026-09-15T12:00:00Z',source:'family',clarity:'Very clear',use_likelihood:'Definitely',booked_travel_last_12_months:true}], page:1,pages:2 };
+  return { surveyVersion:'combined_demo_v4', totals:{all:40,current:9,free_text_v1:10,multiple_choice_v2:12,package_v1:9}, overall:{ total:5, likelihoods:stats([2,2,1,0],5), positive:{count:4,percent:80}, clarity:Object.fromEntries(['Very clear','Somewhat clear','Not very clear','Not clear at all'].map((label,index)=>[label,{count:[2,2,1,0][index],percent:[40,40,20,0][index]}])), booked:{answered:5,yes:{count:4,percent:80},no:{count:1,percent:20}}, validation:{count:3,percent:60,denominator:5} }, sourceOptions:['family'], sources:[], rows:[{submitted_at:'2026-09-15T12:00:00Z',source:'family',clarity:'Very clear',use_likelihood:'Definitely',booked_travel_last_12_months:true}], page:1,pages:2 };
 }
 function historical(version='multiple_choice_v2') {
   const result=current();
@@ -56,7 +56,7 @@ function historical(version='multiple_choice_v2') {
 
 test('current view uses an explicit version, separate totals and the full booking-answer denominator', async () => {
   const state=harness(current()); await tick();
-  assert.equal(new URL(state.calls[0].url,'http://local').searchParams.get('survey_version'),'combined_demo_v3');
+  assert.equal(new URL(state.calls[0].url,'http://local').searchParams.get('survey_version'),'combined_demo_v4');
   assert.equal(state.nodes['#feedback-results'].hidden,false);
   assert.match(state.nodes['#response-totals'].textContent,/40/);
   assert.match(state.nodes['#response-totals'].textContent,/9/);
@@ -66,10 +66,20 @@ test('current view uses an explicit version, separate totals and the full bookin
   assert.match(state.nodes['#validation-note'].textContent,/3 of 5/);
   assert.match(state.nodes['#validation-note'].textContent,/both Yes and No/);
   assert.equal(state.nodes['#comprehension-title'].textContent,'How clear is it what Zippi does?');
-  assert.match(state.nodes['#likelihood-title'].textContent,/planning your next trip\?/);
+  assert.match(state.nodes['#likelihood-title'].textContent,/travel website or app you already use/);
   assert.equal(state.nodes['#responses'].children[0].children.length,5);
   assert.match(state.nodes['#responses'].textContent,/Very clear Definitely Yes/);
   assert.equal(state.nodes['#shoppers-panel'].hidden,true);
+});
+
+test('v4 comments render as literal text and v3 retains its original wording', async () => {
+  const data=current(); data.comments=[{response_id:'response-1',comment:'<script>Keep this literal</script>\nSecond line',source:'test',submitted_at:'2026-09-15T12:00:00Z'},{comment:'   '}];data.commentCount=1;
+  const state=harness(data);await tick();
+  assert.equal(state.nodes['#comments-panel'].hidden,false);assert.equal(state.nodes['#comments'].children.length,1);
+  assert.match(state.nodes['#comments'].textContent,/<script>Keep this literal<\/script>/);assert.match(state.nodes['#comments'].textContent,/test · Response response-1/);
+  state.form.elements.survey_version.value='combined_demo_v3';state.data={...data,surveyVersion:'combined_demo_v3'};await state.form.elements.survey_version.trigger('change');
+  assert.match(state.nodes['#survey-title'].textContent,/Previous · Combined demo v3/);assert.match(state.nodes['#likelihood-title'].textContent,/planning your next trip\?/);assert.equal(state.nodes['#comments-panel'].hidden,true);assert.equal(state.form.elements.booked.disabled,false);
+  await state.nodes['#export'].trigger('click');assert.equal(new URL(state.calls.at(-1).url,'http://local').searchParams.get('survey_version'),'combined_demo_v3');
 });
 
 test('switching historical versions keeps earlier answers and exports separate from current questions', async () => {
@@ -94,7 +104,7 @@ test('switching historical versions keeps earlier answers and exports separate f
   state.form.elements.survey_version.value='multiple_choice_v2';state.data=historical();await state.form.elements.survey_version.trigger('change');
   assert.equal(state.nodes['#comprehension-panel'].hidden,false);assert.match(state.nodes['#responses'].textContent,/Original recorded choice/);
   state.data=current();await state.nodes['#reset-filters'].trigger('click');
-  assert.equal(new URL(state.calls.at(-1).url,'http://local').searchParams.get('survey_version'),'combined_demo_v3');
+  assert.equal(new URL(state.calls.at(-1).url,'http://local').searchParams.get('survey_version'),'combined_demo_v4');
   assert.equal(state.form.elements.recent.disabled,true);assert.equal(state.form.elements.booked.disabled,false);
 });
 
@@ -103,7 +113,7 @@ test('pagination and filters retain the chosen survey, and mismatched data fails
   state.form.elements.source.value='family';state.form.elements.booked.value='yes';await state.form.trigger('submit');
   await state.nodes['#next'].trigger('click');
   const query=new URL(state.calls.at(-1).url,'http://local').searchParams;
-  assert.equal(query.get('page'),'2');assert.equal(query.get('booked'),'yes');assert.equal(query.get('source'),'family');assert.equal(query.get('survey_version'),'combined_demo_v3');
+  assert.equal(query.get('page'),'2');assert.equal(query.get('booked'),'yes');assert.equal(query.get('source'),'family');assert.equal(query.get('survey_version'),'combined_demo_v4');
   state.data=historical();await state.form.trigger('submit');
   assert.equal(state.nodes['#feedback-results'].hidden,true);assert.equal(state.nodes['#export'].disabled,true);
   assert.match(state.nodes['#feedback-status'].textContent,/Survey version did not match/);

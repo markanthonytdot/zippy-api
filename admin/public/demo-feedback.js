@@ -4,8 +4,9 @@
   const status = document.querySelector('#feedback-status');
   const results = document.querySelector('#feedback-results');
   const exportButton = document.querySelector('#export');
-  const currentVersion = 'combined_demo_v3';
-  const versions = { combined_demo_v3:'Current · Combined demo', multiple_choice_v2:'Historical · Flight demo choice form', free_text_v1:'Historical · Flight demo original form' };
+  const currentVersion = 'combined_demo_v4';
+  const isCombined = version => ['combined_demo_v4', 'combined_demo_v3'].includes(version);
+  const versions = { combined_demo_v4:'Current · Combined demo v4', combined_demo_v3:'Previous · Combined demo v3', multiple_choice_v2:'Historical · Flight demo choice form', free_text_v1:'Historical · Flight demo original form' };
   const labels = ['Definitely', 'Probably', 'Probably not', 'Definitely not'];
   const clarityLabels = ['Very clear', 'Somewhat clear', 'Not very clear', 'Not clear at all'];
   const sourceLabels = { reddit:'Reddit', family:'Family', altalab:'AltaLab', direct:'Direct' };
@@ -29,7 +30,7 @@
     } else parent.append(el('p', value, 'answer-text'));
   }
   function setFilterMode() {
-    const current = form.elements.survey_version.value === currentVersion;
+    const current = isCombined(form.elements.survey_version.value);
     for (const [name, enabled] of [['clarity', current], ['booked', current], ['recent', !current]]) {
       document.querySelector(`#${name}-filter`).hidden = !enabled;
       form.elements[name].disabled = !enabled;
@@ -38,37 +39,41 @@
   }
   function render(data) {
     const current = data.surveyVersion === currentVersion;
+    const combined = isCombined(data.surveyVersion);
     const overall = data.overall;
     const totals = document.querySelector('#response-totals'); totals.replaceChildren();
     metric(totals, 'Total responses · all surveys', data.totals.all, 'All demo versions and historical package responses. Counts submissions, not unique people. Source and date filters only.');
-    metric(totals, 'Current survey responses', data.totals.current, 'Combined demo only. Source and date filters only.', true);
+    metric(totals, 'Current survey responses', data.totals.current, 'Combined demo v4 only. Source and date filters only.', true);
     document.querySelector('#survey-title').textContent = versions[data.surveyVersion];
     document.querySelector('#survey-note').textContent = current
-      ? 'Survey version: combined_demo_v3. The results below include only the current combined demo and reflect all active filters. Earlier question results remain in their own survey views.'
+      ? 'Survey version: combined_demo_v4. These results include only the current survey within all active filters. Previous versions retain their original questions and answers.'
+      : combined ? 'Survey version: combined_demo_v3. Previous combined demo, with its original question wording and submitted answers preserved. These responses are separate from v4.'
       : `Survey version: ${data.surveyVersion}. These are earlier flight-demo responses, kept separate from the current survey. Exact question wording was not saved with each response; the likelihood wording changed without a version boundary, so its exact wording cannot be attributed to individual historical answers.`;
     const summary = document.querySelector('#summary'); summary.replaceChildren();
-    metric(summary, current ? 'Current responses · filtered' : 'Historical responses · filtered', overall.total, 'Selected survey, matching all active filters');
+    metric(summary, current ? 'Current responses · filtered' : combined ? 'Previous responses · filtered' : 'Historical responses · filtered', overall.total, 'Selected survey, matching all active filters');
     metric(summary, 'Definitely + Probably', percent(overall.positive.percent), `${overall.positive.count} responses in the selected survey`, true);
     document.querySelector('#comprehension-panel').hidden = data.surveyVersion === 'free_text_v1';
-    document.querySelector('#booked-panel').hidden = !current;
-    document.querySelector('#validation-panel').hidden = !current;
-    document.querySelector('#shoppers-panel').hidden = current;
+    document.querySelector('#booked-panel').hidden = !combined;
+    document.querySelector('#validation-panel').hidden = !combined;
+    document.querySelector('#shoppers-panel').hidden = combined;
     document.querySelector('#likelihood-title').textContent = current
-      ? 'Based on what you saw, how likely would you be to use Zippi when planning your next trip?'
+      ? 'If this feature were available on a travel website or app you already use, how likely would you be to use it?'
+      : combined ? 'Based on what you saw, how likely would you be to use Zippi when planning your next trip?'
       : 'Earlier likelihood responses';
-    document.querySelector('#likelihood-note').textContent = `${overall.total} responses in the selected survey, within the active filters.${current ? '' : ' Historical wording is not reliably attributable to individual responses.'}`;
+    document.querySelector('#likelihood-note').textContent = `${overall.total} responses in the selected survey, within the active filters.${combined ? '' : ' Historical wording is not reliably attributable to individual responses.'}`;
     breakdown('#likelihood-breakdown', labels.map(label => [label, overall.likelihoods[label]]));
-    if (current) {
+    if (combined) {
       document.querySelector('#comprehension-title').textContent = 'How clear is it what Zippi does?';
-      document.querySelector('#comprehension-note').textContent = `Percentages use ${overall.total} current-survey responses within the active filters.`;
+      document.querySelector('#comprehension-note').textContent = `Percentages use ${overall.total} selected-survey responses within the active filters.`;
       breakdown('#comprehension-breakdown', clarityLabels.map(label => [label, overall.clarity[label]]));
-      document.querySelector('#booked-note').textContent = `${overall.booked.answered} current-survey responses answered this question within the active filters.`;
+      document.querySelector('#booked-note').textContent = `${overall.booked.answered} selected-survey responses answered this question within the active filters.`;
       breakdown('#booked-breakdown', [['Yes', overall.booked.yes], ['No', overall.booked.no]]);
+      document.querySelector('#validation-definition').textContent = 'Answered Yes to booking travel in the last 12 months and Definitely or Probably to ' + (current ? 'using this feature on a travel website or app already used.' : 'using Zippi when planning the next trip.');
       const validation = document.querySelector('#validation'); validation.replaceChildren();
       for (const [label, value] of [['Responses', overall.validation.count], ['Of booking-question answers', percent(overall.validation.percent)]]) {
         const item = el('div'); item.append(el('strong', value), el('span', label)); validation.append(item);
       }
-      document.querySelector('#validation-note').textContent = `${overall.validation.count} of ${overall.validation.denominator} current-survey respondents who answered the booking question, within all active filters. The denominator includes both Yes and No answers.`;
+      document.querySelector('#validation-note').textContent = `${overall.validation.count} of ${overall.validation.denominator} selected-survey respondents who answered the booking question, within all active filters. The denominator includes both Yes and No answers.`;
     } else {
       const comprehension = overall.comprehension;
       document.querySelector('#comprehension-title').textContent = 'Earlier understanding of Zippi';
@@ -81,6 +86,18 @@
         const item = el('div'); item.append(el('strong', value), el('span', label)); shoppers.append(item);
       }
     }
+    document.querySelector('#comments-panel').hidden = !current;
+    const comments = document.querySelector('#comments'); comments.replaceChildren();
+    if (current) {
+      const written = (data.comments || []).filter(row => typeof row.comment === 'string' && row.comment.trim());
+      document.querySelector('#comments-note').textContent = `${data.commentCount || 0} nonblank comments within the active filters. Showing ${written.length} on response page ${data.page} of ${data.pages}; use the response pagination below to see more. Times shown in your local timezone.`;
+      for (const row of written) {
+        const item = el('article');
+        item.append(el('p', row.comment, 'answer-text'), el('p', `${new Date(row.submitted_at).toLocaleString()} · ${sourceName(row.source)} · Response ${row.response_id}`, 'comment-meta'));
+        comments.append(item);
+      }
+      if (!written.length) comments.append(el('p', 'No written feedback on this response page.'));
+    }
     const sources = document.querySelector('#sources'); sources.replaceChildren();
     if (!data.sources.length) sources.append(el('p', 'No matching responses yet.'));
     for (const source of data.sources) {
@@ -92,7 +109,7 @@
     sourceSelect.replaceChildren(new Option('All sources', ''));
     for (const source of [...new Set([...data.sourceOptions, selected].filter(Boolean))]) sourceSelect.add(new Option(sourceName(source), source));
     sourceSelect.value = selected;
-    const names = current
+    const names = combined
       ? ['Date / time', 'Source', 'Zippi clarity', 'Likelihood to use Zippi', 'Booked travel in last 12 months']
       : ['Date / time', 'Source', 'Earlier comprehension / own words', 'Earlier likelihood', 'Earlier written response', 'Earlier recent flight shopper'];
     const headings = document.querySelector('#response-headings'); headings.replaceChildren();
@@ -100,15 +117,15 @@
     const tbody = document.querySelector('#responses'); tbody.replaceChildren();
     for (const row of data.rows) {
       const tr = el('tr');
-      const values = current
+      const values = combined
         ? [new Date(row.submitted_at).toLocaleString(), sourceName(row.source), row.clarity, row.use_likelihood, row.booked_travel_last_12_months ? 'Yes' : 'No']
         : [new Date(row.submitted_at).toLocaleString(), sourceName(row.source), '', row.likelihood, row.additional_comments || '—', row.recent_flight_shopper ? 'Yes' : 'No'];
       values.forEach((value, index) => {
         const td = el('td'); td.dataset.label = names[index];
-        if (!current && index === 2) {
+        if (!combined && index === 2) {
           td.append(el('p', overall.comprehension.choices[row.comprehension_choice]?.label || 'Choice question not asked (original form)', 'choice-description'));
           if (row.own_words) { td.append(el('p', 'Earlier own-words response', 'answer-caption')); answer(td, row.own_words); }
-        } else if (!current && index === 4) {
+        } else if (!combined && index === 4) {
           td.append(el('p', row.comprehension_choice ? 'Earlier additional comments' : 'Earlier reason for likelihood answer', 'answer-caption'));
           answer(td, value);
         } else td.textContent = value;
