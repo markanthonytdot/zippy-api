@@ -872,6 +872,9 @@ const dbPool = process.env.DATABASE_URL
 
 const demoFeedbackService = process.env.ZIPPI_DEMO_FEEDBACK_ENABLED === "true"
   ? createDemoFeedbackService({ dbPool, secret: JWT_SECRET }) : null;
+if (demoFeedbackService) app.use("/v1/partner-feedback", require("./lib/partnerFeedback").createPartnerFeedbackRouter({
+  dbPool, allowedOrigins: process.env.DEMO_FEEDBACK_CORS_ORIGINS,
+}));
 if (demoFeedbackService) app.use("/v1/demo-feedback", createDemoFeedbackPublicRouter({
   service: demoFeedbackService, allowedOrigins: process.env.DEMO_FEEDBACK_CORS_ORIGINS,
 }));
