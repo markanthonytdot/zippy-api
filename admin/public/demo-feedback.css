@@ -66,3 +66,7 @@ button:disabled { opacity:.5; cursor:default; }
   #response-totals { grid-template-columns:1fr; }
   .comprehension-breakdown>div { gap:10px; }
 }
+
+.feedback-comments article { margin-top:18px; padding-top:18px; border-top:1px solid var(--line); overflow-wrap:anywhere; }
+.feedback-comments .answer-text { line-height:1.7; }
+.comment-meta { color:var(--muted); font-size:12px; line-height:1.6; margin:10px 0 0; }

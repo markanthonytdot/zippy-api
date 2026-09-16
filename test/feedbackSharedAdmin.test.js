@@ -70,10 +70,10 @@ test('remote reports and CSV preserve explicit current and historical survey fil
  const app=express();app.use((req,_res,next)=>{req.zippiAdmin={actor:'local-test'};next();});app.use('/api',remote.router);
  const server=app.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>{server.closeAllConnections();return new Promise(r=>server.close(r));});
  const base=`http://127.0.0.1:${server.address().port}`;
- for(const route of ['demo-feedback','demo-feedback/export.csv']){
-  const query=new URLSearchParams({survey_version:'combined_demo_v3',clarity:'Very clear',booked:'yes',likelihood:'Probably',source:'family'});
+ for(const survey of ['combined_demo_v4','combined_demo_v3'])for(const route of ['demo-feedback','demo-feedback/export.csv']){
+  const query=new URLSearchParams({survey_version:survey,clarity:'Very clear',booked:'yes',likelihood:'Probably',source:'family'});
   const response=await fetch(`${base}/api/${route}?${query}`);assert.equal(response.status,200);await response.text();
-  const passed=new URL(forwarded.at(-1).url);assert.equal(passed.searchParams.get('survey_version'),'combined_demo_v3');assert.equal(passed.searchParams.get('clarity'),'Very clear');assert.equal(passed.searchParams.get('booked'),'yes');
+  const passed=new URL(forwarded.at(-1).url);assert.equal(passed.searchParams.get('survey_version'),survey);assert.equal(passed.searchParams.get('clarity'),'Very clear');assert.equal(passed.searchParams.get('booked'),'yes');
  }
  for(const survey of ['free_text_v1','multiple_choice_v2'])assert.equal((await fetch(`${base}/api/demo-feedback?survey_version=${survey}`)).status,200);
  assert.equal((await fetch(base+'/api/demo-feedback')).status,200);assert.equal(new URL(forwarded.at(-1).url).searchParams.has('survey_version'),false);
