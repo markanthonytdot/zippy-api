@@ -54,27 +54,34 @@ and [polyfill source](https://github.com/js-temporal/temporal-polyfill).
 
 Captured schedules are evidence, not live availability or bookable fare quotes.
 
-On the original 9feb1c8-based candidate, 187 API tests passed with three opt-in
-PostgreSQL suites skipped. On this current-staging-based candidate, the full suite
-reports **318 passed, four failed at the missing local database prerequisite,
-and four skipped** (326 total). The four failures are the unchanged
-`partnerAccessAdjustment.test.js` cases requiring `PARTNER_TEST_DATABASE_URL`;
-three other database suites and the optional shared-feedback-admin integration
-remain skipped. Tests were not weakened to hide the missing prerequisite.
+The final current-staging-based API gate passed **402/402 tests, zero failures
+and zero skips**, including the four PostgreSQL lifecycle suites and shared
+feedback-admin integration. The earlier missing-database failures are resolved.
+Tests were not weakened or skipped to close that gate.
 
-Existing PostgreSQL 17 binaries are installed, but no server responds on local
-ports 5432/55432, the documented temporary fixture is absent, and no test URI is
-configured. No cluster, role, credential or schema was created. Installed Node
-dependencies were reused through a temporary local link after verifying the
-lockfile is identical to the previously tested candidate; no new install occurred.
+With explicit local fixture authorization, the installed PostgreSQL 17.11 tools
+created a dedicated task-local cluster, bound only to `127.0.0.1:55432` and its
+task-local socket directory. The fixture uses synthetic rows and mocked external
+delivery/provider services. Both `PARTNER_TEST_DATABASE_URL` and
+`FEEDBACK_AUTH_TEST_DATABASE_URL` pointed only to this fixture. The reviewed local
+feedback source at `0c56c33c002bc94683f75679806aefcefa0e0a65` supplied its existing
+migrations through `FEEDBACK_API_TEST_ROOT`; no remote database was accessed.
+Synthetic schemas were removed and this fixture server was stopped afterward.
+No global database, hosted schema, system service or credential was changed.
+Existing Node dependencies were reused through a temporary local link; no new
+install occurred. The link is removed from the review checkout after validation.
 
 The 200-offer replay against this exact staging base still verifies 380 outbound
 legs and 180 layovers and exact legacy-field/ranking compatibility. The replay's
-Web snapshot is 493,102 bytes, below the existing 4 MiB limit. Unchanged Web
-`558e850` has 265 passing tests including its local gateway-to-map seam. Its build
-and validators previously passed. Native compatibility is source/contract
-inspection, not an iOS/Android runtime acceptance claim. The full API release gate
-is not green until the local PostgreSQL coverage can run.
+Web snapshot is 493,102 bytes, below the existing 4 MiB limit. The Web successor
+to `558e850` adds the separately authorized staging QA client/transport. Its
+1,931 selected regressions passed; the unchanged exhaustive Graph comparison
+was not selected. After the last client refinements, 41 focused tests passed,
+including 11 QA tests. Asset build, site/flight/hotel validators and staging
+guard checks passed. Deployment guards passed 61 tests, with four optional real
+Wrangler probes skipped. No live authenticated QA or native browser execution
+is claimed. Native compatibility remains source/contract inspection, not an
+iOS/Android runtime acceptance claim.
 
 ## Staged rollout and recovery — review required before execution
 
@@ -92,18 +99,22 @@ is not green until the local PostgreSQL coverage can run.
    gate. Do not deploy the entire unrelated local branch history by assumption.
    This local source preparation is complete on `b852e822`; recheck for drift
    before release. There is no new migration or secret/price/provider-setting
-   change. Full testing still needs the dedicated local database prerequisite.
+   change. The dedicated local database gate is now complete: 402/402 passed.
 3. With separate deployment approval, release the API additions to that isolated
    staging target first. Verify raw offers/customer pricing compatibility and fresh
    normalized timing fields. Keep the preceding API release identity for rollback.
-4. Review a staging-only flight authentication/routing design before any Web
-   switch. The existing global base routes hotels too; it must not be repointed
-   for a narrow timing test. The current API returned anonymous flight access
-   `401 partner_access_required`, and Web sends no bearer token. Existing user
-   JWT auth is supported; a machine flight-read capability is not implemented.
-   No gate may be disabled and no reviewer/feedback/ancillary token repurposed.
-   Prepare/test the separately approved flight-only access design, then build
-   and run its staging-only guard before an approved upload.
+4. Review the prepared staging-only flight QA design before any Web switch.
+   Its private loopback client uses an existing authorized Partner staging
+   session, keeps the bearer outside browser storage and forwards flight reads
+   only to the fixed isolated staging API. The Worker verifies current access
+   per marked request and pins fresh trip/cache state to an opaque authority.
+   No credential or permission is created, no gate is disabled, and no
+   reviewer/feedback/ancillary token is repurposed. Denials fail closed without
+   production fallback; existing quote/checkout entitlement is preserved.
+   The general API base and all hotel routing remain unchanged. The proposed
+   Web `ZIPPI_WEB_FLIGHT_QA=on` flag exists only in the local candidate; it has
+   not been applied remotely. Local authentication/forwarding tests and the
+   staging guard pass. A real existing QA session has not been supplied or used.
    Production routes/services must remain unchanged. Retain Web staging version
    `3ca2d5a0-003b-429b-8234-21c3fed51e5d` as the recovery version.
 5. Use fresh QA sessions (existing snapshots expire after five minutes) to check
