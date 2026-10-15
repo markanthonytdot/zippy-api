@@ -1,0 +1,166 @@
+{
+  "source": "Expected legacy contract from 9feb1c8. Captured schedule; price, passenger identity and baggage are synthetic compatibility-test data, not a fare.",
+  "raw": [
+    {
+      "id": "synthetic-fare-captured-schedule",
+      "total_amount": "100.00",
+      "total_currency": "CAD",
+      "passengers": [
+        {
+          "id": "test-passenger"
+        }
+      ],
+      "slices": [
+        {
+          "duration": "PT5H34M",
+          "segments": [
+            {
+              "departing_at": "2026-12-01T17:13:00",
+              "arriving_at": "2026-12-01T19:13:00",
+              "duration": "PT2H",
+              "origin": {
+                "iata_code": "YYZ",
+                "time_zone": "America/Toronto"
+              },
+              "destination": {
+                "iata_code": "DCA",
+                "time_zone": "America/New_York"
+              },
+              "passengers": [
+                {
+                  "baggages": [
+                    {
+                      "type": "checked",
+                      "quantity": 1
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "departing_at": "2026-12-01T19:59:00",
+              "arriving_at": "2026-12-01T22:47:00",
+              "duration": "PT2H48M",
+              "origin": {
+                "iata_code": "DCA",
+                "time_zone": "America/New_York"
+              },
+              "destination": {
+                "iata_code": "MIA",
+                "time_zone": "America/New_York"
+              },
+              "passengers": [
+                {
+                  "baggages": [
+                    {
+                      "type": "checked",
+                      "quantity": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "contractVersion": 1,
+    "rankingMethod": "weighted-value-v1",
+    "rankingCurrency": "CAD",
+    "customerPricing": null,
+    "rankingAvailability": {
+      "best": true,
+      "cheapest": true,
+      "fastest": true
+    },
+    "offers": [
+      {
+        "id": "synthetic-fare-captured-schedule",
+        "totalAmount": "100.00",
+        "totalCurrency": "CAD",
+        "passengerCount": 1,
+        "slices": [
+          {
+            "durationMinutes": 334,
+            "segments": [
+              {
+                "departingAt": "2026-12-01T17:13:00",
+                "arrivingAt": "2026-12-01T19:13:00",
+                "origin": {
+                  "iataCode": "YYZ",
+                  "iataCityCode": "",
+                  "name": ""
+                },
+                "destination": {
+                  "iataCode": "DCA",
+                  "iataCityCode": "",
+                  "name": ""
+                },
+                "marketingCarrier": {
+                  "name": ""
+                },
+                "operatingCarrier": {
+                  "name": ""
+                },
+                "marketingCarrierFlightNumber": "",
+                "operatingCarrierFlightNumber": ""
+              },
+              {
+                "departingAt": "2026-12-01T19:59:00",
+                "arrivingAt": "2026-12-01T22:47:00",
+                "origin": {
+                  "iataCode": "DCA",
+                  "iataCityCode": "",
+                  "name": ""
+                },
+                "destination": {
+                  "iataCode": "MIA",
+                  "iataCityCode": "",
+                  "name": ""
+                },
+                "marketingCarrier": {
+                  "name": ""
+                },
+                "operatingCarrier": {
+                  "name": ""
+                },
+                "marketingCarrierFlightNumber": "",
+                "operatingCarrierFlightNumber": ""
+              }
+            ]
+          }
+        ],
+        "totalDurationMinutes": 334,
+        "baggage": {
+          "minimumCheckedPerTraveler": 1,
+          "minimumCabinCarryOnPerTraveler": 0,
+          "minimumPersonalItemsPerTraveler": 0,
+          "complete": true,
+          "heterogeneous": false
+        },
+        "cabinClass": "",
+        "fareBrandName": "",
+        "conditions": null,
+        "customerPricing": null,
+        "rankingEligibility": {
+          "best": true,
+          "cheapest": true,
+          "fastest": true
+        }
+      }
+    ],
+    "rankings": {
+      "best": [
+        "synthetic-fare-captured-schedule"
+      ],
+      "cheapest": [
+        "synthetic-fare-captured-schedule"
+      ],
+      "fastest": [
+        "synthetic-fare-captured-schedule"
+      ]
+    }
+  }
+}
