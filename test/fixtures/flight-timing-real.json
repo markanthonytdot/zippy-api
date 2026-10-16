@@ -1,0 +1,35 @@
+{
+  "source": "Existing shared Zippi API POST /v1/flights/search; supplier-shaped and normalized fields from the same HTTP 201 response. Search schedules only, not availability or booking confirmation.",
+  "checkedAt": "2026-10-15T20:30:57.703Z",
+  "slice": {
+    "duration": "PT5H34M",
+    "segments": [
+      {
+        "departing_at": "2026-12-01T17:13:00",
+        "arriving_at": "2026-12-01T19:13:00",
+        "duration": "PT2H",
+        "origin": {
+          "iata_code": "YYZ",
+          "time_zone": "America/Toronto"
+        },
+        "destination": {
+          "iata_code": "DCA",
+          "time_zone": "America/New_York"
+        }
+      },
+      {
+        "departing_at": "2026-12-01T19:59:00",
+        "arriving_at": "2026-12-01T22:47:00",
+        "duration": "PT2H48M",
+        "origin": {
+          "iata_code": "DCA",
+          "time_zone": "America/New_York"
+        },
+        "destination": {
+          "iata_code": "MIA",
+          "time_zone": "America/New_York"
+        }
+      }
+    ]
+  }
+}
